@@ -234,21 +234,6 @@
                     </div>
                 </div>
 
-                <!-- Arr Instances -->
-                <div class="card bg-base-100 shadow-xl">
-                    <div class="card-body p-4">
-                        <h3 class="card-title text-base">
-                            <i class="bi bi-link-45deg text-success"></i>
-                            Arr Instances
-                        </h3>
-                        <div class="mt-2">
-                            <div class="text-xs text-base-content/70">Connected</div>
-                            <div class="font-bold text-success text-xl" id="arrs-count">-</div>
-                        </div>
-                        <div class="flex flex-wrap gap-1 mt-2" id="arrs-list"></div>
-                    </div>
-                </div>
-
                 <!-- Repair Stats -->
                 <div class="card bg-base-100 shadow-xl">
                     <div class="card-body p-4">
@@ -274,6 +259,29 @@
                                 <div class="font-bold text-error" id="repair-failed">-</div>
                             </div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- Hearsay Stats -->
+                <div class="card bg-base-100 shadow-xl">
+                    <div class="card-body p-4">
+                        <h3 class="card-title text-base">
+                            <i class="bi bi-broadcast text-primary"></i>
+                            Hearsay
+                            <span class="badge badge-ghost badge-sm ml-auto" id="hearsay-state">-</span>
+                        </h3>
+                        <div class="grid grid-cols-2 gap-2 mt-2">
+                            <div>
+                                <div class="text-xs text-base-content/70">Sources found</div>
+                                <div class="font-bold text-info" id="hearsay-feeds">-</div>
+                            </div>
+                            <div>
+                                <div class="text-xs text-base-content/70">Connected peers</div>
+                                <div class="font-bold text-success" id="hearsay-peers">-</div>
+                            </div>
+                        </div>
+                        <div class="text-xs text-base-content/70 mt-2 font-mono truncate" id="hearsay-identity"
+                             title="Your public key. Share it so others can follow you."></div>
                     </div>
                 </div>
             </div>
@@ -1286,17 +1294,25 @@
                 document.getElementById('queue-pending').textContent = formatNumber(stats.queue.pending || 0);
             }
 
-            // Arr instances
-            if (stats.arrs) {
-                document.getElementById('arrs-count').textContent = formatNumber(stats.arrs.count || 0);
-                const arrsList = document.getElementById('arrs-list');
-                if (stats.arrs.names && stats.arrs.names.length > 0) {
-                    arrsList.innerHTML = stats.arrs.names.map(name =>
-                        `<span class="badge badge-outline">${name}</span>`
-                    ).join('');
+            // Hearsay stats
+            {
+                const h = stats.hearsay || {};
+                const state = document.getElementById('hearsay-state');
+                if (!h.enabled) {
+                    state.textContent = 'Off';
+                    state.className = 'badge badge-ghost badge-sm ml-auto';
+                } else if (h.publish) {
+                    state.textContent = 'Sharing';
+                    state.className = 'badge badge-success badge-sm ml-auto';
                 } else {
-                    arrsList.innerHTML = '<span class="text-base-content/50 text-sm">No Arr instances configured</span>';
+                    state.textContent = 'Receive only';
+                    state.className = 'badge badge-info badge-sm ml-auto';
                 }
+                const feeds = Object.values(h.feeds || {}).reduce((a, b) => a + b, 0);
+                const peers = (h.transport?.torrents || []).reduce((a, t) => a + (t.active_peers || 0), 0);
+                document.getElementById('hearsay-feeds').textContent = h.enabled ? formatNumber(feeds) : '-';
+                document.getElementById('hearsay-peers').textContent = h.enabled ? formatNumber(peers) : '-';
+                document.getElementById('hearsay-identity').textContent = h.identity || '';
             }
 
             // Repair stats

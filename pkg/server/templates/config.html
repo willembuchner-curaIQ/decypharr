@@ -53,6 +53,12 @@
                             <i class="bi bi-heart-pulse text-lg"></i>
                             <span class="hidden sm:inline">Repair</span>
                         </button>
+                        <button type="button"
+                                class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
+                                data-tab="hearsay">
+                            <i class="bi bi-broadcast text-lg"></i>
+                            <span class="hidden sm:inline">Hearsay</span>
+                        </button>
                     </nav>
                 </div>
 
@@ -1676,6 +1682,92 @@ fe80::/10</textarea>
                                        id="repair.skip_nzb_repair" name="repair.skip_nzb_repair">
                                 <span class="label-text font-medium">Skip NZB repair</span>
                             </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content hidden" data-tab-content="hearsay">
+                    <div class="space-y-6">
+                        <div class="alert alert-info">
+                            <i class="bi bi-info-circle text-lg"></i>
+                            <div class="text-sm">
+                                Hearsay lets Decypharr users help each other know which downloads are instantly
+                                available, before adding them. Your Decypharr shares what it already learned during
+                                normal use — nothing about your searches or what you watch is ever shared.
+                                <a href="https://docs.decypharr.com/guides/hearsay" target="_blank" rel="noopener"
+                                   class="link link-primary font-medium">Learn more</a>.
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="label cursor-pointer justify-start gap-3">
+                                <input type="checkbox" class="checkbox checkbox-lg checkbox-primary"
+                                       id="hearsay.enabled" name="hearsay.enabled" checked>
+                                <div>
+                                    <span class="label-text font-medium text-lg">Enable Hearsay</span>
+                                    <div class="label-text-alt">Decypharr uses what other users know to pick the
+                                        best provider for each download.
+                                    </div>
+                                </div>
+                            </label>
+                        </div>
+
+                        <div>
+                            <label class="label cursor-pointer justify-start gap-3">
+                                <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
+                                       id="hearsay.publish" name="hearsay.publish" checked>
+                                <div>
+                                    <span class="label-text font-medium">Share back</span>
+                                    <div class="label-text-alt">Help other users the same way they help you. Turn
+                                        off to only receive.
+                                    </div>
+                                </div>
+                            </label>
+                        </div>
+
+                        <div class="divider text-sm opacity-60">Advanced — the defaults work for everyone</div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                            <div>
+                                <label class="label" for="hearsay.port">
+                                    <span class="font-medium">Sharing port</span>
+                                </label>
+                                <input type="number" min="0" max="65535" class="input w-full" name="hearsay.port"
+                                       id="hearsay.port" placeholder="automatic">
+                                <span class="label-text-alt opacity-70">Leave empty. Set a fixed port only if you
+                                    forward ports in your router or firewall.</span>
+                            </div>
+                            <div>
+                                <label class="label" for="hearsay.gossip_port">
+                                    <span class="font-medium">Discovery port</span>
+                                </label>
+                                <input type="number" min="0" max="65535" class="input w-full"
+                                       name="hearsay.gossip_port" id="hearsay.gossip_port" placeholder="automatic">
+                                <span class="label-text-alt opacity-70">Leave empty. Same rule as the sharing
+                                    port.</span>
+                            </div>
+                            <div>
+                                <label class="label" for="hearsay.interval">
+                                    <span class="font-medium">Update every</span>
+                                </label>
+                                <input type="text" class="input w-full" name="hearsay.interval"
+                                       id="hearsay.interval" placeholder="30m">
+                                <span class="label-text-alt opacity-70">How often Decypharr sends and receives
+                                    updates.</span>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="label" for="hearsay.follow">
+                                <span class="font-medium">Trusted users
+                                    <span class="opacity-60 font-normal">(optional)</span>
+                                </span>
+                            </label>
+                            <textarea class="textarea w-full font-mono text-sm" rows="3" name="hearsay.follow"
+                                      id="hearsay.follow" placeholder="ed25519:a3f9..."></textarea>
+                            <span class="label-text-alt opacity-70">Paste keys from users you trust, one per line.
+                                Leave empty and Decypharr finds users by itself. Add keys and Decypharr uses
+                                only those users, and deletes snapshots from any user it found earlier.</span>
                         </div>
                     </div>
                 </div>

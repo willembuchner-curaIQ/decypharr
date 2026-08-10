@@ -658,7 +658,7 @@ func (r *RealDebrid) CheckStatus(t *types.Torrent) (*types.Torrent, error) {
 			return t, nil
 		} else if t.Status == types.TorrentStatusDownloading {
 			if !t.DownloadUncached {
-				return t, fmt.Errorf("torrent: %s not cached", t.Name)
+				return t, fmt.Errorf("torrent %s: %w", t.Name, customerror.TorrentNotCachedError)
 			}
 			return t, nil
 		} else {

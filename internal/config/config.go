@@ -275,6 +275,8 @@ type Config struct {
 
 	Repair RepairConfig `json:"repair,omitzero"`
 
+	Hearsay Hearsay `json:"hearsay,omitzero"`
+
 	// QueueCleanup is the global arr queue-cleanup policy (see CleanupQueue).
 	QueueCleanup QueueCleanup `json:"queue_cleanup"`
 }

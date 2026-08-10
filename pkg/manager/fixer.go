@@ -2,11 +2,13 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -262,6 +264,9 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 	// Check status
 	newDebridTorrent.DownloadUncached = false
 	newDebridTorrent, err = client.CheckStatus(newDebridTorrent)
+	if errors.Is(err, customerror.TorrentNotCachedError) {
+		f.manager.hearsay.ReportAdd(client.Config().Provider, entry.InfoHash, false)
+	}
 	if err != nil {
 		// Delete the failed entry
 		if newDebridTorrent != nil && newDebridTorrent.Id != "" {
@@ -269,6 +274,7 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 		}
 		return false, fmt.Errorf("failed to check status: %w", err)
 	}
+	f.manager.hearsay.ReportAdd(client.Config().Provider, entry.InfoHash, newDebridTorrent.Status == types.TorrentStatusDownloaded)
 
 	// Verify files have links
 	if len(newDebridTorrent.Files) == 0 {

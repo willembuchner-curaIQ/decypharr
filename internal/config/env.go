@@ -121,6 +121,8 @@ func (c *Config) applyEnvOverrides() {
 
 	c.applyUsenetEnvVars()
 
+	c.applyHearsayEnvVars()
+
 	// Arr applications array
 	for i := range 20 { // Support up to 20 arr applications
 		prefix := fmt.Sprintf("ARRS__%d__", i)

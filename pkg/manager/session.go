@@ -155,6 +155,13 @@ func (s *session) Read(p []byte) (int, error) {
 		n, err := s.body.Read(p)
 		s.stall.Stop()
 		s.stallCancel.Store(noopCancel)
+		if n > len(p) {
+			// Every consumer copies through a buffer sized to len(p); a body
+			// that over-reports makes them slice past it. Drop the body and
+			// report the violation rather than hand back a bogus count.
+			s.closeBodyLocked()
+			return 0, fmt.Errorf("stream body returned %d bytes for a %d-byte read", n, len(p))
+		}
 		s.pos += int64(n)
 
 		if n > 0 {

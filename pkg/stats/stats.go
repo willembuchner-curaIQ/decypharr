@@ -198,6 +198,8 @@ func (c *Collector) collect() *Snapshot {
 		}
 	}
 
+	snap.Hearsay = c.mgr.Hearsay().Status()
+
 	return snap
 }
 

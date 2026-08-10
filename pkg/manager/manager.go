@@ -20,6 +20,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/hearsay"
 	"github.com/sirrobot01/decypharr/pkg/manager/link"
 	"github.com/sirrobot01/decypharr/pkg/notifications"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -87,6 +88,9 @@ type Manager struct {
 
 	// Notifications service
 	Notifications *notifications.Service
+
+	// Hearsay network participation; nil when disabled.
+	hearsay *hearsay.Service
 }
 
 // New creates a new Manager instance
@@ -229,6 +233,14 @@ func (m *Manager) init() {
 
 	// Initialize notifications service
 	m.Notifications = notifications.New(&m.config.Notifications, m.logger)
+
+	// Initialize hearsay network participation (nil when disabled).
+	// Never blocks decypharr: a failure just means no participation.
+	if hs, err := hearsay.New(m.config, m.logger); err != nil {
+		m.logger.Warn().Err(err).Msg("Hearsay disabled: failed to initialize")
+	} else {
+		m.hearsay = hs
+	}
 
 	// Initialize repair service. It registers with the scheduler in StartWorker.
 	m.repair = NewRepair(m)
@@ -411,6 +423,14 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start manager worker: %w", err)
 	}
 
+	// Join the hearsay network. Failure is never fatal: local
+	// observations still work without network participation.
+	if m.hearsay != nil {
+		if err := m.hearsay.Start(ctx); err != nil {
+			m.logger.Warn().Err(err).Msg("Failed to start hearsay network participation")
+		}
+	}
+
 	// Close ready channel once, safe for multiple calls
 	m.readyOnce.Do(func() {
 		close(m.ready)
@@ -465,6 +485,8 @@ func (m *Manager) Stop() error {
 			m.logger.Warn().Err(err).Msg("Failed to close usenet")
 		}
 	}
+
+	m.hearsay.Close()
 
 	if m.repair != nil {
 		m.repair.Stop()

@@ -139,6 +139,33 @@ class ConfigManager {
 
         // Load repair config
         this.populateRepairSettings(config.repair, config.arrs);
+
+        // Load hearsay config
+        this.populateHearsaySettings(config.hearsay);
+    }
+
+    populateHearsaySettings(hearsay) {
+        const $ = (id) => document.getElementById(id);
+        const h = hearsay || {};
+        if ($('hearsay.enabled')) $('hearsay.enabled').checked = !h.disabled;
+        if ($('hearsay.publish')) $('hearsay.publish').checked = !h.no_publish;
+        if ($('hearsay.port')) $('hearsay.port').value = h.port || '';
+        if ($('hearsay.gossip_port')) $('hearsay.gossip_port').value = h.gossip_port || '';
+        if ($('hearsay.interval')) $('hearsay.interval').value = h.interval || '';
+        if ($('hearsay.follow')) $('hearsay.follow').value = (h.follow || []).join('\n');
+    }
+
+    collectHearsayConfig() {
+        const $ = (id) => document.getElementById(id);
+        return {
+            disabled: !($('hearsay.enabled')?.checked ?? true),
+            no_publish: !($('hearsay.publish')?.checked ?? true),
+            port: parseInt($('hearsay.port')?.value, 10) || 0,
+            gossip_port: parseInt($('hearsay.gossip_port')?.value, 10) || 0,
+            interval: $('hearsay.interval')?.value.trim() || '',
+            follow: ($('hearsay.follow')?.value || '')
+                .split('\n').map((k) => k.trim()).filter(Boolean),
+        };
     }
 
     populateRepairSettings(repair, arrs) {
@@ -1288,7 +1315,10 @@ class ConfigManager {
             notifications: this.collectNotificationsConfig(),
 
             // Collect repair config
-            repair: this.collectRepairConfig()
+            repair: this.collectRepairConfig(),
+
+            // Collect hearsay config
+            hearsay: this.collectHearsayConfig()
         };
     }
 

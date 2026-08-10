@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/hearsay"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 )
@@ -135,13 +137,25 @@ func (m *Manager) processNewNzb(parentCtx context.Context, entry *storage.Entry,
 	ctx, cancel := context.WithTimeout(parentCtx, m.usenetTimeout)
 	defer cancel()
 
+	// Derive the content identifier from the parsed groups. Process is
+	// what fills in metadata.Files, so hashing the NZB here would
+	// always see an empty list and produce no subject at all.
+	var hearsaySubject string
+	if m.hearsay != nil {
+		hearsaySubject = hearsay.NZBSubjectFromGroups(groups)
+	}
+
 	updatedNZB, err := m.usenet.Process(ctx, metadata, groups)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 			return fmt.Errorf("usenet processing timed out after %s: %w", m.usenetTimeout, err)
 		}
+		if errors.Is(err, customerror.UsenetSegmentMissingError) {
+			m.hearsay.ObserveNZB(hearsaySubject, false)
+		}
 		return fmt.Errorf("failed to process nzb: %w", err)
 	}
+	m.hearsay.ObserveNZB(hearsaySubject, true)
 
 	metadata = updatedNZB
 	return m.processNZB(ctx, entry, metadata)

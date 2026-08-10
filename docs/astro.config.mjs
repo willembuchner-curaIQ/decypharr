@@ -79,6 +79,7 @@ export default defineConfig({
                     items: [
                         {label: 'Sonarr & Radarr', link: '/guides/arrs'},
                         {label: 'Repair Worker', link: '/guides/repair'},
+                        {label: 'Hearsay', link: '/guides/hearsay'},
                     ],
                 },
                 {

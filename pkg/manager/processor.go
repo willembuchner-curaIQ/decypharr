@@ -419,6 +419,9 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 		return nil, fmt.Errorf("no debrid clients available")
 	}
 
+	// Try the provider most likely to already have this cached first.
+	clients = m.hearsay.RankClients(debridTorrent.InfoHash, clients)
+
 	errs := make([]error, 0, len(clients))
 
 	for _, db := range clients {
@@ -448,6 +451,9 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 		_logger.Info().Str("id", dbt.Id).Msgf("Entry: %s submitted to %s", dbt.Name, db.Config().Name)
 
 		torrent, err := db.CheckStatus(dbt)
+		if errors.Is(err, customerror.TorrentNotCachedError) {
+			m.hearsay.ReportAdd(db.Config().Provider, debridTorrent.InfoHash, false)
+		}
 		if err != nil && torrent != nil && torrent.Id != "" {
 			// Delete the torrent if it was not downloaded
 			go func(id string) {
@@ -462,6 +468,7 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 			errs = append(errs, fmt.Errorf("torrent %s returned nil after checking status", dbt.Name))
 			continue
 		}
+		m.hearsay.ReportAdd(db.Config().Provider, torrent.InfoHash, torrent.Status == debridTypes.TorrentStatusDownloaded)
 		return torrent, nil
 	}
 	if len(errs) == 0 {

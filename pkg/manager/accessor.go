@@ -8,6 +8,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/hearsay"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
@@ -20,6 +21,12 @@ func (m *Manager) SetMountManager(mountMgr MountManager) {
 // can rely on a non-nil value once the manager has been constructed.
 func (m *Manager) Repair() *Repair {
 	return m.repair
+}
+
+// Hearsay returns the hearsay service, or nil when disabled. A nil
+// service is safe to call.
+func (m *Manager) Hearsay() *hearsay.Service {
+	return m.hearsay
 }
 
 func (m *Manager) Scheduler() gocron.Scheduler {

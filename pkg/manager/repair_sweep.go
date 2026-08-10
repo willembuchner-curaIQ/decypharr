@@ -444,11 +444,13 @@ func (r *Repair) probeTorrentFile(ctx context.Context, entry *storage.Entry, fil
 	err := client.CheckFile(ctx, file.InfoHash, link)
 	if err == nil {
 		res.healthy = true
+		r.manager.hearsay.ObserveTorrent(client.Config().Provider, file.InfoHash, true)
 		return res
 	}
 	if errors.Is(err, customerror.HosterUnavailableError) {
 		res.broken = true
 		res.reason = "hoster_unavailable"
+		r.manager.hearsay.ObserveTorrent(client.Config().Provider, file.InfoHash, false)
 	} else {
 		res.reason = "provider_probe_error"
 	}
@@ -484,6 +486,7 @@ func (r *Repair) probeTorrentFileByUnrestrict(entry *storage.Entry, file *storag
 	downloadLink, err := client.GetDownloadLink(placement.ID, debridFile)
 	if err == nil && !downloadLink.Empty() {
 		res.healthy = true
+		r.manager.hearsay.ObserveTorrent(client.Config().Provider, file.InfoHash, true)
 		return res
 	}
 	if err == nil || errors.Is(err, debridTypes.EmptyDownloadLinkError) || errors.Is(err, customerror.HosterUnavailableError) {
@@ -493,6 +496,7 @@ func (r *Repair) probeTorrentFileByUnrestrict(entry *storage.Entry, file *storag
 		} else {
 			res.reason = "empty_download_link"
 		}
+		r.manager.hearsay.ObserveTorrent(client.Config().Provider, file.InfoHash, false)
 		return res
 	}
 	res.reason = "unrestrict_link_error"

@@ -31,3 +31,9 @@ var TooManyActiveDownloadsError = (&Error{
 	err:        errors.New("too many active downloads"),
 	Code:       "too_many_active_downloads",
 }).Retryable() // slot exhaustion is transient — retry after backoff
+
+var TorrentNotCachedError = &Error{
+	statusCode: 404,
+	err:        errors.New("torrent not cached"),
+	Code:       "torrent_not_cached",
+}
