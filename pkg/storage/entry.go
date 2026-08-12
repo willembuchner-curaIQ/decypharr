@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +14,8 @@ import (
 // AddOrUpdate adds or updates an entry
 func (s *Storage) AddOrUpdate(entry *Entry) error {
 	entry.UpdatedAt = time.Now()
+
+	s.assignFileIDs(entry)
 
 	// Handle name index
 	s.updateEntryItem(entry)
@@ -34,6 +38,44 @@ func (s *Storage) BatchAddOrUpdate(entries []*Entry) error {
 		}
 	}
 	return nil
+}
+
+// assignFileIDs gives every file a stable ID before it is persisted. Callers
+// often rebuild entries from provider responses, so IDs already persisted for
+// this infohash are carried over by filename; only genuinely new files get a
+// fresh ID.
+func (s *Storage) assignFileIDs(entry *Entry) {
+	missing := false
+	for _, f := range entry.Files {
+		if f.ID == "" {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		return
+	}
+	if existing, err := s.Get(entry.InfoHash); err == nil {
+		for name, f := range entry.Files {
+			if f.ID == "" {
+				if old, ok := existing.Files[name]; ok {
+					f.ID = old.ID
+				}
+			}
+		}
+	}
+	for _, f := range entry.Files {
+		if f.ID == "" {
+			f.ID = NewFileID()
+		}
+	}
+}
+
+// NewFileID returns a random stable file identifier.
+func NewFileID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // Exists checks if an entry exists

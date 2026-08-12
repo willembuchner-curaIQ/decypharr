@@ -57,7 +57,7 @@ func TestNewDirTracksCanonicalVirtualPath(t *testing.T) {
 	}
 }
 
-func TestRefreshExistingFileUpdatesRetainedInode(t *testing.T) {
+func TestRefreshExistingChildUpdatesRetainedInode(t *testing.T) {
 	initial := testRemoteFileInfo(t, 128, time.Now().Add(-time.Hour))
 	replacement := testRemoteFileInfo(t, 256, time.Now())
 	root := NewDir(nil, "", LevelRoot, 0, &mountconfig.FuseConfig{}, zerolog.Nop(), logger.NewRateLimitedLogger())
@@ -69,12 +69,9 @@ func TestRefreshExistingFileUpdatesRetainedInode(t *testing.T) {
 		t.Fatal("failed to add test child")
 	}
 
-	retained, retainedFile := root.refreshExistingFile("video.mkv", replacement)
+	retained := root.refreshExistingChild("video.mkv", replacement)
 	if retained != inode {
 		t.Fatal("lookup did not return the retained inode")
-	}
-	if retainedFile != file {
-		t.Fatal("lookup did not return the retained file operations")
 	}
 	if got := file.info.Load(); got != replacement {
 		t.Fatal("retained file metadata was not refreshed")
@@ -95,6 +92,45 @@ func TestRefreshExistingFileUpdatesRetainedInode(t *testing.T) {
 	}
 	if openSnapshot.Size != uint64(initial.Size()) {
 		t.Fatalf("open handle size = %d, want original size %d", openSnapshot.Size, initial.Size())
+	}
+}
+
+func TestRefreshExistingChildUpdatesRetainedDirModTime(t *testing.T) {
+	root := NewDir(nil, "", LevelRoot, 0, &mountconfig.FuseConfig{}, zerolog.Nop(), logger.NewRateLimitedLogger())
+	child := newDir(nil, "shows", "/shows", LevelTorrent, 100, &mountconfig.FuseConfig{}, zerolog.Nop(), logger.NewRateLimitedLogger())
+
+	fs.NewNodeFS(root, &fs.Options{})
+	inode := root.NewInode(context.Background(), child, root.childStableAttr("shows", fuse.S_IFDIR|0755))
+	if !root.AddChild("shows", inode, false) {
+		t.Fatal("failed to add test child")
+	}
+
+	var managerInstance manager.Manager
+	info := managerInstance.RootInfo()
+
+	retained := root.refreshExistingChild("shows", info)
+	if retained != inode {
+		t.Fatal("expected the retained directory inode")
+	}
+	if got, want := child.modTime.Load(), uint64(info.ModTime().Unix()); got != want {
+		t.Fatalf("retained dir modTime = %d, want %d", got, want)
+	}
+}
+
+func TestRefreshExistingChildRejectsKindMismatch(t *testing.T) {
+	initial := testRemoteFileInfo(t, 128, time.Now())
+	root := NewDir(nil, "", LevelRoot, 0, &mountconfig.FuseConfig{}, zerolog.Nop(), logger.NewRateLimitedLogger())
+	file := NewFile(nil, &mountconfig.FuseConfig{}, initial, logger.NewRateLimitedLogger())
+
+	fs.NewNodeFS(root, &fs.Options{})
+	inode := root.NewInode(context.Background(), file, root.childStableAttr("video.mkv", fuse.S_IFREG|0644))
+	if !root.AddChild("video.mkv", inode, false) {
+		t.Fatal("failed to add test child")
+	}
+
+	var managerInstance manager.Manager
+	if root.refreshExistingChild("video.mkv", managerInstance.RootInfo()) != nil {
+		t.Fatal("directory info must not refresh a retained file node")
 	}
 }
 
@@ -124,12 +160,12 @@ func testRemoteFileInfo(t *testing.T, size int64, addedOn time.Time) *manager.Fi
 	internalconfig.SetConfigPath(t.TempDir())
 	internalconfig.Reset()
 	managerInstance := manager.New()
-	defer func() {
+	t.Cleanup(func() {
 		if err := managerInstance.Stop(); err != nil {
 			t.Errorf("stop manager: %v", err)
 		}
 		internalconfig.Reset()
-	}()
+	})
 
 	entry := &storage.Entry{
 		Protocol: internalconfig.ProtocolTorrent,

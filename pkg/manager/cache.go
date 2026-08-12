@@ -90,8 +90,5 @@ func (e *EntryCache) Refresh() {
 	// Clear every group and torrent entry. This is deliberately independent of
 	// the current config so renamed/removed virtual folders cannot survive in the
 	// cache after a live update.
-	e.entries.Range(func(key string, _ EntryCacheItem) bool {
-		e.entries.Delete(key)
-		return true
-	})
+	e.entries.Clear()
 }

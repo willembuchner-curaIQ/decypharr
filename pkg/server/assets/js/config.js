@@ -56,6 +56,9 @@ class ConfigManager {
 
         const addRuleBtn = document.getElementById('addQueueCleanupRuleBtn');
         if (addRuleBtn) addRuleBtn.addEventListener('click', () => this.addQueueCleanupCustomRow());
+
+        const strmRegenerateBtn = document.getElementById('strmRegenerateBtn');
+        if (strmRegenerateBtn) strmRegenerateBtn.addEventListener('click', () => this.regenerateStrm());
     }
 
     // Display labels for the built-in queue-cleanup catalog. IDs MUST match
@@ -106,6 +109,7 @@ class ConfigManager {
         // Load general settings
         this.populateGeneralSettings(config);
         this.populateDownloadSettings(config);
+        this.populateStrmSettings(config.strm);
 
         // Load debrid configs
         if (config.debrids && Array.isArray(config.debrids)) {
@@ -242,6 +246,45 @@ class ConfigManager {
                 }
             }
         });
+    }
+
+    populateStrmSettings(strmConfig) {
+        if (!strmConfig) return;
+        document.querySelector('[name="strm_enabled"]').checked = strmConfig.enabled || false;
+        document.querySelector('[name="strm_path"]').value = strmConfig.path || '';
+        document.querySelector('[name="strm_delivery_mode"]').value = strmConfig.delivery_mode || 'proxy';
+        document.querySelector('[name="strm_sidecar_max_size"]').value = strmConfig.sidecar_max_size || '';
+        document.querySelector('[name="strm_keep_media_extension"]').checked = strmConfig.keep_media_extension || false;
+        document.querySelector('[name="strm_download_sidecars"]').checked = strmConfig.download_sidecars !== false;
+    }
+
+    collectStrmConfig() {
+        return {
+            enabled: document.querySelector('[name="strm_enabled"]')?.checked || false,
+            path: document.querySelector('[name="strm_path"]')?.value.trim() || '',
+            delivery_mode: document.querySelector('[name="strm_delivery_mode"]')?.value || 'proxy',
+            sidecar_max_size: document.querySelector('[name="strm_sidecar_max_size"]')?.value.trim() || '',
+            keep_media_extension: document.querySelector('[name="strm_keep_media_extension"]')?.checked || false,
+            download_sidecars: document.querySelector('[name="strm_download_sidecars"]')?.checked ?? true,
+        };
+    }
+
+    async regenerateStrm() {
+        const btn = document.getElementById('strmRegenerateBtn');
+        btn.disabled = true;
+        try {
+            const response = await window.decypharrUtils.fetcher('/api/strm/regenerate', {
+                method: 'POST',
+            });
+            if (!response.ok) {
+                throw new Error(await response.text());
+            }
+            window.decypharrUtils.createToast('STRM regeneration started in the background', 'success');
+        } catch (error) {
+            window.decypharrUtils.createToast(`STRM regenerate failed: ${error.message}`, 'error');
+        } finally {
+            btn.disabled = false;
+        }
     }
 
     populateNotificationSettings(notificationsConfig) {
@@ -1325,7 +1368,10 @@ class ConfigManager {
             notifications: this.collectNotificationsConfig(),
 
             // Collect repair config
-            repair: this.collectRepairConfig()
+            repair: this.collectRepairConfig(),
+
+            // Collect STRM config
+            strm: this.collectStrmConfig()
         };
     }
 

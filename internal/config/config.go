@@ -39,7 +39,6 @@ const (
 const (
 	DownloadActionSymlink  DownloadAction = "symlink"
 	DownloadActionDownload DownloadAction = "download"
-	DownloadActionStrm     DownloadAction = "strm"
 	DownloadActionNone     DownloadAction = "none"
 )
 
@@ -306,6 +305,8 @@ type Config struct {
 
 	Repair RepairConfig `json:"repair,omitzero"`
 
+	Strm Strm `json:"strm,omitzero"`
+
 	// QueueCleanup is the global arr queue-cleanup policy (see CleanupQueue).
 	QueueCleanup QueueCleanup `json:"queue_cleanup"`
 }
@@ -343,12 +344,19 @@ func (c *Config) loadConfig() error {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return fmt.Errorf("error parsing config JSON: %w", err)
 	}
+	hadStrmSecret := c.Strm.Secret != ""
 
 	// Set defaults for any missing values
 	c.setDefaults()
 
 	// Apply environment variable overrides
 	c.applyEnvOverrides()
+
+	// Persist a first-load generated STRM secret; signatures must survive
+	// restarts.
+	if !hadStrmSecret {
+		return c.Save()
+	}
 
 	return nil
 }
@@ -695,6 +703,7 @@ func (c *Config) setDefaults() {
 	c.setShareCacheDefaults()
 
 	c.applyRepairDefaults()
+	c.setStrmDefaults()
 }
 
 func (c *Config) applyRepairDefaults() {
@@ -781,6 +790,10 @@ func clearHotFields(c *Config) {
 	c.Retries = 0
 	c.SkipAutoMove = false
 	c.Repair = RepairConfig{}
+
+	// STRM settings are read live on every URL build, stream request, and
+	// reconciler pass; a config change triggers a resweep, not a restart.
+	c.Strm = Strm{}
 
 	// Queue cleanup rules are read live via config.Get() inside CleanupQueue,
 	// so changes apply on the next cleanup cycle without a restart.

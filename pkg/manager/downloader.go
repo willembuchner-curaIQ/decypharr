@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,11 +23,8 @@ import (
 )
 
 type Downloader struct {
-	manager   *Manager
-	strmURL   string
-	mountPath string
-	dest      string
-	logger    zerolog.Logger
+	manager *Manager
+	logger  zerolog.Logger
 }
 
 const (
@@ -54,24 +50,11 @@ type downloadLogMeta struct {
 	parts           int
 }
 
-// NewDownloadManager creates a new strm manager
+// NewDownloadManager creates a new download manager
 func NewDownloadManager(manager *Manager) *Downloader {
-	cfg := config.Get()
-	strmURL := cfg.AppURL
-	if strmURL == "" {
-		bindAddress := cfg.BindAddress
-		if bindAddress == "" {
-			bindAddress = "localhost"
-		}
-
-		strmURL = fmt.Sprintf("http://%s:%s", bindAddress, cfg.Port)
-	}
 	return &Downloader{
-		manager:   manager,
-		strmURL:   strmURL,
-		mountPath: cfg.Mount.MountPath,
-		logger:    manager.logger.With().Str("component", "downloader").Logger(),
-		dest:      cfg.DownloadFolder,
+		manager: manager,
+		logger:  manager.logger.With().Str("component", "downloader").Logger(),
 	}
 }
 
@@ -116,8 +99,6 @@ func (d *Downloader) process(entry *storage.Entry, mountPath string) error {
 		return d.processDownload(entry)
 	case config.DownloadActionSymlink:
 		return d.processSymlink(entry, mountPath)
-	case config.DownloadActionStrm:
-		return d.processStrm(entry)
 	case config.DownloadActionNone:
 		d.completeEntry(entry)
 		// Remove entry from queue
@@ -130,6 +111,7 @@ func (d *Downloader) process(entry *storage.Entry, mountPath string) error {
 
 func (d *Downloader) completeEntry(entry *storage.Entry) {
 	d.markAsCompleted(entry)
+	d.manager.strm.SyncEntryAsync(entry)
 	d.notifyCompleted(entry)
 	d.triggerArrRefresh(entry)
 }
@@ -660,41 +642,6 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 
 	d.completeEntry(entry)
 	d.logger.Info().Msgf("Downloaded all NZB files for %s", entry.Name)
-	return nil
-}
-
-// processStrm creates symlinks for torrent files
-func (d *Downloader) processStrm(torrent *storage.Entry) error {
-	files := torrent.GetActiveFiles()
-	d.logger.Info().Msgf("Creating .strm for %d files ...", len(files))
-
-	torrentSymlinkPath := torrent.DownloadPath()
-
-	// Create symlink directory
-	err := os.MkdirAll(torrentSymlinkPath, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("failed to create directory: %s: %v", torrentSymlinkPath, err)
-	}
-
-	for _, file := range files {
-		strmFilePath := filepath.Join(torrentSymlinkPath, file.Name+".strm")
-		streamURL, err := url.JoinPath(
-			d.strmURL,
-			"webdav",
-			"stream",
-			EntryAllFolder,
-			url.PathEscape(torrent.GetFolder()),
-			url.PathEscape(file.Name),
-		)
-		if err != nil {
-			continue
-		}
-		if err := os.WriteFile(strmFilePath, []byte(streamURL), 0644); err != nil {
-			return fmt.Errorf("failed to create .strm file: %s: %v", strmFilePath, err)
-		}
-	}
-	d.completeEntry(torrent)
-	d.logger.Info().Str("destination", torrentSymlinkPath).Msgf("Created .strm files for %s", torrent.Name)
 	return nil
 }
 

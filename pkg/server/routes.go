@@ -86,6 +86,9 @@ func (s *Server) WebRoutes() http.Handler {
 				r.Get("/download/{torrent}/{file}", s.handleDownloadFile)
 			})
 
+			// STRM reconciler
+			r.Post("/strm/regenerate", s.handleStrmRegenerate)
+
 			// Config/Auth
 			r.Get("/config", s.handleGetConfig)
 			r.Post("/config", s.handleUpdateConfig)
