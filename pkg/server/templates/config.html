@@ -87,7 +87,12 @@
                             <button type="button"
                                     class="subtab-button cursor-pointer py-2 px-4 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                     data-subtab="downloads">
-                                <i class="bi bi-download mr-2"></i>Downloads
+                                <i class="bi bi-download mr-2"></i>qBittorrent & SABnzbd
+                            </button>
+                            <button type="button"
+                                    class="subtab-button cursor-pointer py-2 px-4 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
+                                    data-subtab="strm">
+                                <i class="bi bi-play-circle mr-2"></i>STRM
                             </button>
                             <button type="button"
                                     class="subtab-button cursor-pointer py-2 px-4 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
@@ -251,10 +256,6 @@
 
                     <div class="subtab-panel hidden" data-subtab-group="general" data-subtab-panel="downloads">
                     <div class="space-y-6">
-                        <div class="divider">
-                            <span class="text-lg font-semibold">qBittorrent & SABnzbd</span>
-                        </div>
-
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                             <div>
                                 <label class="label" for="download_folder">
@@ -265,12 +266,31 @@
                                 <span class="text-sm opacity-70">Folder exposed to qBittorrent, SABnzbd, and Arr applications</span>
                             </div>
                             <div>
+                                <label class="label" for="default_download_action">
+                                    <span class="font-medium">Default Download Action</span>
+                                </label>
+                                <select class="select w-full" name="default_download_action"
+                                        id="default_download_action">
+                                    <option value="symlink">Create Symlink</option>
+                                    <option value="download">Download Files</option>
+                                    <option value="none">No Action</option>
+                                </select>
+                            </div>
+                            <div>
                                 <label class="label" for="refresh_interval">
                                     <span class="font-medium">Refresh Interval</span>
                                 </label>
                                 <input type="text" class="input w-full" name="refresh_interval"
                                        id="refresh_interval" placeholder="30s">
                                 <span class="text-sm opacity-70">How often active download status is refreshed</span>
+                            </div>
+                            <div>
+                                <label class="label" for="max_active_downloads">
+                                    <span class="font-medium">Maximum Active Downloads</span>
+                                </label>
+                                <input type="number" class="input w-full" name="max_active_downloads"
+                                       id="max_active_downloads" min="1" placeholder="5">
+                                <span class="text-sm opacity-70">Shared active limit for torrent and NZB downloads</span>
                             </div>
                             <div>
                                 <label class="label" for="removeStalledAfter">
@@ -309,31 +329,73 @@
                                 </label>
                             </div>
                         </div>
+                    </div>
+                    </div>
 
-                        <div class="divider">
-                            <span class="text-lg font-semibold">Downloader</span>
-                        </div>
-
-                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4" id="downloaderSection">
+                    <div class="subtab-panel hidden" data-subtab-group="general" data-subtab-panel="strm">
+                    <div class="space-y-6">
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4" id="strmSection">
                             <div>
-                                <label class="label" for="default_download_action">
-                                    <span class="font-medium">Default Download Action</span>
+                                <label class="label cursor-pointer justify-start gap-3">
+                                    <input type="checkbox" class="checkbox checkbox-primary"
+                                           name="strm_enabled" id="strm_enabled">
+                                    <div>
+                                        <span class="font-medium">Enable STRM</span>
+                                        <div class="label-text-alt">Keep a .strm file tree of the whole library, one folder per entry</div>
+                                    </div>
                                 </label>
-                                <select class="select w-full" name="default_download_action"
-                                        id="default_download_action">
-                                    <option value="symlink">Create Symlink</option>
-                                    <option value="strm">Create STRM Files</option>
-                                    <option value="download">Download Files</option>
-                                    <option value="none">No Action</option>
-                                </select>
                             </div>
                             <div>
-                                <label class="label" for="max_active_downloads">
-                                    <span class="font-medium">Maximum Active Downloads</span>
+                                <label class="label" for="strm_path">
+                                    <span class="font-medium">STRM Path</span>
                                 </label>
-                                <input type="number" class="input w-full" name="max_active_downloads"
-                                       id="max_active_downloads" min="1" placeholder="5">
-                                <span class="text-sm opacity-70">Shared active limit for torrent and NZB downloads</span>
+                                <input type="text" class="input w-full" name="strm_path"
+                                       id="strm_path" placeholder="/mnt/strm">
+                                <span class="text-sm opacity-70">Folder for the .strm tree. Decypharr owns this folder and adds/removes files to match the library</span>
+                            </div>
+                            <div>
+                                <label class="label" for="strm_delivery_mode">
+                                    <span class="font-medium">Delivery Mode</span>
+                                </label>
+                                <select class="select w-full" name="strm_delivery_mode" id="strm_delivery_mode">
+                                    <option value="proxy">Proxy (stream through Decypharr)</option>
+                                    <option value="redirect">Redirect (302 to provider link)</option>
+                                </select>
+                                <span class="text-sm opacity-70">Usenet entries always proxy</span>
+                            </div>
+                            <div>
+                                <label class="label" for="strm_sidecar_max_size">
+                                    <span class="font-medium">Sidecar Max Size</span>
+                                </label>
+                                <input type="text" class="input w-full" name="strm_sidecar_max_size"
+                                       id="strm_sidecar_max_size" placeholder="32MB">
+                                <span class="text-sm opacity-70">Subtitle/NFO files up to this size are downloaded next to the .strm</span>
+                            </div>
+                            <div>
+                                <label class="label cursor-pointer justify-start gap-3">
+                                    <input type="checkbox" class="checkbox checkbox-primary"
+                                           name="strm_keep_media_extension" id="strm_keep_media_extension">
+                                    <div>
+                                        <span class="font-medium">Keep Media Extension</span>
+                                        <div class="label-text-alt">Write Movie.mkv.strm instead of Movie.strm</div>
+                                    </div>
+                                </label>
+                            </div>
+                            <div>
+                                <label class="label cursor-pointer justify-start gap-3">
+                                    <input type="checkbox" class="checkbox checkbox-primary"
+                                           name="strm_download_sidecars" id="strm_download_sidecars" checked>
+                                    <div>
+                                        <span class="font-medium">Download Sidecars</span>
+                                        <div class="label-text-alt">Download subtitles and NFO files next to the .strm</div>
+                                    </div>
+                                </label>
+                            </div>
+                            <div class="lg:col-span-2">
+                                <button type="button" class="btn btn-outline" id="strmRegenerateBtn">
+                                    <i class="bi bi-arrow-repeat"></i> Regenerate STRM Files
+                                </button>
+                                <span class="text-sm opacity-70 block mt-1">Rebuilds the whole .strm tree in the background; progress is logged</span>
                             </div>
                         </div>
                     </div>
@@ -1817,6 +1879,7 @@ fe80::/10</textarea>
         const movedTabs = {
             downloads: ['general', 'downloads'],
             'virtual-folders': ['general', 'virtual-folders'],
+            strm: ['general', 'strm'],
             auth: ['general', 'auth'],
             notifications: ['general', 'notifications'],
             nfs: ['shares', 'nfs'],

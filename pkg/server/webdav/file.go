@@ -9,7 +9,6 @@ import (
 
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -23,9 +22,8 @@ var streamCopyBufPool = sync.Pool{
 	},
 }
 
-func (h *Handler) StreamResponse(entry *storage.Entry, info *manager.FileInfo, w http.ResponseWriter, r *http.Request) error {
-	size := info.Size()
-	start, end := h.getRange(info, r)
+func (h *Handler) StreamResponse(entry *storage.Entry, name string, size int64, w http.ResponseWriter, r *http.Request) error {
+	start, end := resolveRange(r.Header.Get("Range"), size)
 	if start < 0 {
 		start = 0
 	}
@@ -44,7 +42,7 @@ func (h *Handler) StreamResponse(entry *storage.Entry, info *manager.FileInfo, w
 		client = "Unknown"
 	}
 
-	stream, err := h.manager.OpenStream(r.Context(), entry, info.Name(), start, client)
+	stream, err := h.manager.OpenStream(r.Context(), entry, name, start, client)
 	if err != nil {
 		return customerror.NewError(err, http.StatusInternalServerError, "server.internal_error", false, false)
 	}
@@ -57,7 +55,7 @@ func (h *Handler) StreamResponse(entry *storage.Entry, info *manager.FileInfo, w
 	}
 
 	length := end - start + 1
-	w.Header().Set("Content-Type", utils.GetContentType(info.Name()))
+	w.Header().Set("Content-Type", utils.GetContentType(name))
 	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	w.Header().Set("Accept-Ranges", "bytes")
 	statusCode := http.StatusOK
@@ -76,10 +74,6 @@ func (h *Handler) StreamResponse(entry *storage.Entry, info *manager.FileInfo, w
 		return customerror.NewError(err, http.StatusInternalServerError, "server.internal_error", false, true)
 	}
 	return nil
-}
-
-func (h *Handler) getRange(info *manager.FileInfo, r *http.Request) (int64, int64) {
-	return resolveRange(r.Header.Get("Range"), info.Size())
 }
 
 // resolveRange maps a Range header to file-relative offsets (byte-ranged

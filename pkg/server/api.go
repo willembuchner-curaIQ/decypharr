@@ -5,6 +5,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -530,6 +531,11 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// them from the live config so auth isn't silently disabled on every save.
 	newConfig.UseAuth = currentConfig.UseAuth
 	newConfig.EnableWebdavAuth = currentConfig.EnableWebdavAuth
+	// The frontend never sends the STRM signing secret; a save must not
+	// rotate it (rotation would invalidate every written .strm file).
+	if newConfig.Strm.Secret == "" {
+		newConfig.Strm.Secret = currentConfig.Strm.Secret
+	}
 
 	// Filter out empty or incomplete arrs
 	validArrs := make([]config.Arr, 0, len(newConfig.Arrs))
@@ -551,6 +557,12 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A base-URL or STRM settings change moves the desired content of every
+	// .strm file; resweep after the new config is live. Save has already
+	// normalized newConfig, so the comparison sees defaults on both sides.
+	strmChanged := currentConfig.AppURL != newConfig.AppURL ||
+		!reflect.DeepEqual(currentConfig.Strm, newConfig.Strm)
+
 	// Only restart when a field that needs it actually changed (HTTP bind,
 	// debrid/usenet clients, or the mount). For everything else, apply the new
 	// config live so users aren't disrupted by a full restart on every save.
@@ -559,6 +571,9 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		go s.Restart()
 	} else {
 		config.Get().ApplyRuntime(&newConfig)
+		if strmChanged {
+			s.manager.Strm().SweepAsync("config_change")
+		}
 		if err := s.manager.ApplyVirtualFolders(newConfig.VirtualFolders); err != nil {
 			s.logger.Error().Err(err).Msg("Failed to apply virtual folders after live config update")
 			http.Error(w, "Configuration was saved, but virtual folders could not be applied: "+err.Error(), http.StatusInternalServerError)
@@ -600,6 +615,15 @@ func (s *Server) handlePreviewVirtualFolder(w http.ResponseWriter, r *http.Reque
 		"total":   total,
 		"samples": samples,
 	}, http.StatusOK)
+}
+
+func (s *Server) handleStrmRegenerate(w http.ResponseWriter, r *http.Request) {
+	if !config.Get().Strm.Active() {
+		http.Error(w, "STRM is disabled or has no path configured", http.StatusBadRequest)
+		return
+	}
+	s.manager.Strm().SweepAsync("regenerate")
+	utils.JSONResponse(w, map[string]string{"status": "started"}, http.StatusAccepted)
 }
 
 func (s *Server) handleGetRepairConfig(w http.ResponseWriter, r *http.Request) {

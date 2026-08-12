@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
@@ -88,6 +89,12 @@ func (b *Backend) Mount(ctx context.Context) error {
 		MaxBackground: b.config.FuseMaxBackground,
 		MaxReadAhead:  b.config.FuseMaxReadAhead,
 		AllowOther:    true,
+		// Route handler panics through our logger; go-fuse fails the single
+		// request with EIO instead of the panic unwinding into its serve loop.
+		PanicHandler: func(p any) fuse.Status {
+			b.logger.Error().Any("panic", p).Bytes("stack", debug.Stack()).Msg("FUSE handler panic")
+			return fuse.EIO
+		},
 	}
 
 	var opt []string

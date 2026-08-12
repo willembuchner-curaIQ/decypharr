@@ -60,6 +60,9 @@ type Manager struct {
 	fixer *Fixer
 	ctx   context.Context
 
+	// strm reconciler
+	strm *Strm
+
 	virtualFoldersMu sync.RWMutex
 	virtualFolders   *VirtualFolders
 	mountManager     MountManager
@@ -226,6 +229,9 @@ func (m *Manager) init() {
 
 	// Initialize fixer
 	m.fixer = NewFixer(m)
+
+	// Initialize strm reconciler
+	m.strm = NewStrm(m)
 
 	// Set mount paths
 	m.setMountPaths()
@@ -417,6 +423,8 @@ func (m *Manager) Start(ctx context.Context) error {
 			m.logger.Info().Msg("Starting NZB file size correction as requested by environment variable")
 			m.fixNZBFileSizes(ctx)
 		}
+		// Converge the .strm export tree with config applied since last run.
+		m.strm.SweepAsync("startup")
 	}()
 
 	// Start workers
@@ -597,6 +605,11 @@ func (m *Manager) AddOrUpdate(entry *storage.Entry, callback func(t *storage.Ent
 	if err := m.storage.AddOrUpdate(entry); err != nil {
 		return err
 	}
+	// Keep .strm files derived state: any post-completion update (repair,
+	// refresh, provider switch) re-syncs them. Cheap and idempotent.
+	if entry.IsComplete {
+		m.strm.SyncEntryAsync(entry)
+	}
 	if callback != nil {
 		go callback(entry)
 	}
@@ -642,6 +655,7 @@ func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
 	if err := m.storage.Delete(infohash); err != nil {
 		return err
 	}
+	m.strm.RemoveEntryAsync(torr)
 	// Refresh entry cache
 	m.RefreshEntries(true)
 	return nil
