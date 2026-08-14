@@ -472,10 +472,12 @@ func (u *Usenet) ParseWithID(ctx context.Context, id, name string, content []byt
 	// Create parser with the manager
 	prs := parser.NewParser(u.nntp, u.processingMaxConnections, u.logger.With().Str("component", "parser").Logger())
 
-	// Quick parse: defer archive extraction for async processing
+	// Quick parse: defer archive extraction for async processing.
+	// Groups survive a stat failure so the caller can identify the
+	// dead post.
 	nzb, groups, err := prs.Parse(ctx, name, content)
 	if err != nil {
-		return nil, nil, err
+		return nil, groups, err
 	}
 	if id != "" {
 		nzb.ID = id

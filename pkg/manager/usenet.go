@@ -34,7 +34,23 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 
 	meta, groups, err := m.usenet.ParseWithID(ctx, req.Id, req.Name, req.NZBContent, req.Arr.Name)
 	if err != nil {
+		// A missing article at the parse stat is a definitive
+		// availability result: record and share it before failing the
+		// add, so the next encounter of this post — ours or another
+		// operator's — rejects without NNTP work.
+		if m.hearsay != nil && errors.Is(err, customerror.UsenetSegmentMissingError) {
+			m.hearsay.ReportNZB(hearsay.NZBSubjectFromGroups(groups), false)
+		}
 		return "", fmt.Errorf("usenet parse failed: %w", err)
+	}
+
+	// Reject before the entry enters the queue: the *arr sees the add
+	// fail synchronously and moves to the next release. Own truth or a
+	// strong network consensus that the segments are gone means the
+	// availability check is doomed. No report follows a rejection —
+	// nothing was actually checked.
+	if m.hearsay != nil && m.hearsay.NZBClaimedIncomplete(hearsay.NZBSubjectFromGroups(groups)) {
+		return "", fmt.Errorf("nzb rejected: hearsay claims segments missing on every configured backbone")
 	}
 
 	entry := &storage.Entry{
@@ -151,11 +167,11 @@ func (m *Manager) processNewNzb(parentCtx context.Context, entry *storage.Entry,
 			return fmt.Errorf("usenet processing timed out after %s: %w", m.usenetTimeout, err)
 		}
 		if errors.Is(err, customerror.UsenetSegmentMissingError) {
-			m.hearsay.ObserveNZB(hearsaySubject, false)
+			m.hearsay.ReportNZB(hearsaySubject, false)
 		}
 		return fmt.Errorf("failed to process nzb: %w", err)
 	}
-	m.hearsay.ObserveNZB(hearsaySubject, true)
+	m.hearsay.ReportNZB(hearsaySubject, true)
 
 	metadata = updatedNZB
 	return m.processNZB(ctx, entry, metadata)

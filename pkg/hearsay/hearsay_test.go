@@ -15,7 +15,6 @@ import (
 	hsdebrid "github.com/sirrobot01/hearsay/debrid"
 
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 )
@@ -51,68 +50,79 @@ func TestDisabledIsInert(t *testing.T) {
 	}
 	s.ObserveTorrent("realdebrid", "abc", true)
 	s.ReportAdd("realdebrid", "abc", true)
-	s.ObserveNZB("abc", true)
+	s.ReportNZB("abc", true)
+	if s.NZBClaimedIncomplete("abc") {
+		t.Fatal("nil service should never claim incomplete")
+	}
+	if s.KnownUncached("realdebrid", "abc") {
+		t.Fatal("nil service should never gate a submit")
+	}
 	s.Close()
-	if got := s.RankClients("abc", nil); got != nil {
-		t.Fatal("nil service should pass through")
+}
+
+// TestNZBClaimedIncompleteExpires pins that a local miss gates the
+// retry storm but not forever: a post marked missing while it was
+// still propagating must get another stat once the window passes, or
+// the gate prevents the check that would correct it.
+func TestNZBClaimedIncompleteExpires(t *testing.T) {
+	s := testService(t)
+	const subject = "2c6b6858d61da9543d4231a71db4b1c9264b06852c6b6858d61da9543d4231a7"
+
+	if s.NZBClaimedIncomplete(subject) {
+		t.Fatal("unknown subject must not gate")
+	}
+	s.ReportNZB(subject, false)
+	if !s.NZBClaimedIncomplete(subject) {
+		t.Fatal("fresh local miss must gate")
+	}
+	s.ReportNZB(subject, true)
+	if s.NZBClaimedIncomplete(subject) {
+		t.Fatal("a complete import must clear the gate")
+	}
+
+	// The store keeps the newest observation, so age a subject by
+	// recording it stale outright rather than overwriting a fresh one.
+	const stale = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	if err := s.engine.Observe("usenet.omicron.complete", stale, 0, time.Now().Add(-25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if s.NZBClaimedIncomplete(stale) {
+		t.Fatal("stale local miss must not gate; one stat should re-verify")
 	}
 }
 
-type fakeClient struct {
-	common.Client
-	cfg config.Debrid
-}
-
-func (f fakeClient) Config() config.Debrid { return f.cfg }
-
-func TestRankClients(t *testing.T) {
+func TestKnownUncached(t *testing.T) {
 	s := testService(t)
 	const ih = "2c6b6858d61da9543d4231a71db4b1c9264b0685"
-	rd := fakeClient{cfg: config.Debrid{Provider: "realdebrid", Name: "rd-main"}}
-	tb := fakeClient{cfg: config.Debrid{Provider: "torbox", Name: "tb"}}
-	clients := []common.Client{rd, tb}
-
-	if got := s.RankClients("ffffffffffffffffffffffffffffffffffffffff", clients); got[0].Config().Name != "rd-main" {
-		t.Fatal("unknown subject should keep configured order")
+	if s.KnownUncached("realdebrid", ih) {
+		t.Fatal("unknown subject must not gate a submit")
 	}
-
-	s.ObserveTorrent("torbox", ih, true)
-	if got := s.RankClients(ih, clients); got[0].Config().Name != "tb" {
-		t.Fatal("cached provider should rank first")
-	}
-
 	s.ObserveTorrent("realdebrid", ih, false)
-	got := s.RankClients(ih, clients)
-	if got[0].Config().Name != "tb" || got[1].Config().Name != "rd-main" {
-		t.Fatal("known-uncached provider should rank last")
+	if !s.KnownUncached("realdebrid", ih) {
+		t.Fatal("fresh local negative must gate")
+	}
+	if s.KnownUncached("torbox", ih) {
+		t.Fatal("another vendor's truth must not gate")
+	}
+	s.ObserveTorrent("realdebrid", ih, true)
+	if s.KnownUncached("realdebrid", ih) {
+		t.Fatal("local positive must not gate")
 	}
 }
 
-// TestRankClientsPromotesSingleSource pins the case the daemon's 0.5
-// collapse got wrong. Two equally weighted publishers cover the
-// namespace and only the older one claims the subject, so confidence
-// lands just under the threshold. That provider must still outrank one
-// with no claims at all, rather than being pushed below it.
-func TestRankClientsPromotesSingleSource(t *testing.T) {
+// TestKnownUncachedNetworkDenial checks the network path of the
+// submit gate: corroborated fresh denials gate a subject the operator
+// never touched, and any positive cached claim overrides them.
+func TestKnownUncachedNetworkDenial(t *testing.T) {
 	s := testService(t)
-	const ns = "debrid.torbox.cached"
 	const ih = "2c6b6858d61da9543d4231a71db4b1c9264b0685"
-
-	claimed, err := hsdebrid.New("torbox").Encode(ih)
-	if err != nil {
-		t.Fatal(err)
-	}
-	unrelated, err := hsdebrid.New("torbox").Encode("ffffffffffffffffffffffffffffffffffffffff")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ingest := func(key hearsaylib.Key, age time.Duration) {
+	ingest := func(ns string, key hearsaylib.Key) {
 		t.Helper()
 		_, priv, err := ed25519.GenerateKey(nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		g, err := hearsaylib.BuildGeneration(priv, ns, hearsaylib.Bool, 1, time.Now().Add(-age), 1, boolPayload(key))
+		g, err := hearsaylib.BuildGeneration(priv, ns, hearsaylib.Bool, 1, time.Now(), 1, boolPayload(key))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,23 +134,27 @@ func TestRankClientsPromotesSingleSource(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ingest(claimed, time.Hour)
-	ingest(unrelated, 0)
-
-	a, err := s.engine.Query(ns, ih)
-	if err != nil || a.Local || a.Sources != 1 {
-		t.Fatalf("setup: %+v, %v", a, err)
-	}
-	if a.Confidence >= 0.5 {
-		t.Fatalf("setup: confidence %.4f must fall under the threshold", a.Confidence)
+	denialKey, err := hsdebrid.NewUncached("realdebrid").Encode(ih)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	rd := fakeClient{cfg: config.Debrid{Provider: "realdebrid", Name: "rd-main"}}
-	tb := fakeClient{cfg: config.Debrid{Provider: "torbox", Name: "tb"}}
-	got := s.RankClients(ih, []common.Client{rd, tb})
-	if got[0].Config().Name != "tb" {
-		t.Errorf("single-source claim not promoted: order = %s, %s",
-			got[0].Config().Name, got[1].Config().Name)
+	ingest("debrid.realdebrid.uncached", denialKey)
+	if s.KnownUncached("realdebrid", ih) {
+		t.Fatal("a single denying source must not gate a submit")
+	}
+	ingest("debrid.realdebrid.uncached", denialKey)
+	if !s.KnownUncached("realdebrid", ih) {
+		t.Fatal("two corroborating fresh denials must gate")
+	}
+
+	cachedKey, err := hsdebrid.New("realdebrid").Encode(ih)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingest("debrid.realdebrid.cached", cachedKey)
+	if s.KnownUncached("realdebrid", ih) {
+		t.Fatal("a positive cached claim must override denials")
 	}
 }
 
@@ -150,7 +164,7 @@ func TestObserveAndReport(t *testing.T) {
 	s.ObserveTorrent("realdebrid", ih, true)
 	s.ObserveTorrent("unknown-vendor", ih, true)
 	s.ReportAdd("realdebrid", ih, false)
-	s.ObserveNZB(NZBSubjectFromGroups(map[string]*parser.FileGroup{
+	s.ReportNZB(NZBSubjectFromGroups(map[string]*parser.FileGroup{
 		"a": {
 			Type:  storage.NZBFileTypeMedia,
 			Files: []nzbparser.NzbFile{{Segments: nzbparser.NzbSegments{{Id: "m@x"}}}},

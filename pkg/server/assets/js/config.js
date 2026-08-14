@@ -1398,8 +1398,7 @@ class ConfigManager {
             repair: this.collectRepairConfig(),
 
             // Collect STRM config
-            strm: this.collectStrmConfig()
-            repair: this.collectRepairConfig(),
+            strm: this.collectStrmConfig(),
 
             // Collect hearsay config
             hearsay: this.collectHearsayConfig()

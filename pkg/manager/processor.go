@@ -419,9 +419,6 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 		return nil, fmt.Errorf("no debrid clients available")
 	}
 
-	// Try the provider most likely to already have this cached first.
-	clients = m.hearsay.RankClients(debridTorrent.InfoHash, clients)
-
 	errs := make([]error, 0, len(clients))
 
 	for _, db := range clients {
@@ -433,6 +430,15 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 			overrideDownloadUncached = db.Config().DownloadUncached
 		}
 		debridTorrent.DownloadUncached = overrideDownloadUncached
+
+		// Fail fast before spending a submit: our own recent truth or a
+		// corroborated network denial says this torrent is not cached
+		// here, and the import will not download uncached, so the
+		// submit is a guaranteed failure.
+		if !overrideDownloadUncached && m.hearsay.KnownUncached(db.Config().Provider, debridTorrent.InfoHash) {
+			errs = append(errs, fmt.Errorf("%s: %s recently proven not cached, skipping submit", db.Config().Name, debridTorrent.InfoHash))
+			continue
+		}
 		_logger := db.Logger()
 		_logger.Info().
 			Str("Provider", db.Config().Name).
@@ -444,6 +450,12 @@ func (m *Manager) SendToDebrid(ctx context.Context, importRequest *ImportRequest
 
 		dbt, err := db.SubmitMagnet(debridTorrent)
 		if err != nil || dbt == nil || dbt.Id == "" {
+			// A legal block is the strongest not-obtainable signal a
+			// provider gives; record it so retries of the same hash
+			// gate without another API call.
+			if errors.Is(err, customerror.TorrentBlockedError) {
+				m.hearsay.ReportAdd(db.Config().Provider, debridTorrent.InfoHash, false)
+			}
 			errs = append(errs, err)
 			continue
 		}

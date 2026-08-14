@@ -43,3 +43,9 @@ var TorrentNotCachedError = &Error{
 	err:        errors.New("torrent not cached"),
 	Code:       "torrent_not_cached",
 }
+
+var TorrentBlockedError = &Error{
+	statusCode: 451,
+	err:        errors.New("torrent blocked for legal reasons"),
+	Code:       "torrent_blocked",
+}

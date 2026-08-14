@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -160,7 +161,14 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 			return statErr
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to stat segment %s <%s>: %w", group.ActualFilename, segment.Id, err)
+			// The groups are fully built by now; return them so the
+			// caller can still derive the content identifier of the
+			// dead post and record the miss.
+			statErr := fmt.Errorf("failed to stat segment %s <%s>: %w", group.ActualFilename, segment.Id, err)
+			if nntp.IsArticleNotFoundError(err) {
+				statErr = fmt.Errorf("%w: %w", customerror.UsenetSegmentMissingError, statErr)
+			}
+			return nil, fileGroups, statErr
 		}
 		checked = true
 		break

@@ -14,21 +14,22 @@ Hearsay gives hints, not facts. Your own results always win over hints from othe
 Decypharr publishes only what it saw during normal work:
 
 - A torrent is cached on a debrid provider. Repair runs and successful adds show this.
+- A torrent add was not served from cache. Other users then skip the same dead add.
 - A usenet post was complete or incomplete when you imported it.
 
 Decypharr never publishes:
 
 - What you search for.
-- What you want or fail to find.
 - Your provider accounts or API keys.
 - File names or titles. Hearsay uses content hashes only.
 
-Note: for usenet, the shared data covers posts that you imported. If you do not want this, turn off **Share back**.
+Note: a failed add and a failed import are observations, and Decypharr shares them. The network then knows you attempted that content. If you do not want this, turn off **Share back**.
 
 ## What you get
 
-- Decypharr tries the provider that most likely has the file first. This gives fewer failed adds.
-- You see cache hints for torrents you never touched, because other operators touched them.
+- Decypharr refuses to submit a torrent that it, or the network, recently proved not cached. The add fails immediately, with no call to the provider. Fresh evidence wins: a denial older than a few hours gates nothing, because any user's uncached download can fill the cache at any time.
+- Decypharr rejects a usenet post at the add step when its own records or the network say the segments are gone. Your *arr sees the failure at once and moves to the next release, with no wasted availability check.
+- You benefit from denials for torrents you never touched, because other operators touched them.
 - Fewer API calls go to the providers.
 
 The network becomes more useful as more operators join. Your own observations help you from day one.
