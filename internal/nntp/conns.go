@@ -80,15 +80,32 @@ func (c *Connection) copyBodyWithIdleDeadline(dst io.Writer, src io.Reader, idle
 	var total int64
 	var readsSinceProgress uint8
 	for {
-		nr, er := src.Read(buf)
-		if nr > 0 {
-			// Hot path: bump a tiny counter and only touch nanotime +
-			// the atomic every stride'th Read. No timer ops anywhere.
-			readsSinceProgress++
-			if readsSinceProgress >= progressUpdateStride {
-				c.lastProgressNS.Store(nanotimeNow())
-				readsSinceProgress = 0
+		// Fill buf before flushing: yEnc decoders return at most a few KB
+		// per Read (rapidyenc's internal buffer is 4KB), while dst on the
+		// streaming path is the segment cache, where every Write costs a
+		// pwrite plus an exclusive buffer-lock acquisition. Segment readers
+		// only see bytes after Finalize, so coalescing adds no visible
+		// latency. Bytes read before an error are still flushed below.
+		nr := 0
+		var er error
+		for nr < len(buf)/2 {
+			var n int
+			n, er = src.Read(buf[nr:])
+			if n > 0 {
+				nr += n
+				// Hot path: bump a tiny counter and only touch nanotime +
+				// the atomic every stride'th Read. No timer ops anywhere.
+				readsSinceProgress++
+				if readsSinceProgress >= progressUpdateStride {
+					c.lastProgressNS.Store(nanotimeNow())
+					readsSinceProgress = 0
+				}
 			}
+			if er != nil {
+				break
+			}
+		}
+		if nr > 0 {
 			nw, ew := dst.Write(buf[:nr])
 			total += int64(nw)
 			if ew != nil {
