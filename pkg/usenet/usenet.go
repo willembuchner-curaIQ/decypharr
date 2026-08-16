@@ -1084,12 +1084,13 @@ func (u *Usenet) NZBStorage() *NZBStorage {
 	return u.nzbStorage
 }
 
-// SpeedTest runs a speed test for a specific NNTP provider
+// SpeedTest runs a speed test for a specific NNTP provider, identified by
+// its canonical ID (host:port/username); a bare host works when unambiguous.
 // It finds a segment from a processed NZB to download for real speed measurement
-func (u *Usenet) SpeedTest(ctx context.Context, providerHost string) nntp.SpeedTestResult {
+func (u *Usenet) SpeedTest(ctx context.Context, providerID string) nntp.SpeedTestResult {
 	// Try to find a segment from any processed NZB for the speed test
 	messageID := u.findTestSegment()
-	return u.nntp.SpeedTest(ctx, providerHost, messageID)
+	return u.nntp.SpeedTest(ctx, providerID, messageID)
 }
 
 // findTestSegment looks for a segment from any processed NZB to use for speed testing

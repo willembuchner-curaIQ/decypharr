@@ -227,13 +227,20 @@ func (c *Connection) readResponseCodeWithDeadline(timeout time.Duration) (int, [
 // Connection represents an NNTP connection
 type Connection struct {
 	username, password, address string
-	port                        int
-	conn                        net.Conn
-	text                        *textproto.Reader
-	reader                      *bufio.Reader
-	writer                      *bufio.Writer
-	logger                      zerolog.Logger
-	closed                      atomic.Bool
+	// pool is the ProviderPool this connection belongs to, set at checkout
+	// creation. address alone cannot identify it: two accounts on the same
+	// host have distinct pools. Carrying the pointer keeps put/release free
+	// of map lookups (and of the allocation an ID string would cost).
+	// Every dial goes through getOrCreateFromPool, so this is always set;
+	// put and release still nil-check defensively.
+	pool   *ProviderPool
+	port   int
+	conn   net.Conn
+	text   *textproto.Reader
+	reader *bufio.Reader
+	writer *bufio.Writer
+	logger zerolog.Logger
+	closed atomic.Bool
 
 	// Body-copy idle tracking. Written by copyBodyWithIdleDeadline on
 	// copyBodyWithIdleDeadline periodically while reads make progress;

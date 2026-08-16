@@ -1211,20 +1211,20 @@
                                             <span class="font-medium text-xs">${provider.host}</span>
                                             <span class="badge ${provider.ssl ? 'badge-success' : 'badge-warning'} badge-xs">${provider.ssl ? 'SSL' : 'Plain'}</span>
                                         </div>
-                                        <p class="text-xs text-base-content/70">${provider.max_connections || 0} connections</p>
+                                        <p class="text-xs text-base-content/70">${provider.username ? provider.username + ' · ' : ''}${provider.max_connections || 0} connections</p>
                                     </div>
                                     <div class="flex flex-col items-end gap-1">
                                         ${speedResultHtml}
                                         <button
                                             class="btn btn-xs btn-ghost speed-test-btn"
-                                            data-provider="${provider.host}"
+                                            data-provider="${provider.id || provider.host}"
                                             title="Run Speed Test"
-                                            onclick="runSpeedTest('${provider.host}');">
+                                            onclick="runSpeedTest('${provider.id || provider.host}');">
                                             Test Speed
                                         </button>
                                     </div>
                                 </div>
-                                <div id="speed-result-${provider.host.replace(/\./g, '-')}" class="text-xs mt-1"></div>
+                                <div id="speed-result-${sanitizeProviderId(provider.id || provider.host)}" class="text-xs mt-1"></div>
                             </div>
                         </div>
                     `;
@@ -1430,10 +1430,17 @@
                 });
         }
 
-        // Speed test function for NNTP providers
-        window.runSpeedTest = async function (providerHost) {
-            const resultDiv = document.getElementById(`speed-result-${providerHost.replace(/\./g, '-')}`);
-            const button = document.querySelector(`button[data-provider="${providerHost}"]`);
+        // Provider IDs (host:port/username) contain characters unsafe in
+        // element ids; collapse them consistently at render and lookup.
+        function sanitizeProviderId(id) {
+            return String(id).replace(/[^a-zA-Z0-9-]/g, '-');
+        }
+
+        // Speed test function for NNTP providers. providerId is the
+        // provider's canonical id (host:port/username) from the stats API.
+        window.runSpeedTest = async function (providerId) {
+            const resultDiv = document.getElementById(`speed-result-${sanitizeProviderId(providerId)}`);
+            const button = document.querySelector(`button[data-provider="${providerId}"]`);
 
             if (!resultDiv || !button) return;
 
@@ -1446,7 +1453,7 @@
                 const response = await fetch(`${window.urlBase}debug/speedtest`, {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({protocol: 'nntp', provider: providerHost})
+                    body: JSON.stringify({protocol: 'nntp', provider: providerId})
                 });
 
                 if (!response.ok) {

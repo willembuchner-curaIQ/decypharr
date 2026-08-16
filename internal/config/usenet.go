@@ -27,6 +27,15 @@ type UsenetProvider struct {
 	Backup bool `json:"backup,omitempty"`
 }
 
+// ID returns the canonical identity of a provider: host, port, and account.
+// Host alone is NOT unique — a dual-account setup (e.g. an unlimited and a
+// block account on the same server) legitimately lists the same host twice —
+// so anything that keys provider state (connection pools, speed-test
+// results, API lookups) must use this, never Host.
+func (u UsenetProvider) ID() string {
+	return fmt.Sprintf("%s:%d/%s", u.Host, u.Port, u.Username)
+}
+
 // Usenet configuration for usenet streaming and downloading
 type Usenet struct {
 	Providers []UsenetProvider `json:"providers,omitempty"` // Usenet provider configurations
@@ -155,6 +164,7 @@ func validateUsenet(providers []UsenetProvider) error {
 	if len(providers) == 0 {
 		return nil
 	}
+	seen := make(map[string]struct{}, len(providers))
 	for _, usenet := range providers {
 		// Basic field validation
 		if usenet.Host == "" {
@@ -166,6 +176,13 @@ func validateUsenet(providers []UsenetProvider) error {
 		if usenet.Password == "" {
 			return errors.New("usenet provider password is required")
 		}
+		// Same host+port+account twice is a config mistake: it would double
+		// the intended connection cap against the provider's account limit.
+		id := usenet.ID()
+		if _, dup := seen[id]; dup {
+			return fmt.Errorf("duplicate usenet provider %s: same host, port, and username listed twice", id)
+		}
+		seen[id] = struct{}{}
 	}
 
 	return nil
