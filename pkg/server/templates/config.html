@@ -666,7 +666,8 @@
                                                 <input type="text" class="input w-full" name="usenet.read_ahead"
                                                        id="usenet.read_ahead" min="1" placeholder="16MB">
                                                 <span class="text-sm opacity-70">Amount of data to read ahead when streaming
-                                                    (default: 16MB)</span>
+                                                    (default: 16MB). Also sizes the per-stream RAM window when
+                                                    buffering in memory</span>
                                             </div>
                                             <div>
                                                 <label class="label" for="usenet.processing_timeout">
@@ -725,7 +726,20 @@
                                                        name="usenet.buffer_memory" id="usenet.buffer_memory"
                                                        placeholder="512MB">
                                                 <span class="text-sm opacity-70">Total RAM for usenet streaming buffers
-                                                    across all open streams (e.g., 512MB, 1GB)</span>
+                                                    across all open streams (e.g., 512MB, 1GB). Ignored when
+                                                    buffering to disk</span>
+                                            </div>
+
+                                            <div>
+                                                <label class="label cursor-pointer justify-start gap-3">
+                                                    <input type="checkbox" class="checkbox checkbox-primary"
+                                                           name="usenet.buffer_to_disk" id="usenet.buffer_to_disk">
+                                                    <div>
+                                                        <span class="font-medium">Buffer to Disk</span>
+                                                        <div class="label-text-alt">Write the streaming window to disk
+                                                            instead of keeping it in RAM (default).</div>
+                                                    </div>
+                                                </label>
                                             </div>
                                         </div>
                                     </div>

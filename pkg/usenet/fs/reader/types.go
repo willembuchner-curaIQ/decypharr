@@ -105,6 +105,13 @@ type Config struct {
 	// DiskPath is the base directory for disk cache (default: system temp dir).
 	DiskPath string
 
+	// MemoryBuffer keeps the cached window in RAM blocks; segment data is
+	// never written to the disk file. Default true; config
+	// usenet.buffer_to_disk turns it off. When the window outgrows its RAM
+	// budget the oldest cached segments are dropped and re-fetched on
+	// demand.
+	MemoryBuffer bool
+
 	// MaxConnections is the maximum concurrent NNTP downloads (default: 8).
 	MaxConnections int
 
@@ -130,6 +137,7 @@ func DefaultConfig() Config {
 		DownloadTimeout: 60 * time.Second,
 		MaxRetries:      3,
 		RetryDelay:      time.Second,
+		MemoryBuffer:    true,
 	}
 }
 
@@ -173,6 +181,13 @@ func WithMaxDisk(bytes int64) Option {
 func WithDiskPath(path string) Option {
 	return func(c *Config) {
 		c.DiskPath = path
+	}
+}
+
+// WithMemoryBuffer keeps the cached window in RAM instead of on disk.
+func WithMemoryBuffer(on bool) Option {
+	return func(c *Config) {
+		c.MemoryBuffer = on
 	}
 }
 

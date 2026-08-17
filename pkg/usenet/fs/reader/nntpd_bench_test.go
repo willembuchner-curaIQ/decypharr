@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +19,18 @@ const (
 	benchSegSize = int64(750 * 1024)
 	benchSegs    = 32
 )
+
+// benchModes is the storage A/B every benchmark runs under: "memory" is the
+// default (segments held as resident RAM blocks, the disk file stays a
+// zero-block sparse file), "disk" is the buffer_to_disk write-through path
+// (segments pwritten to segments.bin, reads served by pread/page cache).
+var benchModes = []struct {
+	name   string
+	memory bool
+}{
+	{"disk", false},
+	{"memory", true},
+}
 
 // newBenchStack builds a fake NNTP server carrying benchSegs segments of
 // Pattern data, and a client pointed at it.
@@ -60,12 +74,13 @@ func newBenchStack(b *testing.B, cfg nntpd.Config) (*nntpd.Server, *nntp.Client,
 	return srv, client, segs
 }
 
-func newBenchReader(b *testing.B, client *nntp.Client, segs []SegmentMeta) *StreamingReader {
+func newBenchReader(b *testing.B, client *nntp.Client, segs []SegmentMeta, memory bool, diskPath string) *StreamingReader {
 	b.Helper()
 	sr, err := NewStreamingReader(context.Background(), client, segs,
-		WithDiskPath(b.TempDir()),
+		WithDiskPath(diskPath),
 		WithMaxConnections(8),
 		WithPrefetchAhead(8),
+		WithMemoryBuffer(memory),
 	)
 	if err != nil {
 		b.Fatal(err)
@@ -73,52 +88,94 @@ func newBenchReader(b *testing.B, client *nntp.Client, segs []SegmentMeta) *Stre
 	return sr
 }
 
+// diskAllocatedMB reports the allocated (non-hole) bytes of the cache's
+// segments.bin under dir. st.Blocks counts 512-byte units actually backed by
+// the filesystem, so a sparse file that was never written reports ~0 no
+// matter its logical size — this is the metric that proves memory mode kept
+// segment data off the disk.
+func diskAllocatedMB(dir string) float64 {
+	matches, _ := filepath.Glob(filepath.Join(dir, "cache-*", "segments.bin"))
+	var total int64
+	for _, m := range matches {
+		var st syscall.Stat_t
+		if err := syscall.Stat(m, &st); err == nil {
+			total += st.Blocks * 512
+		}
+	}
+	return float64(total) / (1 << 20)
+}
+
+// poolRAMMB reports the usenet buffer pool's current resident block RAM —
+// the process-pinned side of the storage story (the disk mode's RAM lives in
+// the kernel page cache instead and shows up as ~0 here).
+func poolRAMMB() float64 {
+	return float64(usenetBufferPool().Stats().MemoryInUse) / (1 << 20)
+}
+
 // BenchmarkColdStream reads the whole file sequentially through a fresh
 // reader+cache each iteration: fetch, decode, cache write, cache read.
 func BenchmarkColdStream(b *testing.B) {
-	_, client, segs := newBenchStack(b, nntpd.Config{})
-	fileSize := benchSegSize * benchSegs
-	buf := make([]byte, 128*1024)
+	for _, mode := range benchModes {
+		b.Run(mode.name, func(b *testing.B) {
+			_, client, segs := newBenchStack(b, nntpd.Config{})
+			fileSize := benchSegSize * benchSegs
+			buf := make([]byte, 128*1024)
 
-	b.SetBytes(fileSize)
-	b.ResetTimer()
-	for range b.N {
-		b.StopTimer()
-		sr := newBenchReader(b, client, segs)
-		b.StartTimer()
+			var peakPoolMB, peakDiskMB float64
+			b.ReportAllocs()
+			b.SetBytes(fileSize)
+			b.ResetTimer()
+			for range b.N {
+				b.StopTimer()
+				dir := b.TempDir()
+				sr := newBenchReader(b, client, segs, mode.memory, dir)
+				b.StartTimer()
 
-		for off := int64(0); off < fileSize; off += int64(len(buf)) {
-			n, err := sr.ReadAt(buf[:min(int64(len(buf)), fileSize-off)], off)
-			if err != nil {
-				b.Fatal(err)
+				for off := int64(0); off < fileSize; off += int64(len(buf)) {
+					n, err := sr.ReadAt(buf[:min(int64(len(buf)), fileSize-off)], off)
+					if err != nil {
+						b.Fatal(err)
+					}
+					if off == 0 && !bytes.Equal(buf[:n], nntpd.Pattern(0, n)) {
+						b.Fatal("payload mismatch at offset 0")
+					}
+				}
+
+				b.StopTimer()
+				peakPoolMB = max(peakPoolMB, poolRAMMB())
+				peakDiskMB = max(peakDiskMB, diskAllocatedMB(dir))
+				_ = sr.Close()
+				b.StartTimer()
 			}
-			if off == 0 && !bytes.Equal(buf[:n], nntpd.Pattern(0, n)) {
-				b.Fatal("payload mismatch at offset 0")
-			}
-		}
-
-		b.StopTimer()
-		_ = sr.Close()
-		b.StartTimer()
+			b.ReportMetric(peakPoolMB, "pool-ram-MB")
+			b.ReportMetric(peakDiskMB, "disk-MB")
+		})
 	}
 }
 
 // BenchmarkOpenToFirstByte measures reader construction plus the first 64KB
 // read — the time-to-first-byte a mount open pays.
 func BenchmarkOpenToFirstByte(b *testing.B) {
-	_, client, segs := newBenchStack(b, nntpd.Config{})
-	buf := make([]byte, 64*1024)
+	for _, mode := range benchModes {
+		b.Run(mode.name, func(b *testing.B) {
+			_, client, segs := newBenchStack(b, nntpd.Config{})
+			buf := make([]byte, 64*1024)
 
-	b.ReportAllocs()
-	b.ResetTimer()
-	for range b.N {
-		sr := newBenchReader(b, client, segs)
-		if _, err := sr.ReadAt(buf, 0); err != nil {
-			b.Fatal(err)
-		}
-		b.StopTimer()
-		_ = sr.Close()
-		b.StartTimer()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				b.StopTimer()
+				dir := b.TempDir()
+				b.StartTimer()
+				sr := newBenchReader(b, client, segs, mode.memory, dir)
+				if _, err := sr.ReadAt(buf, 0); err != nil {
+					b.Fatal(err)
+				}
+				b.StopTimer()
+				_ = sr.Close()
+				b.StartTimer()
+			}
+		})
 	}
 }
 
@@ -131,43 +188,48 @@ func BenchmarkOpenToFirstByte(b *testing.B) {
 func BenchmarkSeekLatency(b *testing.B) {
 	for _, rtt := range []time.Duration{0, 30 * time.Millisecond} {
 		b.Run(fmt.Sprintf("rtt%dms", rtt/time.Millisecond), func(b *testing.B) {
-			_, client, segs := newBenchStack(b, nntpd.Config{RTT: rtt})
-			buf := make([]byte, 64*1024)
+			for _, mode := range benchModes {
+				b.Run(mode.name, func(b *testing.B) {
+					_, client, segs := newBenchStack(b, nntpd.Config{RTT: rtt})
+					buf := make([]byte, 64*1024)
 
-			var durations []time.Duration
-			var sr *StreamingReader
-			visited := benchSegs // force a fresh reader on first iteration
+					var durations []time.Duration
+					var sr *StreamingReader
+					visited := benchSegs // force a fresh reader on first iteration
 
-			b.ResetTimer()
-			for i := range b.N {
-				if visited == benchSegs {
+					b.ReportAllocs()
+					b.ResetTimer()
+					for i := range b.N {
+						if visited == benchSegs {
+							b.StopTimer()
+							if sr != nil {
+								_ = sr.Close()
+							}
+							sr = newBenchReader(b, client, segs, mode.memory, b.TempDir())
+							visited = 0
+							b.StartTimer()
+						}
+						seg := benchSegs - 1 - (i % benchSegs)
+						start := time.Now()
+						if _, err := sr.ReadAt(buf, int64(seg)*benchSegSize); err != nil {
+							b.Fatal(err)
+						}
+						durations = append(durations, time.Since(start))
+						visited++
+					}
 					b.StopTimer()
 					if sr != nil {
 						_ = sr.Close()
 					}
-					sr = newBenchReader(b, client, segs)
-					visited = 0
-					b.StartTimer()
-				}
-				seg := benchSegs - 1 - (i % benchSegs)
-				start := time.Now()
-				if _, err := sr.ReadAt(buf, int64(seg)*benchSegSize); err != nil {
-					b.Fatal(err)
-				}
-				durations = append(durations, time.Since(start))
-				visited++
-			}
-			b.StopTimer()
-			if sr != nil {
-				_ = sr.Close()
-			}
 
-			slices.Sort(durations)
-			if len(durations) > 0 {
-				p50 := durations[len(durations)/2]
-				p99 := durations[len(durations)*99/100]
-				b.ReportMetric(float64(p50.Microseconds())/1000, "p50-ms")
-				b.ReportMetric(float64(p99.Microseconds())/1000, "p99-ms")
+					slices.Sort(durations)
+					if len(durations) > 0 {
+						p50 := durations[len(durations)/2]
+						p99 := durations[len(durations)*99/100]
+						b.ReportMetric(float64(p50.Microseconds())/1000, "p50-ms")
+						b.ReportMetric(float64(p99.Microseconds())/1000, "p99-ms")
+					}
+				})
 			}
 		})
 	}
@@ -176,24 +238,34 @@ func BenchmarkSeekLatency(b *testing.B) {
 // BenchmarkWarmReread reads a fully cached file, isolating the cache read
 // path from any network or decode work.
 func BenchmarkWarmReread(b *testing.B) {
-	_, client, segs := newBenchStack(b, nntpd.Config{})
-	fileSize := benchSegSize * benchSegs
-	buf := make([]byte, 128*1024)
+	for _, mode := range benchModes {
+		b.Run(mode.name, func(b *testing.B) {
+			_, client, segs := newBenchStack(b, nntpd.Config{})
+			fileSize := benchSegSize * benchSegs
+			buf := make([]byte, 128*1024)
 
-	sr := newBenchReader(b, client, segs)
-	defer sr.Close()
-	readAll := func() {
-		for off := int64(0); off < fileSize; off += int64(len(buf)) {
-			if _, err := sr.ReadAt(buf[:min(int64(len(buf)), fileSize-off)], off); err != nil {
-				b.Fatal(err)
+			dir := b.TempDir()
+			sr := newBenchReader(b, client, segs, mode.memory, dir)
+			defer sr.Close()
+			readAll := func() {
+				for off := int64(0); off < fileSize; off += int64(len(buf)) {
+					if _, err := sr.ReadAt(buf[:min(int64(len(buf)), fileSize-off)], off); err != nil {
+						b.Fatal(err)
+					}
+				}
 			}
-		}
-	}
-	readAll()
+			readAll()
 
-	b.SetBytes(fileSize)
-	b.ResetTimer()
-	for range b.N {
-		readAll()
+			b.ReportAllocs()
+			b.SetBytes(fileSize)
+			b.ResetTimer()
+			for range b.N {
+				readAll()
+			}
+			b.StopTimer()
+			// After ResetTimer: it clears previously reported metrics.
+			b.ReportMetric(poolRAMMB(), "pool-ram-MB")
+			b.ReportMetric(diskAllocatedMB(dir), "disk-MB")
+		})
 	}
 }

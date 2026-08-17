@@ -64,9 +64,7 @@ func prefillSegments(t *testing.T, sr *StreamingReader, indices ...int) {
 	t.Helper()
 	for _, i := range indices {
 		data := make([]byte, sr.cache.SegmentDataSize(i))
-		if err := sr.cache.Put(i, data); err != nil {
-			t.Fatalf("Put(%d): %v", i, err)
-		}
+		putSegment(t, sr.cache, i, data)
 	}
 }
 

@@ -1449,6 +1449,7 @@ class ConfigManager {
             availability_sample_percent: parseInt(document.querySelector('[name="usenet.availability_sample_percent"]')?.value) || 10,
             import_availability_sample_percent: parseInt(document.querySelector('[name="usenet.import_availability_sample_percent"]')?.value) || 1,
             disk_buffer_path: document.querySelector('[name="usenet.disk_buffer_path"]')?.value || "",
+            buffer_to_disk: document.querySelector('[name="usenet.buffer_to_disk"]')?.checked || false,
             buffer_memory: document.querySelector('[name="usenet.buffer_memory"]')?.value || ""
         };
     }
@@ -2288,13 +2289,18 @@ class ConfigManager {
             'availability_sample_percent': usenet.availability_sample_percent,
             'import_availability_sample_percent': usenet.import_availability_sample_percent,
             'disk_buffer_path': usenet.disk_buffer_path,
+            'buffer_to_disk': usenet.buffer_to_disk,
             'buffer_memory': usenet.buffer_memory
         };
 
         Object.entries(streamFields).forEach(([id, value]) => {
             const input = document.getElementsByName(`usenet.${id}`)[0];
             if (input && value !== undefined) {
-                input.value = value;
+                if (input.type === 'checkbox') {
+                    input.checked = !!value;
+                } else {
+                    input.value = value;
+                }
             }
         });
     }

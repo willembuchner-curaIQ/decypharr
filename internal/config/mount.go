@@ -72,11 +72,6 @@ type DFS struct {
 
 	DaemonTimeout string `json:"daemon_timeout,omitempty"` // Time after which the FUSE daemon will exit if idle
 
-	// BufferWritePolicy selects how downloaded bytes go through the streaming
-	// buffer: "write_through" (default — straight to disk outside the lock,
-	// kernel page cache serves re-reads) or "auto" (legacy RAM block caching).
-	BufferWritePolicy string `json:"buffer_write_policy,omitempty"`
-
 	// FuseMaxBackground caps how many background FUSE requests (readahead,
 	// async reads) the kernel keeps in flight. Kernel default is 12, which
 	// throttles streaming readahead; DFS defaults to 64. 0 = default.

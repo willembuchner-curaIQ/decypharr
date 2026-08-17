@@ -511,21 +511,14 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 	var item *CacheItem
 
 	buf, err := c.pool.NewBuffer(buffer.Config{
-		// 32 MB per-item RAM ceiling for the streaming working set; cold pages
-		// live in the OS page cache around the sparse file. Aggregate RAM
-		// across all open/cached files is bounded by the DFS buffer pool's
-		// budget rather than by a tiny per-item ceiling, so a library scan
-		// touching hundreds of files can't blow up RSS while a single stream
-		// still gets enough headroom to play smoothly.
-		MemorySize:    32 << 20,
+		// Disk mode: DFS is write-once, readers only see ranges after the
+		// download completes, and the kernel page cache serves the
+		// just-written bytes. The sparse file persists across runs
+		// (InitialRanges reseeds it on reopen).
+		Mode:          buffer.ModeDisk,
 		DiskPath:      cachePath,
 		TotalSize:     fileSize,
 		InitialRanges: seed,
-		// Write-through by default: DFS is write-once, readers only see
-		// ranges after the download completes, and the kernel page cache
-		// serves the just-written bytes. `buffer_write_policy: "auto"`
-		// restores block caching.
-		WritePolicy: writePolicyFor(c.config),
 		// When the DFS pool punches a hole behind the read head to stay under
 		// the disk limit, drop the same range from the persisted metadata so a
 		// later reopen doesn't claim bytes that are now a hole on disk.
@@ -1354,14 +1347,6 @@ func (item *CacheItem) Close() error {
 }
 
 // Helper functions
-
-// writePolicyFor maps the DFS config to the buffer's write policy.
-func writePolicyFor(cfg *config.FuseConfig) buffer.WritePolicy {
-	if cfg != nil && cfg.BufferWriteAuto {
-		return buffer.WriteAuto
-	}
-	return buffer.WriteThrough
-}
 
 func buildCacheKey(entryName, filename string) string {
 	// Create safe filesystem key
