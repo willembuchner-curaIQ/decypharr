@@ -65,10 +65,20 @@ type Usenet struct {
 	ImportAvailabilitySamplePercent int    `json:"import_availability_sample_percent,omitempty"` // Percentage of segments to check when adding an NZB (1-100, default: 1)
 	DiskBufferPath                  string `json:"disk_buffer_path,omitempty"`                   // Path for disk buffer storage (empty = main_path/usenet/streams)
 
-	// BufferMemory caps the total RAM the usenet streaming buffers hold across
-	// all open streams, e.g. "512MB". Per-stream buffers stay generous for
-	// smooth playback; this bounds the aggregate so many concurrent streams
-	// can't OOM. Empty = default (512MB); "0" disables the cap.
+	// BufferToDisk writes each stream's cached window to the disk buffer
+	// instead of holding it in RAM. The default (false) keeps the window
+	// purely in memory — segment data never touches disk: RAM is capped per
+	// stream (sized from read_ahead) and in aggregate by buffer_memory, and
+	// when a budget runs out the oldest cached segments are dropped and
+	// re-downloaded on demand. Set true to trade RAM for disk I/O on
+	// memory-constrained hosts.
+	BufferToDisk bool `json:"buffer_to_disk,omitempty"`
+
+	// BufferMemory caps the total RAM the streaming buffers hold in block
+	// cache across all open streams, e.g. "1GB". Ignored when
+	// buffer_to_disk is set: the disk-backed mode does not cache blocks in
+	// RAM (the kernel page cache serves warm re-reads). Empty = default
+	// (512MB); "0" disables the cap.
 	BufferMemory string `json:"buffer_memory,omitempty"`
 }
 

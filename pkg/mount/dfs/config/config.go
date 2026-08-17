@@ -36,10 +36,6 @@ type FuseConfig struct {
 	FuseMaxBackground int
 	FuseMaxReadAhead  int
 
-	// BufferWriteAuto reverts the streaming buffer to the legacy RAM
-	// block-caching write path ("auto"). Default false = write-through.
-	BufferWriteAuto bool
-
 	// DropBehindMargin, when > 0, makes the read path release the disk file's
 	// page cache for data more than this many bytes behind the current read
 	// offset (keeping the trailing margin resident so readahead/short
@@ -145,7 +141,6 @@ func Parse(cfg config.DFS, mountPath string, retries int) *FuseConfig {
 	if cfg.FuseMaxBackground > 0 {
 		fuseConfig.FuseMaxBackground = cfg.FuseMaxBackground
 	}
-	fuseConfig.BufferWriteAuto = cfg.BufferWritePolicy == "auto"
 	if cfg.FuseMaxReadAhead != "" {
 		size, err := config.ParseSize(cfg.FuseMaxReadAhead)
 		if err == nil && size > 0 {

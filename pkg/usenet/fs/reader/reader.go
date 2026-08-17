@@ -689,6 +689,7 @@ func (rp *Pool) GetReader(
 			WithMaxDisk(rp.config.MaxDisk),
 			WithMaxConnections(rp.config.MaxConnections),
 			WithPrefetchAhead(rp.config.PrefetchAhead),
+			WithMemoryBuffer(rp.config.MemoryBuffer),
 		)
 	} else {
 		reader, err = NewStreamingReader(
@@ -696,6 +697,7 @@ func (rp *Pool) GetReader(
 			WithMaxDisk(rp.config.MaxDisk),
 			WithMaxConnections(rp.config.MaxConnections),
 			WithPrefetchAhead(rp.config.PrefetchAhead),
+			WithMemoryBuffer(rp.config.MemoryBuffer),
 		)
 	}
 	if err != nil {

@@ -10,19 +10,20 @@ import (
 // them. Instantiate one per workload (e.g. one for DFS, one for usenet) so the
 // two have independent budgets and can't starve each other.
 //
-// Memory: per-Buffer Config.MemorySize is a ceiling on one stream's hot
-// working set; the Pool's MemoryBudget caps the *sum* of resident block RAM
-// across all its Buffers. When the budget is exhausted a Buffer evicts its own
-// trailing (LRU) blocks before caching new ones, and writes fall through to
-// disk rather than growing RAM (self-eviction; no cross-Buffer LRU).
+// Memory (ModeMemory buffers): per-Buffer Config.MemorySize is a ceiling on
+// one stream's working set; the Pool's MemoryBudget caps the *sum* of
+// resident block RAM across all its Buffers. When either is exhausted a
+// Buffer drops its own trailing (LRU) blocks to admit new ones
+// (self-eviction; no cross-Buffer LRU) and reports the lost ranges via
+// OnEvict so the owner can re-fetch.
 //
-// Disk: the Pool tracks the total on-disk present bytes across its Buffers.
-// When that exceeds DiskLimit a background worker punches holes behind each
-// Buffer's read head (keeping a BackWindow of recent history) until the total
-// is back under the limit. This is what bounds a cache directory even when a
-// single huge file is being streamed and never closed — the case whole-file
-// eviction can't handle. DiskLimit == 0 disables the disk backstop entirely
-// (usenet relies on its own playback-aware sliding window instead).
+// Disk (ModeDisk buffers): the Pool tracks the total on-disk present bytes
+// across its Buffers. When that exceeds DiskLimit a background worker punches
+// holes behind each Buffer's read head (keeping a BackWindow of recent
+// history) until the total is back under the limit. This is what bounds a
+// cache directory even when a single huge file is being streamed and never
+// closed. DiskLimit == 0 disables the disk backstop entirely (usenet relies
+// on its own playback-aware sliding window instead).
 type Pool struct {
 	name       string
 	memBudget  atomic.Int64 // RAM ceiling across Buffers; 0 = unlimited
