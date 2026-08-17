@@ -20,6 +20,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	nntpyenc "github.com/sirrobot01/decypharr/internal/nntp/yenc"
 	"github.com/sirrobot01/decypharr/internal/retry"
 	"github.com/sirrobot01/decypharr/internal/utils"
 )
@@ -1115,6 +1116,9 @@ func (c *Client) createConnection(ctx context.Context, provider config.UsenetPro
 		password: provider.Password,
 		logger:   c.logger.With().Str("host", provider.Host).Logger(),
 	}
+	// bodyReader follows conn.reader, so this stays valid across the
+	// STARTTLS reader swap.
+	conn.bodyDec = nntpyenc.NewBodyDecoder(&bodyReader{c: conn}, getBodyBuf)
 
 	// Set deadline for handshake (greeting + auth)
 	// If the server doesn't respond quickly during setup, we should abort.

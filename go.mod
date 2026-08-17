@@ -4,7 +4,6 @@ go 1.26.5
 
 require (
 	github.com/Tensai75/nzbparser v0.1.0
-	github.com/Tensai75/rapidyenc v0.0.1
 	github.com/anacrolix/torrent v1.61.0
 	github.com/bytedance/sonic v1.15.0
 	github.com/cavaliergopher/grab/v3 v3.0.1
@@ -16,6 +15,7 @@ require (
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/javi11/sevenzip v1.6.2-0.20251026160715-ca961b7f1239
 	github.com/klauspost/compress v1.19.2
+	github.com/mnightingale/rapidyenc v0.0.0-20260606125752-cdd7bcd89529
 	github.com/puzpuzpuz/xsync/v4 v4.5.0
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/rs/zerolog v1.35.1
