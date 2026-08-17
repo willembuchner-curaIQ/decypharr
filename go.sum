@@ -10,8 +10,6 @@ github.com/Shopify/sarama v1.19.0/go.mod h1:FVkBWblsNy7DGZRfXLU0O9RCGt5g3g3yEuWX
 github.com/Shopify/toxiproxy v2.1.4+incompatible/go.mod h1:OXgGpZ6Cli1/URJOF1DMxUHB2q5Ap20/P/eIdh4G0pI=
 github.com/Tensai75/nzbparser v0.1.0 h1:6RppAuWFahqu/kKjWO5Br0xuEYcxGz+XBTxYc+qvPo4=
 github.com/Tensai75/nzbparser v0.1.0/go.mod h1:IUIIaeGaYp2dLAAF29BWYeKTfI4COvXaeQAzQiTOfMY=
-github.com/Tensai75/rapidyenc v0.0.1 h1:T3H1jb//8DHMCkrfXLKVA8d6Lu7O+Lg9FDCAh0RhRL0=
-github.com/Tensai75/rapidyenc v0.0.1/go.mod h1:+vxAs/eZeQ60uwqVpa8AE3QET3JhhDjVVCMONrqSpmk=
 github.com/Tensai75/subjectparser v0.1.0 h1:6fEWnRov8lDHxJS2EWqY6VonwYfrIRN+k8h8H7fFwHA=
 github.com/Tensai75/subjectparser v0.1.0/go.mod h1:PNBFBnkOGbVDfX+56ZmC4GKSpqoRMCF1Y44xYd7NLGI=
 github.com/alecthomas/template v0.0.0-20160405071501-a0175ee3bccc/go.mod h1:LOuyumcjzFXgccqObfd/Ljyb9UuFJ6TxHnclSeseNhc=
@@ -198,6 +196,8 @@ github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D
 github.com/matttproud/golang_protobuf_extensions v1.0.1/go.mod h1:D8He9yQNgCq6Z5Ld7szi9bcBfOoFv/3dc6xSMkL2PC0=
 github.com/minio/sha256-simd v1.0.0 h1:v1ta+49hkWZyvaKwrQB8elexRqm6Y0aMLjCNsrYxo6g=
 github.com/minio/sha256-simd v1.0.0/go.mod h1:OuYzVNI5vcoYIAmbIvHPl3N3jUzVedXbKy5RFepssQM=
+github.com/mnightingale/rapidyenc v0.0.0-20260606125752-cdd7bcd89529 h1:LsDtI+lSEhhVkmez9c5oHfeDu7dyE00p52nlTNd/jj4=
+github.com/mnightingale/rapidyenc v0.0.0-20260606125752-cdd7bcd89529/go.mod h1:umkw2qbiwkE5lEUiFFluNIhNnjvBoMp8uwM2+y/YFNs=
 github.com/moby/sys/mountinfo v0.7.2 h1:1shs6aH5s4o5H2zQLn796ADW1wMrIwHsyJ2v9KouLrg=
 github.com/moby/sys/mountinfo v0.7.2/go.mod h1:1YOa8w8Ih7uW0wALDUgT1dTTSBrZ+HiBLGws92L2RU4=
 github.com/modern-go/concurrent v0.0.0-20180228061459-e0a39a4cb421/go.mod h1:6dJC0mAP4ikYIbvyc7fijjWJddQyLn8Ig3JB5CqoB9Q=
