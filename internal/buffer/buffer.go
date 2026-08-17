@@ -14,17 +14,20 @@
 //
 // Data lives only in RAM blocks; the buffer owns no file and never touches
 // disk. When admitting a block would exceed Config.MemorySize or the pool's
-// MemoryBudget, the least-recently-used block is dropped: its bytes cease to
-// exist, ReadAt for them returns ErrNotPresent, and OnEvict reports the lost
-// ranges so the owner can re-fetch on demand. Suits pure caches whose source
-// of truth is elsewhere (usenet re-downloads segments).
+// MemoryBudget, a victim block is dropped: its bytes cease to exist, ReadAt
+// for them returns ErrNotPresent, and OnEvict reports the lost ranges so the
+// owner can re-fetch on demand. The victim is chosen against the published
+// read head (SetReadHead): furthest behind it first, else furthest ahead —
+// never the block the consumer is about to read (see pickVictimLocked).
+// Suits pure caches whose source of truth is elsewhere (usenet re-downloads
+// segments).
 //
-// Eviction is deliberately inline, not a background worker: dropping the LRU
-// block is a map delete, a list unlink, and a small range-tree edit under a
-// lock the write path already holds. A worker would let RAM overshoot
-// between signal and trim and still contend on the same lock. The expensive
-// part — returning block memory to the OS — is already deferred to the
-// allocator (see alloc.go).
+// Eviction is deliberately inline, not a background worker: dropping a block
+// is a bounded scan, a map delete, and a small range-tree edit under a lock
+// the write path already holds. A worker would let RAM overshoot between
+// signal and trim and still contend on the same lock. The expensive part —
+// returning block memory to the OS — is already deferred to the allocator
+// (see alloc.go).
 //
 // # Shared machinery
 //
@@ -176,8 +179,6 @@ type Buffer struct {
 	// reads, DFS uses HasRange before serving.
 	mu         sync.RWMutex
 	blocks     map[int64]*block // ModeMemory resident blocks, keyed by block.off
-	lruHead    *block           // most recently used
-	lruTail    *block           // least recently used
 	bytesInRAM int64
 	maxBytes   int64
 
@@ -367,11 +368,7 @@ func (b *Buffer) writeMemRegion(blockOff int64, lo, hi int, src []byte) error {
 	}
 	blk, ok := b.blocks[blockOff]
 	var dropped []Range
-	if ok {
-		// Active blocks move to the LRU head so the drop path below always
-		// victimizes the coldest block, not one mid-write.
-		b.touchLocked(blk)
-	} else {
+	if !ok {
 		var err error
 		if blk, dropped, err = b.acquireBlockLocked(blockOff); err != nil {
 			b.mu.Unlock()
@@ -788,10 +785,11 @@ func (b *Buffer) Close() error {
 	return closeErr
 }
 
-// SetReadHead publishes the caller's current read position. It is the
-// frontier the owning Pool's disk backstop punches behind: under DiskLimit
-// pressure the pool reclaims [0, off-BackWindow). Pass 0 to clear. Cheap,
-// atomic, no lock.
+// SetReadHead publishes the caller's current read position. Disk mode: it
+// is the frontier the owning Pool's disk backstop punches behind (under
+// DiskLimit pressure the pool reclaims [0, off-BackWindow)). Memory mode:
+// it steers drop-victim selection away from the data the consumer is about
+// to read (see pickVictimLocked). Pass 0 to clear. Cheap, atomic, no lock.
 //
 // Contract for backstop safety (ModeDisk with DiskLimit > 0): publish a read
 // head that covers the offset you are about to read BEFORE issuing that
@@ -830,15 +828,15 @@ func (b *Buffer) Stats() Stats {
 }
 
 // -----------------------------------------------------------------------
-// Internal: memory-mode block cache and LRU
+// Internal: memory-mode block cache
 // -----------------------------------------------------------------------
 
 // acquireBlockLocked returns the resident block at blockOff, allocating one
-// if needed. Making room is inline drop-oldest: while admitting the block
-// would exceed the per-stream budget or the pool's, the LRU block is dropped
-// — its data ceases to exist (ranges removed, so reads return ErrNotPresent)
-// and its present ranges are returned for the caller to report via OnEvict
-// after releasing b.mu. Caller holds b.mu.
+// if needed. Making room is inline: while admitting the block would exceed
+// the per-stream budget or the pool's, a victim block is dropped — its data
+// ceases to exist (ranges removed, so reads return ErrNotPresent) and its
+// present ranges are returned for the caller to report via OnEvict after
+// releasing b.mu. Caller holds b.mu.
 func (b *Buffer) acquireBlockLocked(blockOff int64) (*block, []Range, error) {
 	if blk, ok := b.blocks[blockOff]; ok {
 		return blk, nil, nil
@@ -846,7 +844,7 @@ func (b *Buffer) acquireBlockLocked(blockOff int64) (*block, []Range, error) {
 
 	var dropped []Range
 	for b.bytesInRAM+blockSize > b.maxBytes || b.pool.wouldExceedMemory() {
-		victim := b.lruTail
+		victim := b.pickVictimLocked()
 		if victim == nil {
 			// Pure pool pressure with nothing of our own to drop: allocate
 			// anyway (bounded overshoot — one block per actively-allocating
@@ -868,8 +866,38 @@ func (b *Buffer) acquireBlockLocked(blockOff int64) (*block, []Range, error) {
 	b.blocks[blockOff] = blk
 	b.bytesInRAM += int64(blockSize)
 	b.pool.addBlock()
-	b.pushFrontLocked(blk)
 	return blk, dropped, nil
+}
+
+// pickVictimLocked selects the resident block whose loss hurts a streaming
+// consumer least, judged against the published read head (SetReadHead —
+// usenet feeds its consumed floor): the block furthest BEHIND the head
+// first (already-played history), else the block furthest AHEAD (deepest
+// prefetch, re-fetched asynchronously long before the player arrives).
+// Never the block nearest the head — write-order (LRU) picked exactly that
+// block whenever pressure arrived while the consumer trailed the download
+// frontier, dropping the bytes about to be read and stalling playback in a
+// re-fetch loop. With no head published (0), everything counts as ahead, so
+// the deepest prefetch goes first and the start of the file — what a fresh
+// consumer reads next — survives. O(resident blocks), which the budget caps
+// at a few hundred. Caller holds b.mu; returns nil when no block is
+// resident.
+func (b *Buffer) pickVictimLocked() *block {
+	head := b.readHead.Load()
+	var behind, ahead *block
+	for _, blk := range b.blocks {
+		if blk.off+blockSize <= head {
+			if behind == nil || blk.off < behind.off {
+				behind = blk
+			}
+		} else if ahead == nil || blk.off > ahead.off {
+			ahead = blk
+		}
+	}
+	if behind != nil {
+		return behind
+	}
+	return ahead
 }
 
 // dropBlockLocked removes a block from the cache and returns its buffer to
@@ -877,51 +905,9 @@ func (b *Buffer) acquireBlockLocked(blockOff int64) (*block, []Range, error) {
 // range tracker accordingly. Caller holds b.mu.
 func (b *Buffer) dropBlockLocked(blk *block) {
 	delete(b.blocks, blk.off)
-	b.unlinkLocked(blk)
 	b.bytesInRAM -= int64(blockSize)
 	b.pool.dropBytes(int64(blockSize))
 	b.alloc.put(blk.bufPtr)
-}
-
-// -----------------------------------------------------------------------
-// LRU list manipulation. Operate only on b.lruHead / b.lruTail; require
-// b.mu held by the caller.
-// -----------------------------------------------------------------------
-
-func (b *Buffer) pushFrontLocked(blk *block) {
-	blk.prev = nil
-	blk.next = b.lruHead
-	if b.lruHead != nil {
-		b.lruHead.prev = blk
-	}
-	b.lruHead = blk
-	if b.lruTail == nil {
-		b.lruTail = blk
-	}
-}
-
-func (b *Buffer) unlinkLocked(blk *block) {
-	if blk.prev != nil {
-		blk.prev.next = blk.next
-	} else {
-		b.lruHead = blk.next
-	}
-	if blk.next != nil {
-		blk.next.prev = blk.prev
-	} else {
-		b.lruTail = blk.prev
-	}
-	blk.prev, blk.next = nil, nil
-}
-
-// touchLocked moves blk to the LRU head. Caller must hold the exclusive
-// lock (it mutates the list).
-func (b *Buffer) touchLocked(blk *block) {
-	if b.lruHead == blk {
-		return
-	}
-	b.unlinkLocked(blk)
-	b.pushFrontLocked(blk)
 }
 
 // -----------------------------------------------------------------------

@@ -48,8 +48,9 @@ type SegmentCache struct {
 	accessTime []atomic.Int64
 
 	// Storage layer.
-	buf      *buffer.Buffer
-	diskPath string // remembered for RemoveAll on Close
+	buf        *buffer.Buffer
+	memoryMode bool   // RAM-backed buffer (the default); false = buffer_to_disk
+	diskPath   string // remembered for RemoveAll on Close
 
 	// cachedBytes tracks the bytes currently stored across all OnDisk
 	// segments (RAM blocks in memory mode, file bytes in disk mode).
@@ -124,29 +125,42 @@ const (
 	// of segments in one burst. Sweeps are cheap; the next tick picks up
 	// the rest.
 	segmentSweepBatch = 128
+
+	// pressureBackWindowBytes is the back-window a memory-mode sweep keeps
+	// while the shared pool is nearly exhausted (poolMemoryPressured):
+	// enough for a token scrub-back, small enough that idle streams and
+	// played-out RAR volumes donate their history back to the pool.
+	pressureBackWindowBytes = 4 << 20
 )
 
 // memoryWindowSize sizes the memory-mode cache budget per stream from the
 // configured read-ahead: 1× the prefetch window ahead of playback plus 2×
-// for the history behind it (the sweeper keeps half the budget as its back
-// window). A stream whose live window outgrows the budget sheds its oldest
-// cached segments (they re-fetch on demand) — the disk file is never a
-// fallback. Clamped to [32MB, MaxDisk]; probe-style readers (read-ahead
-// disabled, PrefetchAhead 0) get the floor.
-func memoryWindowSize(cfg Config, segments []SegmentMeta) int64 {
-	const floor = int64(32 << 20)
+// for the history behind it. It also returns the prefetch window in bytes so
+// the caller can reserve it when deriving the sweep back-window. A stream
+// whose live window outgrows the budget sheds cached segments (they re-fetch
+// on demand) — the disk file is never a fallback. Clamped to [floor,
+// MaxDisk]; the floor is 32MB for streaming readers and 8MB for probe-style
+// readers (read-ahead disabled, PrefetchAhead 0), which touch small
+// scattered ranges and would otherwise be pure pool pressure — library
+// scans and imports open many at once.
+func memoryWindowSize(cfg Config, segments []SegmentMeta) (budget, ahead int64) {
+	floor := int64(32 << 20)
+	if cfg.PrefetchAhead <= 0 {
+		floor = 8 << 20
+	}
 	segBytes := int64(750 * 1024) // typical usenet segment, same fallback as PrefetchAheadSegments
 	if len(segments) > 0 && segments[0].Bytes > 0 {
 		segBytes = segments[0].Bytes
 	}
-	mem := 3 * int64(cfg.PrefetchAhead) * segBytes
-	if mem < floor {
-		mem = floor
+	ahead = int64(cfg.PrefetchAhead) * segBytes
+	budget = 3 * ahead
+	if budget < floor {
+		budget = floor
 	}
-	if cfg.MaxDisk > 0 && mem > cfg.MaxDisk {
-		mem = cfg.MaxDisk
+	if cfg.MaxDisk > 0 && budget > cfg.MaxDisk {
+		budget = cfg.MaxDisk
 	}
-	return mem
+	return budget, ahead
 }
 
 // NewSegmentCache creates a new segment cache backed by a freshly-created
@@ -190,15 +204,17 @@ func NewSegmentCache(
 	// and only the playback-driven sweeper runs.
 	cacheBudget := config.MaxDisk
 	diskPath := ""
+	var aheadBytes int64
 	if config.MemoryBuffer {
 		// Memory mode (the default): the sliding window lives as resident
 		// RAM blocks sized from the configured read-ahead; sweep discards
 		// free blocks as playback advances, and when the window outgrows
-		// its budget the buffer drops the least-recently-written block
-		// inline (OnEvict above marks the segments Empty for re-fetch).
-		// No directory, no file — disk is never touched.
+		// its budget the buffer drops a victim block inline, steered away
+		// from the read head (OnEvict above marks the covered segments
+		// Empty for re-fetch). No directory, no file — disk is never
+		// touched.
 		bufCfg.Mode = buffer.ModeMemory
-		bufCfg.MemorySize = memoryWindowSize(config, segments)
+		bufCfg.MemorySize, aheadBytes = memoryWindowSize(config, segments)
 		cacheBudget = 0
 	} else {
 		// Disk mode (buffer_to_disk): decoded segments pwrite straight to a
@@ -234,16 +250,20 @@ func NewSegmentCache(
 	// The sweep window adapts to the mode. Disk mode keeps the generous
 	// fixed back-window plus a retention age. Memory mode derives the
 	// window from its RAM budget: the sweeper must reclaim BEFORE the
-	// budget fills, or the buffer's pin-blind, block-granular drop becomes
-	// the primary evictor — every dropped block leaves partially-covered
-	// boundary segments that cost a re-download to heal. Half the budget
-	// behind the cursor leaves the other half for the prefetch window ahead
-	// (~1/3) plus slack; the age gate is dropped because the budget, not
-	// time, is the binding constraint.
+	// budget fills, or the buffer's block-granular drop becomes the primary
+	// evictor and every drop wounds segments that cost a re-download to
+	// heal. The prefetch window ahead of the cursor is reserved first —
+	// when the budget clamp bites (large read-ahead), budget/2 of history
+	// would leave less than the prefetcher writes ahead and the stream
+	// would evict its own prefetch — history gets what remains, capped at
+	// half the budget and the disk-mode window. The age gate is dropped
+	// because the budget, not time, is the binding constraint.
 	backWindow := int64(backWindowBytes)
 	retention := segmentMinRetentionAge
 	if config.MemoryBuffer {
-		backWindow = min(int64(backWindowBytes), bufCfg.MemorySize/2)
+		const slack = int64(8 << 20) // in-flight decodes and block rounding
+		backWindow = min(int64(backWindowBytes), bufCfg.MemorySize/2, bufCfg.MemorySize-aheadBytes-slack)
+		backWindow = max(backWindow, 4<<20)
 		retention = 0
 	}
 
@@ -258,6 +278,7 @@ func NewSegmentCache(
 		errors:         make([]atomic.Pointer[error], segCount),
 		accessTime:     make([]atomic.Int64, segCount),
 		buf:            buf,
+		memoryMode:     config.MemoryBuffer,
 		diskPath:       diskPath,
 		diskBudget:     cacheBudget,
 		backWindow:     backWindow,
@@ -823,7 +844,17 @@ func (sc *SegmentCache) sweepWindow() {
 	if consumedHi <= 0 {
 		return
 	}
-	cutoffOff := consumedHi - sc.backWindow
+	backWindow := sc.backWindow
+	if sc.memoryMode && poolMemoryPressured() {
+		// The shared pool is nearly exhausted — likely many concurrent
+		// streams, or a multi-volume RAR whose played-out volumes each
+		// still hold a full back-window of history. Trailing history is
+		// the cheapest RAM to give back: tighten to a token scrub window
+		// so every cache donates before the buffers start dropping live
+		// blocks under pool pressure.
+		backWindow = pressureBackWindowBytes
+	}
+	cutoffOff := consumedHi - backWindow
 	if cutoffOff <= 0 {
 		return
 	}
@@ -944,24 +975,37 @@ func (sc *SegmentCache) evictBatch(indices []int) {
 	}
 }
 
-// onBufferEvict is invoked by the buffer pool after it punches a hole behind
-// the read head (only when the usenet pool is configured with a disk limit —
-// off by default). It marks every segment fully inside the reclaimed range
-// Empty so a later read re-fetches it rather than reading a hole. Segments that
-// only partially overlap are left alone; the pool only punches present ranges,
-// so a partial overlap means the segment straddles the back-window boundary and
-// should be kept.
+// onBufferEvict is invoked when the buffer released bytes on its own
+// initiative: a memory-mode block drop under RAM pressure, or (disk mode
+// with a pool disk limit — off by default) a punch behind the read head. It
+// marks the affected segments Empty so they re-fetch instead of pointing at
+// data that no longer exists.
+//
+// The overlap rule differs by mode. A memory-mode drop destroys every byte
+// it covered, and a segment missing ANY byte is unreadable — so any overlap
+// marks the segment Empty, pinned or not (the bytes are already gone;
+// marking now lets the prefetcher heal the hole asynchronously instead of
+// the player discovering it and stalling on a synchronous re-fetch). A
+// disk-mode punch only covers present ranges wholly behind the back-window,
+// so a partial overlap there means the segment straddles the window
+// boundary and its bytes are still on disk — keep it.
 func (sc *SegmentCache) onBufferEvict(off, length int64) {
 	end := off + length
 	startIdx, endIdx := sc.SegmentsForRange(off, length)
 	for idx := startIdx; idx <= endIdx && idx < sc.segCount; idx++ {
 		segStart := sc.segOffsets[idx]
 		segEnd := sc.segOffsets[idx+1]
-		if segStart < off || segEnd > end {
-			continue // not fully contained
-		}
-		if sc.pinCounts[idx].Load() > 0 {
-			continue
+		if sc.memoryMode {
+			if segStart >= end || segEnd <= off {
+				continue // no overlap
+			}
+		} else {
+			if segStart < off || segEnd > end {
+				continue // not fully contained
+			}
+			if sc.pinCounts[idx].Load() > 0 {
+				continue
+			}
 		}
 		if !sc.states[idx].CompareAndSwap(uint32(StateOnDisk), uint32(StateEmpty)) {
 			continue

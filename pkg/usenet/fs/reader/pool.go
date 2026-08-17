@@ -26,3 +26,12 @@ func usenetBufferPool() *buffer.Pool {
 	})
 	return bufPool
 }
+
+// poolMemoryPressured reports whether the shared pool is at ≥7/8 of its RAM
+// budget — the signal for memory-mode sweeps to tighten their back-windows
+// (see sweepWindow) so trailing history is given back before the buffers
+// must drop live blocks. Always false with an unlimited budget.
+func poolMemoryPressured() bool {
+	st := usenetBufferPool().Stats()
+	return st.MemoryBudget > 0 && st.MemoryInUse >= st.MemoryBudget-st.MemoryBudget/8
+}

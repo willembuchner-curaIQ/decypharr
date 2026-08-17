@@ -249,70 +249,105 @@ func TestDiskPersistsAcrossReopen(t *testing.T) {
 	}
 }
 
-// TestMemoryModeDropsOldest: passing the RAM budget drops the
-// least-recently-written blocks (data gone, OnEvict reports the ranges), and
-// no file is ever created — DiskPath is ignored in memory mode.
-func TestMemoryModeDropsOldest(t *testing.T) {
-	p := newTestPool(t, PoolConfig{})
-	path := filepath.Join(t.TempDir(), "buf.bin")
-	var evicted []Range
-	b := newTestBuffer(t, p, Config{
-		Mode:       ModeMemory,
-		DiskPath:   path, // ignored: memory mode owns no file
-		MemorySize: 4 << 20,
-		OnEvict:    func(off, length int64) { evicted = append(evicted, Range{off, length}) },
-	})
+// TestMemoryModeDropVictims: passing the RAM budget drops blocks chosen
+// against the read head — furthest behind it first, else deepest prefetch
+// ahead — never the data the consumer is about to read. OnEvict reports the
+// lost ranges, and no file is ever created (DiskPath is ignored).
+func TestMemoryModeDropVictims(t *testing.T) {
+	newMemBuffer := func(t *testing.T, evicted *[]Range) (*Buffer, string) {
+		p := newTestPool(t, PoolConfig{})
+		path := filepath.Join(t.TempDir(), "buf.bin")
+		b := newTestBuffer(t, p, Config{
+			Mode:       ModeMemory,
+			DiskPath:   path, // ignored: memory mode owns no file
+			MemorySize: 4 << 20,
+			OnEvict:    func(off, length int64) { *evicted = append(*evicted, Range{off, length}) },
+		})
+		return b, path
+	}
 
-	chunk := make([]byte, 1<<20)
-	for off := int64(0); off < 8<<20; off += 1 << 20 {
-		fillPattern(chunk, off)
-		if _, err := b.WriteAt(chunk, off); err != nil {
+	// A consumer trailing right behind the write frontier: drops take the
+	// oldest history behind it, the newest data survives.
+	t.Run("advancing-head", func(t *testing.T) {
+		var evicted []Range
+		b, path := newMemBuffer(t, &evicted)
+		chunk := make([]byte, 1<<20)
+		for off := int64(0); off < 8<<20; off += 1 << 20 {
+			b.SetReadHead(off)
+			fillPattern(chunk, off)
+			if _, err := b.WriteAt(chunk, off); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		st := b.Stats()
+		if st.BlocksInRAM != 4 || st.Evictions != 4 || st.DiskWrites != 0 {
+			t.Fatalf("unexpected stats: %+v", st)
+		}
+		if _, err := b.ReadAt(make([]byte, 1<<20), 0); !errors.Is(err, ErrNotPresent) {
+			t.Fatalf("read of dropped range: err=%v, want ErrNotPresent", err)
+		}
+		got := make([]byte, 4<<20)
+		if _, err := b.ReadAt(got, 4<<20); err != nil {
 			t.Fatal(err)
 		}
-	}
+		checkPattern(t, got, 4<<20)
 
-	st := b.Stats()
-	if st.BlocksInRAM != 4 {
-		t.Fatalf("expected 4 resident blocks at budget, got %d", st.BlocksInRAM)
-	}
-	if st.DiskWrites != 0 {
-		t.Fatalf("memory mode wrote to disk: %+v", st)
-	}
-	if st.Evictions != 4 {
-		t.Fatalf("expected 4 drops, got %d", st.Evictions)
-	}
-
-	// Oldest half is gone, newest half reads back.
-	if _, err := b.ReadAt(make([]byte, 1<<20), 0); !errors.Is(err, ErrNotPresent) {
-		t.Fatalf("read of dropped range: err=%v, want ErrNotPresent", err)
-	}
-	got := make([]byte, 4<<20)
-	if _, err := b.ReadAt(got, 4<<20); err != nil {
-		t.Fatal(err)
-	}
-	checkPattern(t, got, 4<<20)
-
-	// OnEvict reported exactly the dropped [0, 4MB).
-	var reported int64
-	for _, r := range evicted {
-		if r.Off < 0 || r.Off+r.Size > 4<<20 {
-			t.Fatalf("OnEvict reported range outside dropped span: %+v", r)
+		// OnEvict reported exactly the dropped [0, 4MB).
+		var reported int64
+		for _, r := range evicted {
+			if r.Off < 0 || r.Off+r.Size > 4<<20 {
+				t.Fatalf("OnEvict reported range outside dropped span: %+v", r)
+			}
+			reported += r.Size
 		}
-		reported += r.Size
-	}
-	if reported != 4<<20 {
-		t.Fatalf("OnEvict reported %d bytes, want %d", reported, int64(4<<20))
-	}
+		if reported != 4<<20 {
+			t.Fatalf("OnEvict reported %d bytes, want %d", reported, int64(4<<20))
+		}
 
-	if err := b.Sync(); err != nil {
-		t.Fatal(err)
-	}
-	if err := b.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("memory mode created a disk file: %v", err)
-	}
+		if err := b.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("memory mode created a disk file: %v", err)
+		}
+	})
+
+	// No head published (a fresh stream before its first delivery): the
+	// consumer reads from the start next, so drops shed the deepest
+	// prefetch and the start of the file survives. Write-order LRU got
+	// this exactly wrong — it dropped the start.
+	t.Run("no-head-protects-start", func(t *testing.T) {
+		var evicted []Range
+		b, _ := newMemBuffer(t, &evicted)
+		chunk := make([]byte, 1<<20)
+		for off := int64(0); off < 8<<20; off += 1 << 20 {
+			fillPattern(chunk, off)
+			if _, err := b.WriteAt(chunk, off); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if st := b.Stats(); st.Evictions != 4 {
+			t.Fatalf("expected 4 drops, got %+v", st)
+		}
+		// The start — what the consumer reads next — is intact.
+		got := make([]byte, 3<<20)
+		if _, err := b.ReadAt(got, 0); err != nil {
+			t.Fatalf("start of file was dropped: %v", err)
+		}
+		checkPattern(t, got, 0)
+		// The write frontier survives too; the middle prefetch was shed.
+		if _, err := b.ReadAt(got[:1<<20], 7<<20); err != nil {
+			t.Fatalf("frontier block was dropped: %v", err)
+		}
+		if _, err := b.ReadAt(got[:1<<20], 4<<20); !errors.Is(err, ErrNotPresent) {
+			t.Fatalf("middle prefetch should be shed: err=%v", err)
+		}
+	})
 }
 
 // TestMemoryModePoolPressureSelfEvicts: when the POOL budget (not the

@@ -14,8 +14,4 @@ type block struct {
 	// bufPtr is the exact *[]byte returned by blockAllocator.get() so that
 	// dropBlockLocked can put it back unambiguously.
 	bufPtr *[]byte
-
-	// LRU doubly-linked list pointers. Managed only by the Buffer under
-	// b.mu — never inspect from outside the cache layer.
-	prev, next *block
 }

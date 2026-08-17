@@ -12,32 +12,61 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// TestMemoryWindowSize: the memory-mode RAM ceiling tracks the configured
-// read-ahead (3× the prefetch window), floored at 32MB for probe-style
-// readers and capped at MaxDisk.
+// TestMemoryWindowSize: the memory-mode RAM budget tracks the configured
+// read-ahead (3× the prefetch window), floored at 32MB for streams and 8MB
+// for probe-style readers, capped at MaxDisk. The ahead value reports the
+// prefetch window so the sweep back-window can reserve it.
 func TestMemoryWindowSize(t *testing.T) {
 	seg750 := []SegmentMeta{{Bytes: 750 * 1024}}
 	base := DefaultConfig() // MaxDisk 256MB
 	cases := []struct {
-		name     string
-		prefetch int
-		segs     []SegmentMeta
-		want     int64
+		name       string
+		prefetch   int
+		segs       []SegmentMeta
+		wantBudget int64
+		wantAhead  int64
 	}{
-		{"probe-no-readahead", 0, seg750, 32 << 20},
-		{"small-readahead-floors", 8, seg750, 32 << 20}, // 3*8*750KB = 17.6MB < floor
-		{"default-16MB-readahead", 22, seg750, 3 * 22 * 750 * 1024},
-		{"large-readahead-caps", 256, seg750, 256 << 20}, // 3*256*750KB = 576MB > MaxDisk
-		{"no-segment-size-fallback", 22, nil, 3 * 22 * 750 * 1024},
+		{"probe-no-readahead", 0, seg750, 8 << 20, 0},
+		{"small-readahead-floors", 8, seg750, 32 << 20, 8 * 750 * 1024}, // 3*8*750KB = 17.6MB < floor
+		{"default-16MB-readahead", 22, seg750, 3 * 22 * 750 * 1024, 22 * 750 * 1024},
+		{"large-readahead-caps", 256, seg750, 256 << 20, 256 * 750 * 1024}, // 3*256*750KB = 576MB > MaxDisk
+		{"no-segment-size-fallback", 22, nil, 3 * 22 * 750 * 1024, 22 * 750 * 1024},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := base
 			cfg.PrefetchAhead = tc.prefetch
-			if got := memoryWindowSize(cfg, tc.segs); got != tc.want {
-				t.Fatalf("memoryWindowSize = %d, want %d", got, tc.want)
+			budget, ahead := memoryWindowSize(cfg, tc.segs)
+			if budget != tc.wantBudget || ahead != tc.wantAhead {
+				t.Fatalf("memoryWindowSize = (%d, %d), want (%d, %d)", budget, ahead, tc.wantBudget, tc.wantAhead)
 			}
 		})
+	}
+}
+
+// TestMemoryBackWindowReservesPrefetch: when the budget clamp bites (large
+// read-ahead), the sweep back-window shrinks below budget/2 so the prefetch
+// window ahead of the cursor always fits — otherwise the stream would evict
+// its own prefetch and stall.
+func TestMemoryBackWindowReservesPrefetch(t *testing.T) {
+	const segSize = int64(750 * 1024)
+	segs := []SegmentMeta{{MessageID: "<s0@test>", Number: 1, Bytes: segSize, StartOffset: 0, EndOffset: segSize - 1}}
+	cfg := DefaultConfig()
+	cfg.DiskPath = t.TempDir()
+	cfg.PrefetchAhead = 256 // ahead = 192MB; budget clamps to 256MB
+
+	cache, err := NewSegmentCache(context.Background(), segs, cfg, &ReaderStats{}, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewSegmentCache: %v", err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+
+	budget, ahead := memoryWindowSize(cfg, segs)
+	if maxBack := budget - ahead - (8 << 20); cache.backWindow > maxBack {
+		t.Fatalf("backWindow %d leaves less than the %d-byte prefetch window in the %d budget", cache.backWindow, ahead, budget)
+	}
+	if cache.backWindow < 4<<20 {
+		t.Fatalf("backWindow %d below the 4MB floor", cache.backWindow)
 	}
 }
 
@@ -154,6 +183,60 @@ func TestMemorySweeperLeadsEviction(t *testing.T) {
 
 	if drops := cache.buf.Stats().Evictions; drops != 0 {
 		t.Fatalf("buffer block-drop fired %d times; the sweeper must lead eviction", drops)
+	}
+}
+
+// TestOnBufferEvictOverlapSemantics: a memory-mode drop destroys every byte
+// it covered, so ANY overlapped segment flips to Empty (the prefetcher then
+// heals it asynchronously); a disk-mode pool punch only empties
+// fully-contained segments — partial overlap means the segment straddles
+// the back-window boundary and its bytes are still on disk.
+func TestOnBufferEvictOverlapSemantics(t *testing.T) {
+	const segSize = int64(750 * 1024)
+	for _, memory := range []bool{true, false} {
+		name := "disk"
+		if memory {
+			name = "memory"
+		}
+		t.Run(name, func(t *testing.T) {
+			segs := make([]SegmentMeta, 4)
+			for i := range segs {
+				segs[i] = SegmentMeta{
+					MessageID:   fmt.Sprintf("<seg%d@test>", i),
+					Number:      i + 1,
+					Bytes:       segSize,
+					StartOffset: int64(i) * segSize,
+					EndOffset:   int64(i+1)*segSize - 1,
+				}
+			}
+			cfg := DefaultConfig()
+			cfg.DiskPath = t.TempDir()
+			cfg.MemoryBuffer = memory
+
+			cache, err := NewSegmentCache(context.Background(), segs, cfg, &ReaderStats{}, zerolog.Nop())
+			if err != nil {
+				t.Fatalf("NewSegmentCache: %v", err)
+			}
+			t.Cleanup(func() { _ = cache.Close() })
+			data := make([]byte, segSize)
+			for i := range segs {
+				putSegment(t, cache, i, data)
+			}
+
+			// A release spanning the tail half of segment 1 and the head
+			// half of segment 2 — full containment of neither.
+			cache.onBufferEvict(cache.segOffsets[1]+segSize/2, segSize)
+
+			wantMid := StateOnDisk
+			if memory {
+				wantMid = StateEmpty
+			}
+			for i, want := range []SegmentState{StateOnDisk, wantMid, wantMid, StateOnDisk} {
+				if got := cache.GetState(i); got != want {
+					t.Fatalf("segment %d state = %v, want %v", i, got, want)
+				}
+			}
+		})
 	}
 }
 
