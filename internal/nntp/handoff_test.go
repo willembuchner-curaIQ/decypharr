@@ -292,13 +292,15 @@ func TestCheckoutFlushesPoolOnPingTimeout(t *testing.T) {
 	pp.config = config.UsenetProvider{Host: "127.0.0.1", Port: closedPort(t)}
 
 	// Two responsive-but-stale entries below, one silent entry on top of
-	// the LIFO stack (popped first).
+	// the LIFO stack (popped first). Idle past staleThreshold (60s) so the
+	// verify ping runs, but inside idleTimeout (5m) — beyond it the idle
+	// path closes every entry before any ping and the flush never runs.
 	lower := []*Connection{newPipeConnection(t, true), newPipeConnection(t, true)}
 	for _, conn := range lower {
-		poolEntry(pp, conn, 2*time.Hour)
+		poolEntry(pp, conn, 90*time.Second)
 	}
 	silent := newSilentPipeConnection(t)
-	poolEntry(pp, silent, 2*time.Hour)
+	poolEntry(pp, silent, 90*time.Second)
 
 	pp.slots <- struct{}{} // hold the slot the checkout owns
 	_, err := c.getOrCreateFromPool(context.Background(), pp, pp.config, true)

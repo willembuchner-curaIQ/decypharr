@@ -135,6 +135,8 @@ type Client struct {
 	idleTimeout    time.Duration // close pooled conns unused for this long
 	staleThreshold time.Duration // verify-ping on checkout after this much inactivity
 	pingInterval   time.Duration // reaper keepalive-ping cadence for idle conns
+	pingTimeout    time.Duration // budget for a checkout verify-ping
+	keepalivePing  time.Duration // budget for a reaper keepalive ping
 }
 
 // SpeedTestResult holds the result of a provider speed test
@@ -200,8 +202,16 @@ type TimeoutConfig struct {
 	HandshakeTimeout time.Duration
 	// Read deadline for streaming segment data
 	StreamBodyTimeout time.Duration
-	// Deadline for lightweight health checks (DATE)
+	// Deadline for the verify-ping (DATE) on checkout. This one is on the
+	// critical path — a reader is already waiting — so it stays tight and
+	// fails over to a fresh dial rather than waiting out a slow answer.
 	PingTimeout time.Duration
+	// Deadline for the reaper's background keepalive ping (DATE). Nobody is
+	// waiting on it, so it gets a wider budget: pings share the link with
+	// bulk BODY transfers, and under a saturated downlink a round trip can
+	// take seconds. A tight budget there kills warm connections that are
+	// merely queued behind a download, forcing a needless TCP+TLS+AUTH.
+	KeepalivePingTimeout time.Duration
 	// Health check connections idle longer than this
 	StaleThreshold time.Duration
 	// Close connections idle longer than this
@@ -228,10 +238,14 @@ var DefaultTimeouts = TimeoutConfig{
 	HandshakeTimeout:  10 * time.Second,
 	StreamBodyTimeout: 60 * time.Second,
 	PingTimeout:       1500 * time.Millisecond,
-	StaleThreshold:    60 * time.Second,
-	IdleTimeout:       5 * time.Minute,
-	PingInterval:      30 * time.Second,
-	ReaperInterval:    5 * time.Second,
+	// Wide enough to ride out queueing delay on a saturated link. A dead
+	// path still costs only one of these per sweep: the first timeout
+	// flushes the pool instead of pinging the rest of the batch.
+	KeepalivePingTimeout: 5 * time.Second,
+	StaleThreshold:       60 * time.Second,
+	IdleTimeout:          5 * time.Minute,
+	PingInterval:         30 * time.Second,
+	ReaperInterval:       5 * time.Second,
 }
 
 // Package-level timeouts used by all clients
@@ -253,6 +267,9 @@ func normalizeTimeouts(in TimeoutConfig) TimeoutConfig {
 	if in.PingTimeout <= 0 {
 		in.PingTimeout = 1500 * time.Millisecond
 	}
+	if in.KeepalivePingTimeout <= 0 {
+		in.KeepalivePingTimeout = 5 * time.Second
+	}
 	if in.IdleTimeout <= 0 {
 		in.IdleTimeout = 5 * time.Minute
 	}
@@ -266,6 +283,12 @@ func normalizeTimeouts(in TimeoutConfig) TimeoutConfig {
 	// Keepalive pings must fire well inside the idle window to be useful.
 	if in.PingInterval <= 0 || in.PingInterval >= in.IdleTimeout {
 		in.PingInterval = min(30*time.Second, in.IdleTimeout/2)
+	}
+	// A keepalive ping holds a pool slot while it runs. Keep that below the
+	// cadence at which pings are issued so a sweep cannot still be waiting
+	// when the next one is due.
+	if in.KeepalivePingTimeout > in.PingInterval {
+		in.KeepalivePingTimeout = in.PingInterval
 	}
 	if in.ReaperInterval <= 0 {
 		in.ReaperInterval = 5 * time.Second
@@ -332,6 +355,8 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		idleTimeout:      timeouts.IdleTimeout,
 		staleThreshold:   timeouts.StaleThreshold,
 		pingInterval:     timeouts.PingInterval,
+		pingTimeout:      timeouts.PingTimeout,
+		keepalivePing:    timeouts.KeepalivePingTimeout,
 	}
 	if cfg.Usenet.ConnIdleTimeout != "" {
 		if d, err := utils.ParseDuration(cfg.Usenet.ConnIdleTimeout); err != nil || d <= 0 {
@@ -345,6 +370,9 @@ func NewClient(cfg *config.Config) (*Client, error) {
 			}
 			if cm.pingInterval >= cm.idleTimeout {
 				cm.pingInterval = cm.idleTimeout / 2
+			}
+			if cm.keepalivePing > cm.pingInterval {
+				cm.keepalivePing = cm.pingInterval
 			}
 		}
 	}
@@ -508,7 +536,7 @@ func (c *Client) checkEntryHealth(entry *connectionEntry) (healthy, pingTimedOut
 	// A successful reaper keepalive counts as activity, so freshly-pinged
 	// connections skip the extra checkout round-trip.
 	if time.Since(entry.lastActivity()) > c.staleThreshold {
-		if err := entry.conn.ping(); err != nil {
+		if err := entry.conn.ping(c.pingTimeout); err != nil {
 			return false, isTimeoutLike(err)
 		}
 	}
@@ -1215,32 +1243,102 @@ func (c *Client) reapIdleConnections() {
 		// Ping outside the pool lock, in parallel, so slot-held time stays
 		// one round-trip rather than the whole batch's.
 		if len(toPing) > 0 {
-			var wg sync.WaitGroup
-			workers := min(len(toPing), 4)
-			pingCh := make(chan *connectionEntry, len(toPing))
-			for _, entry := range toPing {
-				pingCh <- entry
-			}
-			close(pingCh)
-			for range workers {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for entry := range pingCh {
-						c.keepAlive(pp, entry, now)
-					}
-				}()
-			}
-			wg.Wait()
+			c.keepAliveBatch(pp, toPing, now)
 		}
 	}
+}
+
+// keepaliveState is one sweep's shared verdict on whether a provider is
+// still reachable.
+type keepaliveState struct {
+	ok       atomic.Bool // some ping answered: the path is up
+	pathDown atomic.Bool // a ping timed out and none has answered
+}
+
+// errPathDown marks an entry discarded unpinged because an earlier ping in
+// the same sweep timed out.
+var errPathDown = errors.New("provider path down, skipped keepalive ping")
+
+// keepAliveBatch pings one sweep's worth of idle entries in parallel.
+//
+// A ping that times out is not one dead session: a live peer that dropped a
+// session answers with RST or EOF, so silence means the path to the provider
+// is gone and every other idle connection on it is dead too. The first
+// timeout therefore short-circuits the rest of the batch and flushes the
+// pool, the same rule checkout applies in getOrCreateFromPool. Without it a
+// provider blip costs len(batch) × KeepalivePingTimeout of held slots to
+// learn what the first ping already proved.
+func (c *Client) keepAliveBatch(pp *ProviderPool, toPing []*connectionEntry, now time.Time) {
+	var wg sync.WaitGroup
+	var st keepaliveState
+	workers := min(len(toPing), 4)
+	pingCh := make(chan *connectionEntry, len(toPing))
+	for _, entry := range toPing {
+		pingCh <- entry
+	}
+	close(pingCh)
+
+	// Per-worker tallies, merged after the wait: rolling them up avoids one
+	// log line per dead connection, which is what made a single provider
+	// blip look like a flood.
+	type tally struct {
+		failed int
+		err    error
+	}
+	tallies := make([]tally, workers)
+	for i := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for entry := range pingCh {
+				err := c.keepAlive(pp, entry, now, &st)
+				if err == nil {
+					continue
+				}
+				tallies[i].failed++
+				// errPathDown is a consequence, not a cause — keep looking
+				// for the ping error that actually condemned the batch.
+				if tallies[i].err == nil && !errors.Is(err, errPathDown) {
+					tallies[i].err = err
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	failed, firstErr := 0, error(nil)
+	for _, t := range tallies {
+		failed += t.failed
+		if firstErr == nil {
+			firstErr = t.err
+		}
+	}
+	if failed == 0 {
+		return
+	}
+	// Flush only if nothing on this provider answered: a sweep with both a
+	// timeout and a live reply means one wedged session, not a dead path,
+	// and closing the connections that just proved themselves would throw
+	// away exactly the warm pool this reaper exists to keep.
+	flushed := st.pathDown.Load() && !st.ok.Load()
+	if flushed {
+		c.flushIdle(pp)
+	}
+	c.logger.Debug().Err(firstErr).
+		Str("provider", pp.config.Host).
+		Int("failed", failed).
+		Int("batch", len(toPing)).
+		Bool("pool_flushed", flushed).
+		Msg("keepalive pings failed, closed idle connections")
 }
 
 // keepAlive pings an idle connection that was removed from the pool (with a
 // slot held) and returns it on success. Failed pings close the connection —
 // exactly the sessions the old aggressive idle timeout existed to avoid
-// handing out, caught here without sacrificing the warm pool.
-func (c *Client) keepAlive(pp *ProviderPool, entry *connectionEntry, now time.Time) {
+// handing out, caught here without sacrificing the warm pool. A timeout may
+// also condemn the path, which tells the rest of the batch to give up
+// unpinged.
+func (c *Client) keepAlive(pp *ProviderPool, entry *connectionEntry, now time.Time, st *keepaliveState) error {
 	discard := func() {
 		conn := entry.conn
 		releaseConnectionEntry(entry)
@@ -1248,23 +1346,35 @@ func (c *Client) keepAlive(pp *ProviderPool, entry *connectionEntry, now time.Ti
 		c.releaseSlot(pp)
 	}
 
-	if err := entry.conn.ping(); err != nil {
-		c.logger.Debug().Err(err).Str("provider", entry.provider.Host).
-			Msg("keepalive ping failed, closing idle connection")
+	if st.pathDown.Load() {
+		// A sibling ping already timed out; this one would too.
 		discard()
-		return
+		return errPathDown
 	}
+	if err := entry.conn.ping(c.keepalivePing); err != nil {
+		// Silence condemns the path, but only while nothing has answered:
+		// a live peer that dropped one session sends RST or EOF, so a
+		// timeout alongside a working sibling is a wedged session, not an
+		// outage.
+		if isTimeoutLike(err) && !st.ok.Load() {
+			st.pathDown.Store(true)
+		}
+		discard()
+		return err
+	}
+	st.ok.Store(true)
 	entry.lastPing = now
 
 	pp.mu.Lock()
 	if c.closed.Load() || len(pp.conns) >= pp.max {
 		pp.mu.Unlock()
 		discard()
-		return
+		return nil
 	}
 	pp.conns = append(pp.conns, entry)
 	pp.mu.Unlock()
 	c.releaseSlot(pp) // connection is available again
+	return nil
 }
 
 // Stats returns current pool statistics
@@ -1792,7 +1902,7 @@ func (c *Client) SpeedTest(ctx context.Context, providerID string, messageID str
 	// Measure latency using ping (true network RTT). time.Now, not the
 	// cached clock: utils.Now lags up to 500ms, which would swamp the RTT.
 	pingStart := time.Now()
-	if err := conn.ping(); err != nil {
+	if err := conn.ping(c.pingTimeout); err != nil {
 		c.release(conn)
 		result.Error = fmt.Sprintf("ping failed: %v", err)
 		c.speedTestResults.Store(providerID, result)
