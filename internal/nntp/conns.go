@@ -240,6 +240,15 @@ type Connection struct {
 	// body decode and the janitor should skip it.
 	lastProgressNS atomic.Int64
 	idleNS         atomic.Int64
+
+	// writeTimeout bounds the next command write instead of the default
+	// HandshakeTimeout. ping sets it for the length of its DATE so a health
+	// check gets one budget for the whole round trip: without it the write
+	// keeps the 10s handshake deadline and a peer that stopped reading
+	// blocks the ping far past its own timeout. Only ever touched by the
+	// single goroutine that owns the connection (it holds a pool slot and
+	// the entry is out of the pool), so no synchronisation is needed.
+	writeTimeout time.Duration
 }
 
 func (c *Connection) Close() error {
@@ -317,13 +326,23 @@ func (c *Connection) startTLS() error {
 	return nil
 }
 
-// ping sends a simple command to test the connection
-func (c *Connection) ping() error {
+// ping sends a simple command to test the connection. timeout bounds the
+// whole DATE round trip; <=0 uses PingTimeout. The budget differs by caller:
+// a checkout verify-ping is user-visible latency and stays tight, while the
+// reaper's background keepalive can afford to wait out congestion.
+func (c *Connection) ping(timeout time.Duration) error {
 	if c.conn == nil {
 		return NewConnectionError(errors.New("connection is nil"))
 	}
-	_ = c.conn.SetDeadline(utils.Now().Add(timeouts.PingTimeout))
-	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+	if timeout <= 0 {
+		timeout = timeouts.PingTimeout
+	}
+	_ = c.conn.SetDeadline(utils.Now().Add(timeout))
+	c.writeTimeout = timeout
+	defer func() {
+		c.writeTimeout = 0
+		_ = c.conn.SetDeadline(time.Time{})
+	}()
 
 	if err := c.sendCommand("DATE"); err != nil {
 		return NewConnectionError(err)
@@ -344,7 +363,11 @@ func (c *Connection) sendCommand(command string) error {
 }
 
 func (c *Connection) sendCommandArg(command, arg string) error {
-	_ = c.conn.SetWriteDeadline(utils.Now().Add(timeouts.HandshakeTimeout))
+	writeTimeout := c.writeTimeout
+	if writeTimeout <= 0 {
+		writeTimeout = timeouts.HandshakeTimeout
+	}
+	_ = c.conn.SetWriteDeadline(utils.Now().Add(writeTimeout))
 	defer func() { _ = c.conn.SetWriteDeadline(time.Time{}) }()
 
 	if _, err := c.writer.WriteString(command); err != nil {
