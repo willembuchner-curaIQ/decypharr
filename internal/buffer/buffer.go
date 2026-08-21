@@ -93,7 +93,7 @@ const (
 	// process RAM.
 	ModeDisk Mode = iota
 	// ModeMemory: RAM blocks only, no backing file, disk is never touched.
-	// Over budget, the LRU block is dropped and OnEvict reports the lost
+	// Over budget, a victim block is dropped and OnEvict reports the lost
 	// ranges so the owner can re-fetch.
 	ModeMemory
 )
@@ -106,7 +106,7 @@ type Stats struct {
 	Hits           int64 // ReadAt served from RAM (memory mode)
 	Misses         int64 // ReadAt served from disk (disk mode)
 	DiskWrites     int64 // WriteAt pwrites (disk mode; always 0 in memory mode)
-	Evictions      int64 // memory mode: LRU blocks dropped to admit new writes
+	Evictions      int64 // memory mode: blocks dropped to stay within budget
 	HolesPunched   int64
 	BytesReclaimed int64
 }
@@ -117,7 +117,7 @@ type Config struct {
 	Mode Mode
 
 	// MemorySize is the RAM budget for ModeMemory: the maximum bytes held
-	// across all blocks before the LRU block is dropped to admit a new one.
+	// across all blocks before a victim block is dropped to admit a new one.
 	// Default 32 MB when zero; values below one block (1 MB) are clamped up
 	// to it. Ignored in ModeDisk, which holds no data in process RAM.
 	MemorySize int64
@@ -139,12 +139,19 @@ type Config struct {
 	// Ignored in ModeMemory: there is no backing data to reopen.
 	InitialRanges []Range
 
+	// CanDrop, if non-nil, vetoes ModeMemory block drops: the eviction
+	// scan skips any block for which it returns false. The usenet cache
+	// wires it to its segment pin counts so a block a reader is actively
+	// copying out of is never destroyed under it. Called with b.mu held —
+	// it must not call back into the Buffer.
+	CanDrop func(off, length int64) bool
+
 	// OnEvict, if non-nil, reports byte ranges this Buffer released on its
 	// own initiative so the owner can keep its metadata in sync:
 	//
 	//   - ModeDisk: after the owning Pool punches a hole behind the read
 	//     head to reclaim disk (DiskLimit pressure).
-	//   - ModeMemory: after an LRU block is dropped under RAM pressure.
+	//   - ModeMemory: after a block is dropped under RAM pressure.
 	//
 	// It is NOT called for caller-initiated Discard (the caller already
 	// knows). Called with no buffer lock held; must not call back into the
@@ -160,15 +167,16 @@ type Buffer struct {
 	// Buffer belongs to exactly one Pool.
 	pool *Pool
 
-	// onEvict mirrors Config.OnEvict.
+	// onEvict mirrors Config.OnEvict; canDrop mirrors Config.CanDrop.
 	onEvict func(off, length int64)
+	canDrop func(off, length int64) bool
 
 	// file is the ModeDisk backing file; nil in ModeMemory.
 	file     *os.File
 	diskTemp bool // remove the file on Close
 
-	// mu guards blocks, the LRU list, bytesInRAM, and ranges. Reads
-	// (ReadAt, HasRange, Present, Stats) take RLock so multiple readers
+	// mu guards blocks, bytesInRAM, and ranges. Reads (ReadAt, HasRange,
+	// Present, Stats) take RLock so multiple readers
 	// proceed in parallel; writers (memory-mode WriteAt, the disk-mode
 	// range publish, Discard) take Lock. Disk mode keeps only the pwrite
 	// itself outside the lock.
@@ -231,6 +239,7 @@ func newBuffer(p *Pool, cfg Config) (*Buffer, error) {
 		cfg:     cfg,
 		pool:    p,
 		onEvict: cfg.OnEvict,
+		canDrop: cfg.CanDrop,
 		blocks:  make(map[int64]*block),
 		ranges:  newRangeSet(),
 	}
@@ -321,7 +330,7 @@ func newBuffer(p *Pool, cfg Config) (*Buffer, error) {
 //
 //   - ModeDisk: pwrite outside the lock, then publish the range. Concurrent
 //     readers are never stalled behind the write syscall.
-//   - ModeMemory: copy into a RAM block, dropping LRU blocks first if the
+//   - ModeMemory: copy into a RAM block, dropping victim blocks first if the
 //     budget requires it (their lost ranges are reported via OnEvict).
 func (b *Buffer) WriteAt(p []byte, off int64) (int, error) {
 	if b.closed.Load() {
@@ -356,7 +365,7 @@ func (b *Buffer) WriteAt(p []byte, off int64) (int, error) {
 }
 
 // writeMemRegion copies src into the RAM block at blockOff covering [lo, hi),
-// admitting the block (and dropping LRU blocks for room) if needed.
+// admitting the block (and dropping victim blocks for room) if needed.
 func (b *Buffer) writeMemRegion(blockOff int64, lo, hi int, src []byte) error {
 	b.mu.Lock()
 	// Re-check under the lock: a WriteAt past the entry closed-check that
@@ -785,6 +794,14 @@ func (b *Buffer) Close() error {
 	return closeErr
 }
 
+// Share reports the RAM this Buffer may currently hold: its own MemorySize,
+// reduced to its weighted slice of the pool's budget while other memory
+// Buffers are open (see Pool.shareFor). Owners use it to size the work they
+// queue — a usenet stream clamps how far its prefetcher runs ahead so it
+// never downloads more than it can keep. 0 when the pool has no memory
+// budget or this is a disk-mode Buffer.
+func (b *Buffer) Share() int64 { return b.pool.shareFor(b) }
+
 // SetReadHead publishes the caller's current read position. Disk mode: it
 // is the frontier the owning Pool's disk backstop punches behind (under
 // DiskLimit pressure the pool reclaims [0, off-BackWindow)). Memory mode:
@@ -843,12 +860,26 @@ func (b *Buffer) acquireBlockLocked(blockOff int64) (*block, []Range, error) {
 	}
 
 	var dropped []Range
-	for b.bytesInRAM+blockSize > b.maxBytes || b.pool.wouldExceedMemory() {
+	for {
+		// Two ceilings apply. The Buffer's own MemorySize is absolute. Its
+		// weighted slice of the pool budget (shareFor) only bites while the
+		// pool is actually short: a Buffer at or below its share keeps its
+		// window even under pressure, because the streams *above* their
+		// share are the ones that must give memory back — the pool's
+		// reclaim worker takes it from them. Before this split, whichever
+		// Buffer happened to be writing paid for everyone else's memory,
+		// so the actively-playing stream cannibalised its own window while
+		// idle streams hoarded theirs.
+		overOwn := b.bytesInRAM+blockSize > b.maxBytes
+		overShare := b.pool.wouldExceedMemory() && b.bytesInRAM+blockSize > b.pool.shareFor(b)
+		if !overOwn && !overShare {
+			break
+		}
 		victim := b.pickVictimLocked()
 		if victim == nil {
-			// Pure pool pressure with nothing of our own to drop: allocate
-			// anyway (bounded overshoot — one block per actively-allocating
-			// Buffer). Looping here would spin forever under the lock.
+			// Nothing droppable of our own (empty, or every block pinned):
+			// allocate anyway (bounded overshoot — one block per actively
+			// allocating Buffer). Looping here would spin under the lock.
 			break
 		}
 		dropped = append(dropped, b.ranges.presentRanges(victim.off, blockSize)...)
@@ -886,6 +917,9 @@ func (b *Buffer) pickVictimLocked() *block {
 	head := b.readHead.Load()
 	var behind, ahead *block
 	for _, blk := range b.blocks {
+		if b.canDrop != nil && !b.canDrop(blk.off, blockSize) {
+			continue // a reader holds these bytes; destroying them stalls it
+		}
 		if blk.off+blockSize <= head {
 			if behind == nil || blk.off < behind.off {
 				behind = blk
@@ -898,6 +932,51 @@ func (b *Buffer) pickVictimLocked() *block {
 		return behind
 	}
 	return ahead
+}
+
+// trimTo drops blocks until this Buffer holds at most target bytes, and
+// returns how many bytes it gave back. Called by the owning Pool's memory
+// reclaim worker on Buffers over their fair share (see Pool.reclaimMemory),
+// so RAM comes from whoever is hoarding it rather than from whoever happens
+// to be writing. Victim choice is the same read-head-aware order the inline
+// path uses, and dropped ranges are reported through OnEvict outside the
+// lock so the owner can re-fetch them. Memory mode only.
+func (b *Buffer) trimTo(target int64) int64 {
+	if b.cfg.Mode != ModeMemory || b.closed.Load() {
+		return 0
+	}
+	if target < blockSize {
+		target = blockSize
+	}
+
+	b.mu.Lock()
+	if b.closed.Load() {
+		b.mu.Unlock()
+		return 0
+	}
+	var (
+		dropped []Range
+		freed   int64
+	)
+	for b.bytesInRAM > target {
+		victim := b.pickVictimLocked()
+		if victim == nil {
+			break // everything left is pinned by an in-flight read
+		}
+		dropped = append(dropped, b.ranges.presentRanges(victim.off, blockSize)...)
+		b.rangesRemove(victim.off, blockSize)
+		b.dropBlockLocked(victim)
+		b.statsEvictions.Add(1)
+		freed += blockSize
+	}
+	b.mu.Unlock()
+
+	if b.onEvict != nil {
+		for _, r := range dropped {
+			b.onEvict(r.Off, r.Size)
+		}
+	}
+	return freed
 }
 
 // dropBlockLocked removes a block from the cache and returns its buffer to

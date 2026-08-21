@@ -12,9 +12,13 @@ import (
 //
 // Memory (ModeMemory buffers): per-Buffer Config.MemorySize is a ceiling on
 // one stream's working set; the Pool's MemoryBudget caps the *sum* of
-// resident block RAM across all its Buffers. When either is exhausted a
-// Buffer drops its own trailing (LRU) blocks to admit new ones
-// (self-eviction; no cross-Buffer LRU) and reports the lost ranges via
+// resident block RAM across all its Buffers, and each Buffer's weighted
+// slice of that budget (see shareFor) is the fair share it may not exceed
+// while the pool is short. A Buffer
+// over its own ceiling evicts inline as it writes; a Buffer over its share
+// is trimmed by the pool's reclaim worker (see reclaimMemory), so memory
+// comes from the streams hoarding it rather than from whichever stream
+// happens to be writing. Either way the lost ranges are reported via
 // OnEvict so the owner can re-fetch.
 //
 // Disk (ModeDisk buffers): the Pool tracks the total on-disk present bytes
@@ -31,15 +35,17 @@ type Pool struct {
 	backWindow int64        // bytes retained behind a read head before punching
 
 	memInUse  atomic.Int64 // sum of resident block RAM across Buffers
+	memDemand atomic.Int64 // sum of MemorySize across ModeMemory Buffers
 	diskInUse atomic.Int64 // sum of on-disk present bytes across Buffers
 
 	mu      sync.RWMutex
 	buffers map[*Buffer]struct{}
 
-	evictSig chan struct{}
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
-	closed   atomic.Bool
+	evictSig    chan struct{}
+	memEvictSig chan struct{}
+	stopCh      chan struct{}
+	wg          sync.WaitGroup
+	closed      atomic.Bool
 
 	statsPunches   atomic.Int64
 	statsReclaimed atomic.Int64
@@ -89,17 +95,22 @@ func NewPool(cfg PoolConfig) *Pool {
 		cfg.BackWindow = 0
 	}
 	p := &Pool{
-		name:       cfg.Name,
-		backWindow: cfg.BackWindow,
-		buffers:    make(map[*Buffer]struct{}),
-		evictSig:   make(chan struct{}, 1),
-		stopCh:     make(chan struct{}),
+		name:        cfg.Name,
+		backWindow:  cfg.BackWindow,
+		buffers:     make(map[*Buffer]struct{}),
+		evictSig:    make(chan struct{}, 1),
+		memEvictSig: make(chan struct{}, 1),
+		stopCh:      make(chan struct{}),
 	}
 	p.memBudget.Store(cfg.MemoryBudget)
 	p.diskLimit.Store(cfg.DiskLimit)
 	if cfg.DiskLimit > 0 {
 		p.wg.Add(1)
 		go p.diskEvictLoop()
+	}
+	if cfg.MemoryBudget > 0 {
+		p.wg.Add(1)
+		go p.memEvictLoop()
 	}
 	return p
 }
@@ -114,14 +125,21 @@ func (p *Pool) NewBuffer(cfg Config) (*Buffer, error) {
 	p.mu.Lock()
 	p.buffers[b] = struct{}{}
 	p.mu.Unlock()
+	if b.cfg.Mode == ModeMemory {
+		p.memDemand.Add(b.maxBytes)
+	}
 	return b, nil
 }
 
 // remove unregisters a Buffer from the pool. Called from Buffer.Close.
 func (p *Pool) remove(b *Buffer) {
 	p.mu.Lock()
+	_, known := p.buffers[b]
 	delete(p.buffers, b)
 	p.mu.Unlock()
+	if known && b.cfg.Mode == ModeMemory {
+		p.memDemand.Add(-b.maxBytes)
+	}
 }
 
 // Stats returns a snapshot of the pool's counters.
@@ -147,7 +165,7 @@ func (p *Pool) Close() error {
 	if !p.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	if p.diskLimit.Load() > 0 {
+	if p.diskLimit.Load() > 0 || p.memBudget.Load() > 0 {
 		close(p.stopCh)
 		p.wg.Wait()
 	}
@@ -175,7 +193,99 @@ func (p *Pool) wouldExceedMemory() bool {
 	return b > 0 && p.memInUse.Load()+int64(blockSize) > b
 }
 
-func (p *Pool) addBlock() { p.memInUse.Add(int64(blockSize)) }
+// shareFor is the RAM one Buffer may hold before it counts as greedy: the
+// budget divided across the live ModeMemory Buffers in proportion to what
+// each asked for. It is the cap that actually enforces MemoryBudget across
+// many concurrent streams — without it every Buffer sizes its window as if
+// it were alone, the sum oversubscribes the pool by the stream count, and
+// the pool sits permanently at its ceiling with every write forcing an
+// eviction.
+//
+// The split is weighted rather than even because the Buffers are not alike:
+// a playing stream asks for tens of MB and a probe reader for a few, so an
+// even split would let a library scan's short-lived probe readers squeeze a
+// player down to their size. A Buffer never gets more than it asked for, nor
+// less than one block. An unlimited budget (0) returns 0, meaning "no share
+// limit".
+func (p *Pool) shareFor(b *Buffer) int64 {
+	budget := p.memBudget.Load()
+	if budget <= 0 || b.cfg.Mode != ModeMemory {
+		return 0
+	}
+	demand := p.memDemand.Load()
+	if demand <= b.maxBytes {
+		return b.maxBytes // sole claimant, or accounting not yet settled
+	}
+	share := int64(float64(budget) * (float64(b.maxBytes) / float64(demand)))
+	return min(max(share, int64(blockSize)), b.maxBytes)
+}
+
+func (p *Pool) addBlock() {
+	if v := p.memInUse.Add(int64(blockSize)); p.overMemBudget(v) {
+		p.signalMemEvict()
+	}
+}
+
+func (p *Pool) overMemBudget(inUse int64) bool {
+	b := p.memBudget.Load()
+	return b > 0 && inUse > b
+}
+
+func (p *Pool) signalMemEvict() {
+	select {
+	case p.memEvictSig <- struct{}{}:
+	default:
+	}
+}
+
+func (p *Pool) memEvictLoop() {
+	defer p.wg.Done()
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-p.memEvictSig:
+			p.reclaimMemory()
+		}
+	}
+}
+
+// reclaimMemory takes RAM back from the Buffers holding more than their fair
+// share. Reclaiming here rather than in the write path is the point: a
+// Buffer only evicts inline when *it* is allocating, so under pool pressure
+// the actively-streaming Buffer paid for the idle ones — which is exactly
+// backwards. This worker walks every Buffer instead, so a paused stream or a
+// played-out RAR volume gives its window back and the stream still feeding a
+// player keeps its own.
+func (p *Pool) reclaimMemory() {
+	for pass := 0; pass < 4 && p.overMemBudget(p.memInUse.Load()); pass++ {
+		p.mu.RLock()
+		bufs := make([]*Buffer, 0, len(p.buffers))
+		for b := range p.buffers {
+			bufs = append(bufs, b)
+		}
+		p.mu.RUnlock()
+
+		var reclaimed int64
+		for _, b := range bufs {
+			share := p.shareFor(b)
+			if share <= 0 {
+				continue
+			}
+			reclaimed += b.trimTo(share)
+			if !p.overMemBudget(p.memInUse.Load()) {
+				return
+			}
+		}
+		if reclaimed == 0 {
+			// Everyone is already at or under their share (or every block
+			// is pinned by an in-flight read). Accept the bounded overshoot
+			// rather than evicting bytes a reader is about to copy out.
+			return
+		}
+	}
+}
+
 func (p *Pool) dropBytes(n int64) {
 	if n > 0 {
 		p.memInUse.Add(-n)

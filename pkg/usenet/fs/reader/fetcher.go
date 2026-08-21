@@ -3,6 +3,7 @@ package reader
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -156,9 +157,22 @@ func (sf *SegmentFetcher) Fetch(ctx context.Context, segIdx int) error {
 
 // doFetch performs the actual NNTP download.
 func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
+	return sf.doFetchAttempt(ctx, segIdx, 0)
+}
+
+// doFetchRestarts bounds how many times a single doFetch may restart because
+// another party held the slot and then lost it (a cancelled fetch, or an
+// eviction landing between the state check and the claim). Each restart does
+// real work, so this only stops a pathological loop.
+const doFetchRestarts = 4
+
+func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx, restarts int) error {
 	seg := sf.cache.GetSegment(segIdx)
 	if seg == nil {
 		return ErrSegmentNotFound
+	}
+	if restarts > doFetchRestarts {
+		return fmt.Errorf("segment %d: slot contended after %d restarts", segIdx, restarts)
 	}
 
 	// Try to mark as fetching (atomic transition Empty -> Fetching)
@@ -171,8 +185,15 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 		case StateFailed:
 			return sf.cache.GetError(segIdx)
 		case StateFetching:
-			// Wait for the other fetcher
-			return sf.cache.WaitForSegment(ctx, segIdx)
+			// Wait for the other fetcher. If it released the slot (cancel)
+			// or the segment was dropped right after it landed, the wait
+			// reports ErrSegmentEvicted rather than blocking on an event
+			// that is no longer coming — retry the fetch ourselves.
+			err := sf.cache.WaitForSegment(ctx, segIdx)
+			if errors.Is(err, ErrSegmentEvicted) {
+				return sf.doFetchAttempt(ctx, segIdx, restarts+1)
+			}
+			return err
 		case StateEvicting:
 			// An evictor grabbed the slot between Fetch's check and here.
 			// Wait for the punch to finish, then retry the fetch into the
@@ -180,7 +201,7 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 			if err := sf.cache.WaitForEvictionRelease(ctx, segIdx); err != nil {
 				return err
 			}
-			return sf.doFetch(ctx, segIdx)
+			return sf.doFetchAttempt(ctx, segIdx, restarts+1)
 		}
 	}
 

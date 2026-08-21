@@ -352,8 +352,8 @@ func TestMemoryModeDropVictims(t *testing.T) {
 
 // TestMemoryModePoolPressureSelfEvicts: when the POOL budget (not the
 // per-stream one) is exhausted by another buffer, a writing buffer drops its
-// own LRU blocks rather than growing the pool past its budget.
-func TestMemoryModePoolPressureSelfEvicts(t *testing.T) {
+// own blocks rather than growing the pool past its budget.
+func TestMemoryModePoolPressureTrimsGreediestBuffer(t *testing.T) {
 	p := newTestPool(t, PoolConfig{MemoryBudget: 4 << 20})
 	a := newTestBuffer(t, p, Config{Mode: ModeMemory, MemorySize: 64 << 20})
 	bb := newTestBuffer(t, p, Config{Mode: ModeMemory, MemorySize: 64 << 20})
@@ -363,19 +363,40 @@ func TestMemoryModePoolPressureSelfEvicts(t *testing.T) {
 	if _, err := a.WriteAt(data, 0); err != nil {
 		t.Fatal(err)
 	}
-	// The pool is now full. B's writes must self-evict, not grow the pool.
+	// The pool is now full and A holds all of it — twice its 2MB fair share.
+	// B's writes must not come out of B: the pool trims A back to its share
+	// instead, so the stream that is actively writing keeps its window.
 	if _, err := bb.WriteAt(data, 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := p.Stats().MemoryInUse; got > 4<<20+2*blockSize {
-		t.Fatalf("pool overshot its budget: %d in use", got)
+
+	share := int64(2 << 20)
+	waitFor(t, "pool back under budget", func() bool {
+		return p.Stats().MemoryInUse <= 4<<20+blockSize
+	})
+	waitFor(t, "greedy buffer trimmed to its share", func() bool {
+		return a.Stats().BytesInRAM <= share+blockSize
+	})
+
+	// B, the active writer, kept a full share's worth of its own data.
+	if got := bb.Stats().BytesInRAM; got < share-blockSize {
+		t.Fatalf("active writer was starved: holds %d, share %d", got, share)
 	}
-	// A's data is untouched: buffers only ever evict their own blocks.
-	got := make([]byte, 4<<20)
-	if _, err := a.ReadAt(got, 0); err != nil {
-		t.Fatalf("neighbor buffer lost data to pool pressure: %v", err)
+}
+
+// waitFor polls cond until it holds or the deadline passes. Pool memory
+// reclaim runs on a background worker, so the effect of a write lands
+// shortly after the write returns, not during it.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	checkPattern(t, got, 0)
+	t.Fatalf("timed out waiting for %s", what)
 }
 
 // TestDiscardSubBlockFreesFullyTrimmedBlocks: discards smaller than a block

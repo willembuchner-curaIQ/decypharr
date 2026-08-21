@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -49,8 +50,14 @@ type SegmentCache struct {
 
 	// Storage layer.
 	buf        *buffer.Buffer
-	memoryMode bool   // RAM-backed buffer (the default); false = buffer_to_disk
-	diskPath   string // remembered for RemoveAll on Close
+	memoryMode bool // RAM-backed buffer (the default); false = buffer_to_disk
+
+	// memBudget is this stream's own RAM ceiling in memory mode (0 in disk
+	// mode); segBytesHint is the nominal decoded size of one segment. Both
+	// feed MaxPrefetchSegments.
+	memBudget    int64
+	segBytesHint int64
+	diskPath     string // remembered for RemoveAll on Close
 
 	// cachedBytes tracks the bytes currently stored across all OnDisk
 	// segments (RAM blocks in memory mode, file bytes in disk mode).
@@ -189,13 +196,22 @@ func NewSegmentCache(
 
 	bufCfg := buffer.Config{
 		// Fires on a pool-driven disk punch (only if the usenet pool is ever
-		// given a disk limit) and, in memory mode, on an LRU block drop under
+		// given a disk limit) and, in memory mode, on a block drop under
 		// RAM pressure. Either way the covered segments are marked Empty so
 		// they re-fetch instead of pointing at data that no longer exists.
 		OnEvict: func(off, length int64) {
 			if sc != nil {
 				sc.onBufferEvict(off, length)
 			}
+		},
+		// Pins are what make eviction safe against the read in progress:
+		// readAtPlain pins its segments for the whole read, so vetoing
+		// their blocks here means the buffer can never destroy bytes a
+		// reader is about to copy out. Without the veto the pin was
+		// advisory only, and a drop under pool pressure would strand the
+		// reader on a segment nothing was fetching.
+		CanDrop: func(off, length int64) bool {
+			return sc == nil || !sc.rangePinned(off, length)
 		},
 	}
 	// cacheBudget bounds the cached bytes the sliding-window sweeper and the
@@ -267,6 +283,11 @@ func NewSegmentCache(
 		retention = 0
 	}
 
+	segBytesHint := int64(750 * 1024)
+	if len(segments) > 0 && segments[0].Bytes > 0 {
+		segBytesHint = segments[0].Bytes
+	}
+
 	sc = &SegmentCache{
 		segments:       segments,
 		segCount:       segCount,
@@ -279,6 +300,8 @@ func NewSegmentCache(
 		accessTime:     make([]atomic.Int64, segCount),
 		buf:            buf,
 		memoryMode:     config.MemoryBuffer,
+		memBudget:      bufCfg.MemorySize,
+		segBytesHint:   segBytesHint,
 		diskPath:       diskPath,
 		diskBudget:     cacheBudget,
 		backWindow:     backWindow,
@@ -499,12 +522,14 @@ func (w *bufferStreamWriter) Finalize() {
 	w.cache.signalMaintain()
 }
 
-// PinRange marks segments as in-use so the sweep and drain skip them. The
-// pin is advisory, not a hard fence: an evictor that sampled the pin count
-// just before PinRange returned may still reclaim the segment, and (memory
-// mode) the buffer's pin-blind block drop can too under extreme pressure.
-// The state machine keeps either case safe — the reader observes a miss and
-// re-fetches — so pinning reduces eviction races, it does not preclude them.
+// PinRange marks segments as in-use so the sweep and drain skip them, and
+// (memory mode) so the buffer's CanDrop veto refuses to drop the blocks
+// covering them. The pin is still not a perfect fence: an evictor that
+// sampled the pin count just before PinRange returned may already have
+// reserved the segment. The state machine keeps that case safe — the reader
+// observes a miss, WaitForSegment reports ErrSegmentEvicted, and the read
+// re-fetches — so pinning removes the common eviction race rather than every
+// one of them.
 func (sc *SegmentCache) PinRange(start, end int) {
 	for i := start; i <= end && i < sc.segCount; i++ {
 		sc.pinCounts[i].Add(1)
@@ -518,12 +543,54 @@ func (sc *SegmentCache) UnpinRange(start, end int) {
 	}
 }
 
+// rangePinned reports whether any segment overlapping [off, off+length) is
+// pinned by an in-progress read. Wired to the buffer's CanDrop veto, so it
+// runs under the buffer lock: atomics only, no call back into the buffer.
+func (sc *SegmentCache) rangePinned(off, length int64) bool {
+	start, end := sc.SegmentsForRange(off, length)
+	for i := start; i <= end && i < sc.segCount; i++ {
+		if sc.pinCounts[i].Load() > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // IsPinned returns true if the segment has a positive pin count.
 func (sc *SegmentCache) IsPinned(segIdx int) bool {
 	if segIdx < 0 || segIdx >= sc.segCount {
 		return false
 	}
 	return sc.pinCounts[segIdx].Load() > 0
+}
+
+// MaxPrefetchSegments reports how far ahead of the cursor this stream may
+// read ahead without outrunning the RAM it is allowed to hold. In memory
+// mode the ceiling is the smaller of the stream's own budget and its current
+// share of the shared pool (see buffer.Buffer.Share), less a scrub-back
+// reserve.
+//
+// Clamping the prefetcher is what stops the thrash: with many streams open
+// the fair share falls below the configured read-ahead, and an unclamped
+// prefetcher downloads segments that must be dropped to admit the next
+// one — burning connections and bandwidth to re-fetch data it just threw
+// away, while the player waits. Disk mode has no RAM ceiling and is
+// unclamped.
+func (sc *SegmentCache) MaxPrefetchSegments() int {
+	if !sc.memoryMode || sc.memBudget <= 0 || sc.segBytesHint <= 0 {
+		return math.MaxInt32
+	}
+	budget := sc.memBudget
+	if share := sc.buf.Share(); share > 0 && share < budget {
+		budget = share
+	}
+	usable := budget - pressureBackWindowBytes
+	if usable < sc.segBytesHint {
+		// Too little to reserve history from: keep a minimal window moving
+		// rather than stalling the prefetcher completely.
+		return 1
+	}
+	return int(usable / sc.segBytesHint)
 }
 
 // GetState returns the current state of a segment.
@@ -593,11 +660,27 @@ func (sc *SegmentCache) ReleaseFetching(segIdx int) {
 	if segIdx < 0 || segIdx >= sc.segCount {
 		return
 	}
-	sc.states[segIdx].CompareAndSwap(uint32(StateFetching), uint32(StateEmpty))
+	if sc.states[segIdx].CompareAndSwap(uint32(StateFetching), uint32(StateEmpty)) {
+		// Wake anyone parked on this fetch: the slot is Empty now and no
+		// further transition is coming, so a waiter left asleep here would
+		// never be woken again.
+		sc.wakeWaiters(segIdx)
+	}
 }
 
-// WaitForSegment blocks until the segment is OnDisk, fails, or the context
-// is canceled.
+// ErrSegmentEvicted reports that a segment is not cached and nobody is
+// fetching it, so waiting would block forever. It is a normal outcome, not a
+// failure: the caller re-fetches and retries.
+var ErrSegmentEvicted = errors.New("segment evicted before read")
+
+// WaitForSegment blocks while a segment is being fetched (or is mid-evict)
+// and returns once it is OnDisk, has failed, or the context is canceled. An
+// Empty segment returns ErrSegmentEvicted immediately rather than parking:
+// nothing in the cache ever fetches on a waiter's behalf, so parking on
+// Empty waits for an event that will not come. That was the deadlock behind
+// the memory-mode playback stalls — a block drop flipped a segment the
+// reader had already ensured from OnDisk back to Empty, and the reader slept
+// on it forever while the prefetch window moved on.
 func (sc *SegmentCache) WaitForSegment(ctx context.Context, segIdx int) error {
 	if segIdx < 0 || segIdx >= sc.segCount {
 		return fmt.Errorf("segment index out of range: %d", segIdx)
@@ -610,6 +693,8 @@ func (sc *SegmentCache) WaitForSegment(ctx context.Context, segIdx int) error {
 	switch state {
 	case StateOnDisk:
 		return nil
+	case StateEmpty:
+		return ErrSegmentEvicted
 	case StateFailed:
 		if err := sc.GetError(segIdx); err != nil {
 			return err
@@ -639,6 +724,8 @@ func (sc *SegmentCache) WaitForSegment(ctx context.Context, segIdx int) error {
 		switch state {
 		case StateOnDisk:
 			return nil
+		case StateEmpty:
+			return ErrSegmentEvicted
 		case StateFailed:
 			if err := sc.GetError(segIdx); err != nil {
 				return err
@@ -1016,6 +1103,9 @@ func (sc *SegmentCache) onBufferEvict(off, length int64) {
 		}
 		sc.cachedBytes.Add(-size)
 		sc.stats.Evictions.Add(1)
+		// A reader may be parked on this segment; it must observe the Empty
+		// state and re-fetch rather than sleep through the drop.
+		sc.wakeWaiters(idx)
 	}
 }
 

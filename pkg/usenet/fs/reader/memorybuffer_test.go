@@ -3,6 +3,7 @@ package reader
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -132,7 +133,7 @@ func TestMemoryBufferDropsWhenOverBudget(t *testing.T) {
 
 // TestMemorySweeperLeadsEviction: during paced sequential playback the
 // budget-derived sweep window reclaims consumed segments BEFORE the RAM
-// budget fills, so the buffer's pin-blind block drop (buf Stats.Evictions)
+// budget fills, so the buffer's block-granular drop (buf Stats.Evictions)
 // never fires — the segment-aligned sweeper does all the eviction.
 func TestMemorySweeperLeadsEviction(t *testing.T) {
 	const segSize = 750 * 1024
@@ -331,5 +332,139 @@ func TestMemoryBufferKeepsDiskFileEmpty(t *testing.T) {
 				t.Fatal("disk mode wrote nothing to segments.bin")
 			}
 		})
+	}
+}
+
+// mkSegs builds a contiguous segment table of segCount equal-sized segments.
+func mkSegs(segCount int, segSize int64) []SegmentMeta {
+	segs := make([]SegmentMeta, segCount)
+	for i := range segs {
+		segs[i] = SegmentMeta{
+			MessageID:   fmt.Sprintf("<seg%d@test>", i),
+			Number:      i + 1,
+			Bytes:       segSize,
+			StartOffset: int64(i) * segSize,
+			EndOffset:   int64(i+1)*segSize - 1,
+		}
+	}
+	return segs
+}
+
+// TestWaitForSegmentReportsEvicted is the unit-level guard for the memory-mode
+// playback deadlock. A segment that a block drop took back to StateEmpty has
+// no fetch behind it, so waiting on it waits forever. WaitForSegment must say
+// so instead of parking, leaving the caller to re-fetch.
+func TestWaitForSegmentReportsEvicted(t *testing.T) {
+	const segSize = 750 * 1024
+	segs := mkSegs(4, segSize)
+	cfg := DefaultConfig()
+	cfg.DiskPath = t.TempDir()
+
+	cache, err := NewSegmentCache(context.Background(), segs, cfg, &ReaderStats{}, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewSegmentCache: %v", err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+
+	putSegment(t, cache, 1, make([]byte, segSize))
+	if err := cache.WaitForSegment(context.Background(), 1); err != nil {
+		t.Fatalf("cached segment should be ready: %v", err)
+	}
+
+	// The buffer drops the block covering segment 1 under RAM pressure.
+	cache.onBufferEvict(cache.SegmentOffset(1), segSize)
+
+	done := make(chan error, 1)
+	go func() { done <- cache.WaitForSegment(context.Background(), 1) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSegmentEvicted) {
+			t.Fatalf("want ErrSegmentEvicted, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitForSegment parked on an evicted segment: the playback deadlock is back")
+	}
+}
+
+// TestPinnedSegmentsSurviveRAMPressure: a segment pinned by an in-progress
+// read must not be destroyed to make room for new data. Before the CanDrop
+// veto the pin was advisory, so a drop could pull the bytes out from under
+// the reader that had just ensured them.
+func TestPinnedSegmentsSurviveRAMPressure(t *testing.T) {
+	const segSize = 750 * 1024
+	const segCount = 8 // 6MB against a 2MB budget: drops must fire
+	segs := mkSegs(segCount, segSize)
+	cfg := DefaultConfig()
+	cfg.DiskPath = t.TempDir()
+	cfg.MaxDisk = 2 << 20
+
+	cache, err := NewSegmentCache(context.Background(), segs, cfg, &ReaderStats{}, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewSegmentCache: %v", err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+
+	data := make([]byte, segSize)
+	for j := range data {
+		data[j] = byte(j)
+	}
+	putSegment(t, cache, 0, data)
+
+	// Pin segment 0 the way a read in flight does, and publish a read head
+	// past it so it is the block furthest *behind* the consumer — the first
+	// victim the eviction scan would otherwise take. Then push the stream
+	// well past its budget.
+	cache.PinRange(0, 0)
+	defer cache.UnpinRange(0, 0)
+	cache.SetConsumedFloor(int64(segCount) * segSize)
+	for i := 1; i < segCount; i++ {
+		putSegment(t, cache, i, data)
+	}
+
+	got := make([]byte, segSize)
+	if n, ok := cache.ReadRangeInto(0, 0, segSize, got); !ok || n != segSize {
+		t.Fatalf("pinned segment was evicted under RAM pressure: n=%d ok=%v state=%v",
+			n, ok, cache.GetState(0))
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("pinned segment data corrupted")
+	}
+}
+
+// TestMaxPrefetchSegmentsTracksFairShare: the prefetch depth a stream is
+// allowed must shrink as the shared pool is split across more streams,
+// otherwise every stream downloads more than it can hold and re-fetches what
+// it just dropped.
+func TestMaxPrefetchSegmentsTracksFairShare(t *testing.T) {
+	const segSize = 750 * 1024
+	segs := mkSegs(64, segSize)
+	cfg := DefaultConfig()
+	cfg.DiskPath = t.TempDir()
+	cfg.MaxDisk = 64 << 20
+
+	withTestPool(t, 64<<20)
+
+	first, err := NewSegmentCache(context.Background(), segs, cfg, &ReaderStats{}, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewSegmentCache: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	alone := first.MaxPrefetchSegments()
+
+	// Seven more streams open against the same pool.
+	for range 7 {
+		sc, err := NewSegmentCache(context.Background(), segs, cfg, &ReaderStats{}, zerolog.Nop())
+		if err != nil {
+			t.Fatalf("NewSegmentCache: %v", err)
+		}
+		t.Cleanup(func() { _ = sc.Close() })
+	}
+	shared := first.MaxPrefetchSegments()
+
+	if shared >= alone {
+		t.Fatalf("prefetch depth ignored the shrinking fair share: alone=%d shared=%d", alone, shared)
+	}
+	if shared < 1 {
+		t.Fatalf("prefetch depth collapsed to %d: the stream can never make progress", shared)
 	}
 }

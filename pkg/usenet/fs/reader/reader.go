@@ -2,6 +2,7 @@ package reader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -349,8 +350,12 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, cur *Cursor, p []byt
 	}
 
 	// Queue read-ahead hints for the part of the window this cursor hasn't
-	// already hinted (non-blocking).
-	prefetchEnd := min(endSeg+sr.config.PrefetchAhead, sr.segCount-1)
+	// already hinted (non-blocking). The depth is clamped to what the cache
+	// can actually hold: reading further ahead than the RAM budget allows
+	// only downloads segments that get dropped before the player reaches
+	// them.
+	ahead := min(sr.config.PrefetchAhead, sr.cache.MaxPrefetchSegments())
+	prefetchEnd := min(endSeg+ahead, sr.segCount-1)
 	if prefetchEnd > endSeg {
 		qStart := max(endSeg+1, int(cur.queuedThrough.Load())+1)
 		if qStart <= prefetchEnd {
@@ -387,6 +392,29 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, cur *Cursor, p []byt
 	return n, err
 }
 
+// segmentReadyAttempts bounds the fetch/wait retry in ensureSegmentReady. A
+// segment is pinned for the duration of the read, so eviction should not be
+// able to take it twice; the bound is there so a pathological pressure loop
+// surfaces as a read error instead of spinning on the network forever.
+const segmentReadyAttempts = 4
+
+// ensureSegmentReady blocks until segIdx is readable, re-fetching it if it
+// was evicted out from under this read.
+func (sr *StreamingReader) ensureSegmentReady(ctx context.Context, segIdx int) error {
+	for attempt := 0; ; attempt++ {
+		err := sr.cache.WaitForSegment(ctx, segIdx)
+		if !errors.Is(err, ErrSegmentEvicted) {
+			return err
+		}
+		if attempt >= segmentReadyAttempts {
+			return fmt.Errorf("segment %d evicted %d times before it could be read", segIdx, attempt)
+		}
+		if err := sr.fetcher.Fetch(ctx, segIdx); err != nil {
+			return err
+		}
+	}
+}
+
 // readFromCache reads data from the cache, handling segment boundaries.
 //
 // Uses ReadRangeInto so each pread fetches only the bytes the caller actually
@@ -401,8 +429,13 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 	filled := off
 
 	for segIdx := startSeg; segIdx <= endSeg; segIdx++ {
-		// Wait for segment to be ready
-		if err := sr.cache.WaitForSegment(ctx, segIdx); err != nil {
+		// Wait for the segment to be ready. A memory-mode block drop can
+		// take a segment back to Empty after EnsureSegments cleared it, in
+		// which case nobody is fetching it any more and WaitForSegment says
+		// so instead of blocking — re-issue the fetch ourselves. Fetch
+		// dedups against any in-flight download, so a lost race costs a
+		// map lookup, not a second BODY.
+		if err := sr.ensureSegmentReady(ctx, segIdx); err != nil {
 			return totalRead, err
 		}
 
