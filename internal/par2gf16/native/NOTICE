@@ -1,0 +1,10 @@
+The files under parpar/gf16 and parpar/src are from ParPar v0.4.5:
+
+https://github.com/animetosho/ParPar/tree/458ed62ce509fe1392830de60c8c0a7f1e14e9cf
+
+ParPar is dedicated to the public domain under CC0 1.0. The files are
+vendored so the native archives can be audited and reproduced.
+
+gf16/gf16mul.cpp adds compile-time platform guards around architecture-only
+switch cases so slim builds do not retain references to kernels for other
+architectures. The arithmetic and dispatch behavior are otherwise unchanged.
