@@ -2,7 +2,10 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -36,6 +39,8 @@ const (
 	symlinkReadyMaxInterval     = 2 * time.Second
 	symlinkLogEveryAttempts     = 10
 	symlinkLogSampleSize        = 8
+	localDownloadMaxAttempts    = 4
+	defaultFileDownloadWorkers  = 5
 )
 
 type downloadLogMeta struct {
@@ -510,7 +515,11 @@ func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
 		return fmt.Errorf("no valid download links available for %s", entry.Name)
 	}
 
-	p := pool.New().WithErrors().WithFirstError()
+	maxWorkers := defaultFileDownloadWorkers
+	if d.manager.config != nil && d.manager.config.MaxActiveDownloads > 0 {
+		maxWorkers = d.manager.config.MaxActiveDownloads
+	}
+	p := pool.New().WithErrors().WithFirstError().WithMaxGoroutines(maxWorkers)
 	for _, task := range tasks {
 		p.Go(func() error {
 			if err := d.localDownloader(
@@ -690,15 +699,56 @@ func (d *Downloader) detectMultiSeason(torrent *storage.Entry) (bool, []SeasonIn
 	return true, seasons
 }
 
-// localDownloader downloads a file with grab so interrupted local downloads can resume cleanly.
+// localDownloader downloads a file with grab and retries transient failures.
+// Each attempt observes the same destination, allowing grab to resume from the
+// partial file instead of restarting a large transfer after a CDN interruption.
 func (d *Downloader) localDownloader(downloadURL, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
+	ctx := d.operationContext()
+	delay := config.DefaultRetryDelay
+	reported := int64(0)
+	var lastErr error
+
+	for attempt := 1; attempt <= localDownloadMaxAttempts; attempt++ {
+		err := d.localDownloadAttempt(downloadURL, filename, byterange, func(completed, speed int64) {
+			if progressCallback != nil && completed != reported {
+				progressCallback(completed-reported, speed)
+			}
+			reported = completed
+		})
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt == localDownloadMaxAttempts || !isRetryableDownloadError(err) {
+			break
+		}
+
+		d.logger.Warn().
+			Err(err).
+			Str("file", filepath.Base(filename)).
+			Int("attempt", attempt).
+			Msg("Local download interrupted, retrying from partial file")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay *= 2; delay > config.DefaultRetryDelayMax {
+			delay = config.DefaultRetryDelayMax
+		}
+	}
+
+	return fmt.Errorf("local download failed after retries: %w", lastErr)
+}
+
+func (d *Downloader) localDownloadAttempt(downloadURL, filename string, byterange *[2]int64, progressCallback func(int64, int64)) error {
 	startTime := time.Now()
 	requestedRange := "full"
 	req, err := grab.NewRequest(filename, downloadURL)
 	if err != nil {
 		return err
 	}
-	req = req.WithContext(d.manager.ctx)
+	req = req.WithContext(d.operationContext())
 	req.BufferSize = 1 << 20
 	req.HTTPRequest.Header.Set("User-Agent", "Decypharr[QBitTorrent]")
 	req.HTTPRequest.Header.Set("Accept", "*/*")
@@ -735,25 +785,52 @@ func (d *Downloader) localDownloader(downloadURL, filename string, byterange *[2
 			current := resp.BytesComplete()
 			speed := int64(resp.BytesPerSecond())
 			if current != lastReported && progressCallback != nil {
-				progressCallback(current-lastReported, speed)
+				progressCallback(current, speed)
 				lastReported = current
 			}
 		case <-resp.Done:
 			if progressCallback != nil {
 				final := resp.BytesComplete()
 				if final != lastReported {
-					progressCallback(final-lastReported, int64(resp.BytesPerSecond()))
+					progressCallback(final, int64(resp.BytesPerSecond()))
 				}
 			}
 			if err := resp.Err(); err != nil {
-				if grab.IsStatusCodeError(err) && resp.HTTPResponse != nil {
-					return fmt.Errorf("unexpected status %d for %s", resp.HTTPResponse.StatusCode, downloadURL)
-				}
 				return err
 			}
 			return nil
 		}
 	}
+}
+
+func isRetryableDownloadError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if status, ok := errors.AsType[grab.StatusCodeError](err); ok {
+		switch int(status) {
+		case http.StatusRequestTimeout,
+			http.StatusTooEarly,
+			http.StatusTooManyRequests,
+			http.StatusInternalServerError,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+	if errors.Is(err, grab.ErrBadLength) ||
+		errors.Is(err, grab.ErrBadChecksum) ||
+		errors.Is(err, grab.ErrNoFilename) ||
+		errors.Is(err, grab.ErrFileExists) {
+		return false
+	}
+	if _, ok := errors.AsType[net.Error](err); ok {
+		return true
+	}
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func (d *Downloader) buildDownloadLogMeta(req *http.Request, resp *http.Response, requestedRange, transferMode string, parts int) downloadLogMeta {
