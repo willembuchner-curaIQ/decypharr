@@ -46,6 +46,27 @@ type candidate struct {
 	contentMap map[string]arr.ContentFile // file_name -> Arr metadata when source=arr
 }
 
+type managedArrFile struct {
+	entryName string
+	fileName  string
+}
+
+type arrFileCollectionStats struct {
+	total     int
+	resolved  int
+	fallback  int
+	unmapped  int
+	ambiguous int
+}
+
+func (s *arrFileCollectionStats) add(other arrFileCollectionStats) {
+	s.total += other.total
+	s.resolved += other.resolved
+	s.fallback += other.fallback
+	s.unmapped += other.unmapped
+	s.ambiguous += other.ambiguous
+}
+
 // healCache memoizes per-infohash auto-heal results within one sweep so
 // duplicate torrent sightings don't trigger repeated re-inserts. A stored
 // nil means "healed"; a non-nil error means "previously failed".
@@ -1108,6 +1129,7 @@ func (r *Repair) enumerateManagedCandidates(ctx context.Context) (map[string]*ca
 func (r *Repair) enumerateArrCandidates(ctx context.Context, cfg config.RepairConfig) (map[string]*candidate, error) {
 	out := make(map[string]*candidate)
 	var mu sync.Mutex
+	var collectionErrors []error
 
 	arrs := r.eligibleArrs(cfg.Arrs)
 	if len(arrs) == 0 {
@@ -1123,6 +1145,9 @@ func (r *Repair) enumerateArrCandidates(ctx context.Context, cfg config.RepairCo
 					return err
 				}
 				r.logger.Warn().Err(err).Str("arr", a.Name).Msg("Sweep: GetMedia failed; skipping arr")
+				mu.Lock()
+				collectionErrors = append(collectionErrors, fmt.Errorf("arr %s: %w", a.Name, err))
+				mu.Unlock()
 				return nil
 			}
 			mu.Lock()
@@ -1133,6 +1158,9 @@ func (r *Repair) enumerateArrCandidates(ctx context.Context, cfg config.RepairCo
 	}
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+	if len(out) == 0 && len(collectionErrors) > 0 {
+		return nil, errors.Join(collectionErrors...)
 	}
 	return out, nil
 }
@@ -1145,6 +1173,8 @@ func (r *Repair) collectArrMediaCandidates(ctx context.Context, a *arr.Arr, medi
 	if err != nil {
 		return nil, err
 	}
+	managedFiles := r.managedArrFileIndex(a.Name)
+	var stats arrFileCollectionStats
 	kind := arrKindFromType(a.Type)
 	for _, content := range media {
 		select {
@@ -1152,7 +1182,9 @@ func (r *Repair) collectArrMediaCandidates(ctx context.Context, a *arr.Arr, medi
 			return out, ctx.Err()
 		default:
 		}
-		for entryPath, files := range collectArrFiles(content) {
+		grouped, contentStats := collectArrFiles(content, managedFiles)
+		stats.add(contentStats)
+		for entryPath, files := range grouped {
 			name := filepath.Clean(filepath.Base(entryPath))
 			item, err := r.manager.GetEntryItem(name)
 			if err != nil || item == nil {
@@ -1174,12 +1206,51 @@ func (r *Repair) collectArrMediaCandidates(ctx context.Context, a *arr.Arr, medi
 			}
 			for _, f := range files {
 				f.EntryName = name
-				f.IsSymlink = true
 				c.contentMap[f.TargetPath] = f
 			}
 		}
 	}
+	if len(out) == 0 && stats.total > 0 {
+		return nil, fmt.Errorf(
+			"arr returned %d media files but none mapped to managed entries (local symlinks=%d unique size matches=%d unmapped=%d ambiguous=%d); mount the Arr library paths in Decypharr or align the Arr/Decypharr category",
+			stats.total,
+			stats.resolved,
+			stats.fallback,
+			stats.unmapped,
+			stats.ambiguous,
+		)
+	}
 	return out, nil
+}
+
+func (r *Repair) managedArrFileIndex(arrName string) map[int64][]managedArrFile {
+	index := make(map[int64][]managedArrFile)
+	seen := make(map[string]struct{})
+	_ = r.manager.storage.ForEach(func(entry *storage.Entry) error {
+		if entry == nil || !strings.EqualFold(strings.TrimSpace(entry.Category), strings.TrimSpace(arrName)) {
+			return nil
+		}
+		entryName := entry.GetFolder()
+		if entryName == "" {
+			return nil
+		}
+		for fileName, file := range entry.Files {
+			if file == nil || file.Deleted || file.Size <= 0 {
+				continue
+			}
+			key := entryName + "\x00" + fileName
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			index[file.Size] = append(index[file.Size], managedArrFile{
+				entryName: entryName,
+				fileName:  fileName,
+			})
+		}
+		return nil
+	})
+	return index
 }
 
 func mergeCandidates(dst, src map[string]*candidate) {
@@ -1764,8 +1835,10 @@ func (r *Repair) attachArrContext(ctx context.Context, c *candidate) {
 			continue
 		}
 		kind := arrKindFromType(a.Type)
+		managedFiles := r.managedArrFileIndex(a.Name)
 		for _, content := range media {
-			for entryPath, files := range collectArrFiles(content) {
+			grouped, _ := collectArrFiles(content, managedFiles)
+			for entryPath, files := range grouped {
 				if filepath.Clean(filepath.Base(entryPath)) != c.name {
 					continue
 				}
@@ -1776,7 +1849,6 @@ func (r *Repair) attachArrContext(ctx context.Context, c *candidate) {
 				c.arrKind = kind
 				for _, f := range files {
 					f.EntryName = c.name
-					f.IsSymlink = true
 					c.contentMap[f.TargetPath] = f
 				}
 			}
@@ -1824,22 +1896,43 @@ func topReason(files []storage.BrokenFile) string {
 	return files[0].Reason
 }
 
-// collectArrFiles groups Arr content files by their resolved symlink-target
-// parent directory. The parent is the on-disk entry-folder name.
-func collectArrFiles(media arr.Content) map[string][]arr.ContentFile {
+// collectArrFiles groups Arr content files by their managed entry folder. A
+// readable symlink is authoritative. If the Arr library path is not mounted
+// in this container, an exact unique match by Arr category and byte size is a
+// safe fallback; ambiguous sizes remain unmapped rather than risking repair of
+// the wrong file.
+func collectArrFiles(media arr.Content, managedFiles map[int64][]managedArrFile) (map[string][]arr.ContentFile, arrFileCollectionStats) {
 	out := make(map[string][]arr.ContentFile)
+	var stats arrFileCollectionStats
 	for _, f := range media.Files {
+		stats.total++
 		target := readSymlinkTarget(f.Path)
-		if target == "" {
+		if target != "" {
+			f.IsSymlink = true
+			dir, name := filepath.Split(target)
+			f.TargetPath = name
+			entryPath := filepath.Clean(dir)
+			out[entryPath] = append(out[entryPath], f)
+			stats.resolved++
 			continue
 		}
-		f.IsSymlink = true
-		dir, name := filepath.Split(target)
-		f.TargetPath = name
-		entryPath := filepath.Clean(dir)
-		out[entryPath] = append(out[entryPath], f)
+
+		matches := managedFiles[f.Size]
+		if len(matches) != 1 {
+			if len(matches) > 1 {
+				stats.ambiguous++
+			} else {
+				stats.unmapped++
+			}
+			continue
+		}
+		match := matches[0]
+		f.EntryName = match.entryName
+		f.TargetPath = match.fileName
+		out[match.entryName] = append(out[match.entryName], f)
+		stats.fallback++
 	}
-	return out
+	return out, stats
 }
 
 func readSymlinkTarget(path string) string {
