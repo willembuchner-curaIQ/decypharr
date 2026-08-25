@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 )
 
-// AddNewNZB parses an NZB before entering the active-download queue.
+// AddNewNZB persists an NZB and returns as soon as it enters the active-download queue.
 func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, error) {
 	if m.usenet == nil {
 		return "", fmt.Errorf("usenet not configured")
@@ -32,37 +33,21 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 		Str("category", req.Arr.Name).
 		Msg("Adding new NZB to usenet")
 
-	meta, groups, err := m.usenet.ParseWithID(ctx, req.Id, req.Name, req.NZBContent, req.Arr.Name)
+	stagedPath, err := m.usenet.StageNZB(req.Id, req.NZBContent)
 	if err != nil {
-		// A missing article at the parse stat is a definitive
-		// availability result: record and share it before failing the
-		// add, so the next encounter of this post — ours or another
-		// operator's — rejects without NNTP work.
-		if m.hearsay != nil && errors.Is(err, customerror.UsenetSegmentMissingError) {
-			m.hearsay.ReportNZB(hearsay.NZBSubjectFromGroups(groups), false)
-		}
-		return "", fmt.Errorf("usenet parse failed: %w", err)
+		return "", err
 	}
-
-	// Reject before the entry enters the queue: the *arr sees the add
-	// fail synchronously and moves to the next release. Own truth or a
-	// strong network consensus that the segments are gone means the
-	// availability check is doomed. No report follows a rejection —
-	// nothing was actually checked.
-	if m.hearsay != nil && m.hearsay.NZBClaimedIncomplete(hearsay.NZBSubjectFromGroups(groups)) {
-		return "", fmt.Errorf("nzb rejected: hearsay claims segments missing on every configured backbone")
-	}
+	req.NZBContent = nil
 
 	entry := &storage.Entry{
-		InfoHash:         meta.ID,
-		Name:             meta.Name,
-		OriginalFilename: meta.Name,
-		Size:             meta.TotalSize,
+		InfoHash:         req.Id,
+		Name:             req.Name,
+		OriginalFilename: req.Name,
 		Protocol:         config.ProtocolNZB,
-		Bytes:            meta.TotalSize,
+		Magnet:           stagedPath,
 		Category:         req.Arr.Name,
 		SavePath:         filepath.Join(req.DownloadFolder, req.Arr.Name),
-		Status:           debridTypes.TorrentStatusDownloading,
+		Status:           debridTypes.TorrentStatusQueued,
 		State:            storage.EntryStateDownloading,
 		Progress:         0,
 		Action:           req.Action,
@@ -77,24 +62,22 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 	}
 
 	entry.ContentPath = entry.DownloadPath()
-	entry.ActiveProvider = "usenet"
-	_ = entry.AddUsenetProvider(meta)
 	if err := m.queue.Add(entry); err != nil {
+		m.usenet.RemoveStagedNZB(stagedPath)
 		return "", fmt.Errorf("failed to add nzb to queue: %w", err)
 	}
 
-	req.Status = "started"
+	req.Status = "queued"
 	job := NewJob(JobTypeNZB, req)
 	job.ID = entry.InfoHash
 	job.Entry = entry
-	job.NZBMeta = meta
-	job.NZBGroups = groups
 	if err := m.SubmitJob(job); err != nil {
+		m.usenet.RemoveStagedNZB(stagedPath)
 		entry.MarkAsError(err)
 		_ = m.queue.Update(entry)
 		return "", fmt.Errorf("failed to queue NZB: %w", err)
 	}
-	return meta.ID, nil
+	return req.Id, nil
 }
 
 func (m *Manager) processNZBJob(ctx context.Context, job *Job) error {
@@ -109,7 +92,42 @@ func (m *Manager) processNZBJob(ctx context.Context, job *Job) error {
 			m.waitForDownloadCompletion(ctx, job.Entry)
 			return nil
 		}
-		return fmt.Errorf("parsed NZB metadata missing")
+		content, err := os.ReadFile(job.Entry.Magnet)
+		if err != nil {
+			return fmt.Errorf("read staged NZB: %w", err)
+		}
+		meta, groups, err := m.usenet.ParseWithID(ctx, job.Entry.InfoHash, job.Request.Name, content, job.Request.Arr.Name)
+		if err != nil {
+			// A missing article at the parse stage is a definitive
+			// availability result: record and share it before failing the
+			// queued entry, so the arr can move to another release.
+			if m.hearsay != nil && errors.Is(err, customerror.UsenetSegmentMissingError) {
+				m.hearsay.ReportNZB(hearsay.NZBSubjectFromGroups(groups), false)
+			}
+			return fmt.Errorf("usenet parse failed: %w", err)
+		}
+
+		// Own truth or a strong network consensus that the segments are
+		// gone means the availability check is doomed. The accepted SAB
+		// job is marked failed in history, which tells the arr to retry.
+		if m.hearsay != nil && m.hearsay.NZBClaimedIncomplete(hearsay.NZBSubjectFromGroups(groups)) {
+			return fmt.Errorf("nzb rejected: hearsay claims segments missing on every configured backbone")
+		}
+
+		m.usenet.RemoveStagedNZB(job.Entry.Magnet)
+		job.Entry.Magnet = ""
+		job.NZBMeta = meta
+		job.NZBGroups = groups
+		job.Entry.Name = meta.Name
+		job.Entry.OriginalFilename = meta.Name
+		job.Entry.Size = meta.TotalSize
+		job.Entry.Bytes = meta.TotalSize
+		job.Entry.Status = debridTypes.TorrentStatusDownloading
+		job.Entry.ActiveProvider = "usenet"
+		_ = job.Entry.AddUsenetProvider(meta)
+		if err := m.queue.Update(job.Entry); err != nil {
+			return fmt.Errorf("update queued NZB: %w", err)
+		}
 	}
 	if job.Request != nil {
 		job.Request.Status = "started"
