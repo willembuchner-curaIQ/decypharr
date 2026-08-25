@@ -1537,13 +1537,19 @@ func excludeForArticleNotFound(exclusions *providerExclusions, provider config.U
 	exclusions.excludeHost(provider.Host)
 }
 
-// BatchStat checks the availability of many message IDs using NNTP STAT. Each
-// worker holds one repair-bank token for its lifetime, so the total number of
-// concurrent NNTP connections used by all in-flight BatchStat calls never
-// exceeds the bank's capacity. When the client has no bank configured, a small
-// default worker count is used. Does NOT fail-fast: every chunk is processed so
-// the caller sees complete per-segment visibility.
+// BatchStat checks the availability of many message IDs using NNTP STAT and
+// stops queued work after the first article is definitively missing.
 func (c *Client) BatchStat(ctx context.Context, messageIDs []string) (*BatchStatResult, error) {
+	return c.batchStat(ctx, messageIDs, true)
+}
+
+// BatchStatAll checks every message ID, including those queued after a missing
+// article is found. It shares the same bounded repair pool as BatchStat.
+func (c *Client) BatchStatAll(ctx context.Context, messageIDs []string) (*BatchStatResult, error) {
+	return c.batchStat(ctx, messageIDs, false)
+}
+
+func (c *Client) batchStat(ctx context.Context, messageIDs []string, stopOnMissing bool) (*BatchStatResult, error) {
 	if c.closed.Load() {
 		return nil, errors.New("nntp client is closed")
 	}
@@ -1551,11 +1557,11 @@ func (c *Client) BatchStat(ctx context.Context, messageIDs []string) (*BatchStat
 		return &BatchStatResult{}, nil
 	}
 
-	// Early-bailout: cancelled the moment a segment is found definitively
-	// missing (not-found across all providers), so the remaining sample's
-	// workers stop at their per-chunk ctx.Err() checks instead of completing
-	// the full STAT sweep. defer cancel() also covers the normal return path.
-	ctx, cancel := context.WithCancel(ctx)
+	workCtx := ctx
+	cancel := func() {}
+	if stopOnMissing {
+		workCtx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	// Per-chunk batch size is adaptive: we want enough chunks to keep
@@ -1605,7 +1611,7 @@ func (c *Client) BatchStat(ctx context.Context, messageIDs []string) (*BatchStat
 	var wg sync.WaitGroup
 	for _, ch := range chunks {
 		wg.Add(1)
-		err := c.repairPool.Submit(ctx, ch.messageIDs, func(results []StatResult, taskErr error) {
+		err := c.repairPool.Submit(workCtx, ch.messageIDs, func(results []StatResult, taskErr error) {
 			defer wg.Done()
 			if taskErr != nil {
 				// Mirrors the previous behaviour: a chunk-level connection
@@ -1622,10 +1628,12 @@ func (c *Client) BatchStat(ctx context.Context, messageIDs []string) (*BatchStat
 			// Per-segment provider failover has already completed inside
 			// this chunk before we get here, so this never short-circuits
 			// failover.
-			for _, r := range results {
-				if !r.Available && IsArticleNotFoundError(r.Error) {
-					bailOnce.Do(cancel)
-					break
+			if stopOnMissing {
+				for _, r := range results {
+					if !r.Available && IsArticleNotFoundError(r.Error) {
+						bailOnce.Do(cancel)
+						break
+					}
 				}
 			}
 		})
