@@ -363,3 +363,22 @@ func TestObfuscatedRARMergeDoesNotCombineNamedStandaloneArchives(t *testing.T) {
 		t.Fatalf("named standalone RAR group count = %d, want 2", len(got))
 	}
 }
+
+func TestParseRecoveryManifestNeedsNoNNTPClient(t *testing.T) {
+	p := NewParser(nil, 1, zerolog.Nop())
+	content := []byte(`<?xml version="1.0"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file subject="&quot;movie.mkv&quot; yEnc (1/1)"><groups><group>alt.binaries.test</group></groups><segments><segment bytes="100" number="1">movie@example</segment></segments></file>
+  <file subject="&quot;movie.vol00+01.par2&quot; yEnc (1/1)"><groups><group>alt.binaries.test</group></groups><segments><segment bytes="50" number="1">parity@example</segment></segments></file>
+</nzb>`)
+	manifest, err := p.ParseRecoveryManifest("release.nzb", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Files) != 2 || !manifest.HasPAR2() {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	if manifest.Files[0].Articles[0].MessageID != "movie@example" {
+		t.Fatalf("content article = %+v", manifest.Files[0].Articles[0])
+	}
+}

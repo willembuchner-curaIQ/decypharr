@@ -381,7 +381,7 @@ func (r *Repair) probeEntry(ctx context.Context, runID string, c *candidate, hea
 	deepNZB := r.shouldDeepNZB(h.LastPAR2AuditAt, opts.DeepNZB, autoRepair, time.Now())
 
 	names := orderedFilenames(c.item)
-	results := r.probeFiles(ctx, c.item, names, nzbRepairs, opts, autoRepair, deepNZB)
+	results := r.probeFiles(ctx, c, names, nzbRepairs, opts, autoRepair, deepNZB)
 	if autoRepair {
 		r.autoHealResults(ctx, results, heal)
 	}
@@ -457,7 +457,7 @@ func (r *Repair) probeEntry(ctx context.Context, runID string, c *candidate, hea
 
 // probeFiles fans per-file probes inside a single entry, capped at
 // repairFilesPerEntry concurrent workers.
-func (r *Repair) probeFiles(ctx context.Context, item *storage.EntryItem, names []string, nzbRepairs *nzbRepairCache, opts RepairRunOptions, autoRepair, deepNZB bool) []fileResult {
+func (r *Repair) probeFiles(ctx context.Context, c *candidate, names []string, nzbRepairs *nzbRepairCache, opts RepairRunOptions, autoRepair, deepNZB bool) []fileResult {
 	results := make([]fileResult, len(names))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(repairFilesPerEntry)
@@ -467,7 +467,7 @@ func (r *Repair) probeFiles(ctx context.Context, item *storage.EntryItem, names 
 				results[i] = fileResult{name: name, reason: "context_cancelled"}
 				return nil
 			}
-			results[i] = r.probeFile(gctx, item, name, nzbRepairs, opts, autoRepair, deepNZB)
+			results[i] = r.probeFile(gctx, c, name, nzbRepairs, opts, autoRepair, deepNZB)
 			return nil
 		})
 	}
@@ -478,9 +478,13 @@ func (r *Repair) probeFiles(ctx context.Context, item *storage.EntryItem, names 
 // probeFile checks one file. NZB probes use usenet.CheckFile. Torrent probes
 // use the provider CheckFile endpoint unless this run requests unrestrict-link
 // probing.
-func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name string, nzbRepairs *nzbRepairCache, opts RepairRunOptions, autoRepair, deepNZB bool) fileResult {
-	file := item.Files[name]
+func (r *Repair) probeFile(ctx context.Context, c *candidate, name string, nzbRepairs *nzbRepairCache, opts RepairRunOptions, autoRepair, deepNZB bool) fileResult {
 	res := fileResult{name: name}
+	if c == nil || c.item == nil {
+		res.reason = "entry_not_found"
+		return res
+	}
+	file := c.item.Files[name]
 
 	if file == nil || file.InfoHash == "" {
 		res.reason = "missing_infohash"
@@ -500,32 +504,70 @@ func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name st
 	}
 
 	if entry.IsNZB() {
-		return r.probeNZBFile(ctx, entry, name, res, nzbRepairs, opts, autoRepair, deepNZB)
+		source := legacyNZBProbeSource{arrName: c.arrName}
+		if content, ok := c.contentMap[name]; ok {
+			source.content = content
+		}
+		return r.probeNZBFile(ctx, entry, name, res, source, nzbRepairs, opts, autoRepair, deepNZB)
 	}
 	return r.probeTorrentFile(ctx, entry, file, name, res, opts)
 }
 
-func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name string, res fileResult, repairs *nzbRepairCache, opts RepairRunOptions, autoRepair, deepNZB bool) fileResult {
+func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name string, res fileResult, source legacyNZBProbeSource, repairs *nzbRepairCache, opts RepairRunOptions, autoRepair, deepNZB bool) fileResult {
 	if r.manager.usenet == nil {
 		res.reason = "usenet_client_not_configured"
 		return res
 	}
 	err := r.manager.usenet.CheckFile(ctx, entry.InfoHash, name)
 	sampledMissing := errors.Is(err, customerror.UsenetSegmentMissingError)
-	shouldRepair := autoRepair && r.manager.usenet.CanRecoverWithPAR2(entry.InfoHash) && (sampledMissing || deepNZB && err == nil)
+	canRecover := r.manager.usenet.CanRecoverWithPAR2(entry.InfoHash)
+	shouldHydrate := autoRepair && sampledMissing && !canRecover
+	shouldRepair := autoRepair && (canRecover || shouldHydrate) && (sampledMissing || deepNZB && err == nil)
 	if shouldRepair {
 		outcome := repairs.do(entry.InfoHash, func() (usenetpkg.NZBRepairReport, error) {
+			// Another file probe may have hydrated this NZB while this caller was
+			// waiting on the per-NZB singleflight. Recheck inside the flight so
+			// only the elected caller reacquires metadata.
+			if r.manager.usenet.CanRecoverWithPAR2(entry.InfoHash) {
+				report, repairErr := r.manager.usenet.RepairNZB(ctx, entry.InfoHash)
+				// A manifest with legacy zero-origins is a safe crash residue from
+				// registration-before-catalog-commit. Rehydrate and retry it rather
+				// than escalating straight to replacement.
+				if !errors.Is(repairErr, recovery.ErrLegacyManifestUnsupported) {
+					return report, repairErr
+				}
+			}
+			if hydrateErr := r.hydrateLegacyNZB(ctx, entry.InfoHash, source); hydrateErr != nil {
+				return usenetpkg.NZBRepairReport{}, hydrateErr
+			}
 			return r.manager.usenet.RepairNZB(ctx, entry.InfoHash)
 		})
 		report, repairErr := outcome.report, outcome.err
 		res.par2 = outcome
 		fileUnknown := slices.Contains(report.UnknownFiles, name)
 		fileFailed := slices.Contains(report.FailedFiles, name)
+		fileRepaired := nzbRepairConfirmedForFile(report, name)
 		unattributed := len(report.AffectedFiles) == 0 && len(report.UnknownFiles) == 0 &&
 			len(report.RepairedFiles) == 0 && len(report.FailedFiles) == 0
 		switch {
-		case repairErr == nil:
+		case fileRepaired:
 			err = nil
+		case repairErr == nil && !sampledMissing:
+			err = nil
+		case repairErr == nil:
+			// The sampled article was missing, but the exhaustive pass did not
+			// attribute a repaired range to this file. Preserve the definitive
+			// sample instead of declaring the file healthy.
+			res.broken = true
+			res.reason = "usenet_segment_missing"
+			return res
+		case errors.Is(repairErr, errLegacyNZBHydration):
+			// Local/Arr source acquisition is an optimization before the existing
+			// replacement workflow. Its failure must not mask the sampled missing
+			// article or suppress the Arr delete/blocklist/search fallback.
+			res.broken = true
+			res.reason = "usenet_segment_missing"
+			return res
 		case errors.Is(repairErr, context.Canceled), errors.Is(repairErr, context.DeadlineExceeded), fileUnknown, unattributed:
 			res.reason = "usenet_par2_probe_error"
 			return res
@@ -566,6 +608,12 @@ func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name st
 		res.reason = "usenet_probe_error"
 	}
 	return res
+}
+
+func nzbRepairConfirmedForFile(report usenetpkg.NZBRepairReport, name string) bool {
+	return slices.Contains(report.RepairedFiles, name) &&
+		!slices.Contains(report.UnknownFiles, name) &&
+		!slices.Contains(report.FailedFiles, name)
 }
 
 func par2RepairFailureReason(err error) (string, bool) {

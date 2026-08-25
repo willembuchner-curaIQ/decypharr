@@ -141,6 +141,20 @@ func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (report NZBRepairR
 		report.UnknownFiles = slices.Sorted(maps.Keys(unknownFiles))
 		report.RepairedFiles = slices.Sorted(maps.Keys(repairedFiles))
 		report.FailedFiles = slices.Sorted(maps.Keys(failedFiles))
+		for fileName := range repairedFiles {
+			if _, failed := failedFiles[fileName]; failed {
+				continue
+			}
+			if _, unknown := unknownFiles[fileName]; unknown {
+				continue
+			}
+			if u.failedFiles != nil {
+				u.failedFiles.Delete(fsKey(nzoID, fileName))
+			}
+		}
+		if report.RepairedRanges > 0 {
+			u.invalidateIdleNZBFileSystems(nzoID)
+		}
 	}()
 	if u.backgroundRepairSlots != nil {
 		select {

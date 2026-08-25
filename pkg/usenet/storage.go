@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -102,6 +103,54 @@ func (s *NZBStorage) recalculateStatsLocked() error {
 func (s *NZBStorage) AddNZB(nzb *storage.NZB) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.writeNZBLocked(nzb)
+}
+
+// UpdateNZB atomically loads and conditionally rewrites one NZB while holding
+// the same lock used by all catalog writes. The mutator receives an owned
+// decoded value; returning an error leaves the on-disk bytes untouched. This
+// is used by legacy provenance hydration so a long reacquisition/parser pass
+// cannot clobber status or topology changed by another goroutine meanwhile.
+func (s *NZBStorage) UpdateNZB(id string, mutate func(*storage.NZB) error) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("NZB ID is required")
+	}
+	if mutate == nil {
+		return fmt.Errorf("NZB update function is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	path := s.metaFilePath(id)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("nzb not found: %s", id)
+		}
+		return fmt.Errorf("failed to read NZB meta file: %w", err)
+	}
+	nzb, err := decodeNZB(data)
+	if err != nil {
+		return fmt.Errorf("failed to decode NZB: %w", err)
+	}
+	if nzb.ID != id {
+		return fmt.Errorf("stored NZB ID %q does not match update key %q", nzb.ID, id)
+	}
+	if err := mutate(nzb); err != nil {
+		return err
+	}
+	if nzb.ID != id {
+		return fmt.Errorf("NZB update cannot change ID from %q to %q", id, nzb.ID)
+	}
+	return s.writeNZBLocked(nzb)
+}
+
+// writeNZBLocked persists an NZB and updates cached storage stats. Caller must
+// hold s.mu.
+func (s *NZBStorage) writeNZBLocked(nzb *storage.NZB) error {
+	if nzb == nil || strings.TrimSpace(nzb.ID) == "" {
+		return fmt.Errorf("NZB and ID are required")
+	}
 
 	data, err := encodeNZBV2(nzb)
 	if err != nil {

@@ -77,6 +77,9 @@ type Repair struct {
 	scheduler gocron.Scheduler
 	logger    zerolog.Logger
 
+	legacyNZBMu sync.Mutex
+	legacyNZB   *legacyNZBRecoveryState
+
 	mu             sync.Mutex
 	parentCtx      context.Context
 	activeRunID    string
@@ -95,6 +98,7 @@ func NewRepair(m *Manager) *Repair {
 		scheduler: m.scheduler,
 		logger:    logger.New("repair"),
 		parentCtx: context.Background(),
+		legacyNZB: newLegacyNZBRecoveryState(),
 	}
 }
 

@@ -36,6 +36,26 @@ func parseRawNZBFiles(content []byte) (nzbparser.NzbFiles, error) {
 	return nzb.Files, nil
 }
 
+// ParseRecoveryManifest builds the transport-free raw topology used to prove
+// that a reacquired NZB describes an already-imported release. It deliberately
+// performs no NNTP requests: callers can reject a mismatched NZB before content
+// detection or archive parsing spends any article bandwidth.
+func (p *NZBParser) ParseRecoveryManifest(filename string, content []byte) (*recovery.Manifest, error) {
+	if p == nil {
+		return nil, fmt.Errorf("NZB parser is nil")
+	}
+	files, err := parseRawNZBFiles(content)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("NZB contains no files")
+	}
+
+	name := determineNZBName(filename, nil)
+	return buildRawManifest("", name, files, p.detectFileType), nil
+}
+
 func buildRawManifest(
 	nzbID string,
 	name string,

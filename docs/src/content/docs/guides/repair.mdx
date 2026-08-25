@@ -114,7 +114,7 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 ### Sources
 
 - **`arr`** — walks Sonarr / Radarr media, resolves each item to an entry through the symlink target, and probes that entry. Broken files are enriched with Arr identifiers so repair can call `DeleteFiles` + `SearchMissing` directly.
-- **`managed`** — walks managed entries directly. Used when you don't have an Arr in front, or for entries imported outside the Arr flow. NZB-only managed brokens have no Arr re-acquire path; they stay `broken` with `failure_reason=usenet_segment_missing` for you to react to manually.
+- **`managed`** — walks managed entries directly. Used when you don't have an Arr in front, or for entries imported outside the Arr flow. A legacy NZB can use a surviving local source file; without one or associated Arr metadata it has no automatic metadata re-acquire path and stays `broken` for you to handle manually.
 
 ## Workflow
 
@@ -122,9 +122,10 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 2. Candidates are selected per the rules above.
 3. For each candidate, the entry is marked `repairing` and probed by a worker.
 4. NZB probes normally sample article availability. A sampled hole, a due `deep_nzb_interval`, or a manual **Deep NZB audit** triggers an exhaustive STAT pass over distinct content articles.
-5. Confirmed missing ranges are reconstructed with PAR2 under one NZB-wide traffic budget. Healthy articles are never BODY-downloaded by the audit, and repaired ranges are stored as narrow local patches.
-6. If PAR2 cannot cover a missing range and `auto_repair` is on, Arr delete + search is used as the fallback. Connection and provider errors remain `unknown` and never trigger replacement.
-7. The entry's health and the run's PAR2 scanned/missing/repaired/failed/traffic counters are persisted live.
+5. If an older NZB has no recovery manifest, Decypharr tries its local NZB source, then asks its Arr for the exact grabbed release's NZB metadata. Strict message-ID validation must succeed before raw origins are attached to the existing NZB ID.
+6. Confirmed missing ranges are reconstructed with PAR2 under one NZB-wide traffic budget. Healthy articles are never BODY-downloaded by the audit, and repaired ranges are stored as narrow local patches.
+7. If metadata reacquisition or PAR2 cannot cover the missing range, Arr delete + search remains the fallback. Connection and provider errors remain `unknown` and never trigger replacement.
+8. The entry's health and the run's PAR2 scanned/missing/repaired/failed/traffic counters are persisted live.
 
 Foreground playback and scheduled repair use the same patch store. A scheduled patch removes the first-play repair pause; a patch created mid-stream is reused by later scheduled audits. Background STAT and BODY work shares the configured `nntp_connection_percent` pool and is globally limited so active streams retain capacity.
 

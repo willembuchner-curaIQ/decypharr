@@ -248,6 +248,7 @@ type Usenet struct {
 	cleanupWg                sync.WaitGroup
 	closeOnce                sync.Once
 	repairFlights            singleflight.Group
+	legacyHydrationFlights   singleflight.Group
 	backgroundRepairSlots    chan struct{}
 
 	fs *xsync.Map[string, *fsEntry]

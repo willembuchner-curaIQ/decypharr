@@ -215,8 +215,18 @@ cost can be calculated; it is itself checked against the same budget.
 Repair covers directly posted media and raw files backing stored RAR, 7z, and
 ZIP members. PAR2 protects those posted source files, not bytes after archive
 decompression. Recovery state lives in `{main_path}/usenet/par2.db` and is
-removed with its NZB. NZBs imported by older versions do not contain the raw
-file origins required for safe reconstruction; re-import them to enable PAR2.
+removed with its NZB.
+
+For an NZB imported before raw-origin tracking, an automatic repair first looks
+for the original local NZB metadata. If it is gone and the item came through
+Sonarr or Radarr, Decypharr uses the grab history to find the same current
+release and reacquires only its NZB XML. Every stored content message ID must
+match uniquely before Decypharr attaches the PAR2 manifest to the existing NZB
+ID; parser or release drift aborts without changing the catalog. This does not
+download the complete post. Only bounded yEnc/archive metadata probes and the
+normal minimum PAR2 repair plan can use NNTP BODY traffic. If the release is no
+longer searchable, has no PAR2, or cannot be matched exactly, repair falls back
+to the existing Arr replacement workflow.
 
 During import, Decypharr must observe enough valid yEnc metadata to establish
 the exact byte layout of every protected source file it may repair. If no part

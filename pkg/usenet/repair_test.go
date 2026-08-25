@@ -7,6 +7,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
@@ -212,7 +213,8 @@ func TestRepairNZBReusesDurablePatch(t *testing.T) {
 		_ = store.Close()
 	})
 
-	u := &Usenet{nntp: client, nzbStorage: nzbStorage, par2Store: store, par2Recovery: coordinator}
+	u := &Usenet{nntp: client, nzbStorage: nzbStorage, par2Store: store, par2Recovery: coordinator, failedFiles: xsync.NewMap[string, error]()}
+	u.failedFiles.Store(fsKey(nzb.ID, "movie.mkv"), errors.New("previous stream failure"))
 	report, err := u.RepairNZB(context.Background(), nzb.ID)
 	if err != nil {
 		t.Fatalf("RepairNZB: %v", err)
@@ -225,5 +227,8 @@ func TestRepairNZBReusesDurablePatch(t *testing.T) {
 	}
 	if report.FileError("movie.mkv") != nil || report.ModeledDownloadBytes != 0 || server.Bodies.Load() != 0 {
 		t.Fatalf("file error=%v modeled bytes=%d BODY calls=%d", report.FileError("movie.mkv"), report.ModeledDownloadBytes, server.Bodies.Load())
+	}
+	if _, failed := u.failedFiles.Load(fsKey(nzb.ID, "movie.mkv")); failed {
+		t.Fatal("successful scheduled repair retained the previous permanent stream failure")
 	}
 }

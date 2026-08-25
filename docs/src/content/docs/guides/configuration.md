@@ -154,8 +154,11 @@ Array of Debrid services:
 | `max_storage`          | string | Maximum dedicated PAR2 metadata, recovery-slice, and patch storage | `8GB`   |
 
 Recovery data is stored separately at `{main_path}/usenet/par2.db`, keyed by
-NZB metadata ID. Existing NZBs imported before raw-origin tracking was added
-must be re-imported before they can be repaired safely.
+NZB metadata ID. During automatic repair, an older Arr-imported NZB can recover
+missing raw-origin metadata from the exact release's NZB XML when Sonarr or
+Radarr still exposes it through grab history and release search. The XML is
+strictly matched by content message IDs and is not retained; a missing or
+ambiguous match falls back to Arr replacement.
 
 ### Provider Fields
 
