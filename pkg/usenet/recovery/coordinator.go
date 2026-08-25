@@ -34,6 +34,23 @@ type Policy struct {
 // WithFetchFunc and let the coordinator use Client.ExecuteWithFailover.
 type FetchFunc func(context.Context, string) ([]byte, *nntp.YencMetadata, error)
 
+// RecoverBatchOptions controls background reconstruction resource use.
+type RecoverBatchOptions struct {
+	NumGoroutines int
+}
+
+// RecoveredArticle is one batch item's durable reconstruction result.
+type RecoveredArticle struct {
+	Bytes int
+	Err   error
+}
+
+// RecoverBatchResult reports per-article outcomes and the shared traffic cost.
+type RecoverBatchResult struct {
+	Articles             []RecoveredArticle
+	ModeledDownloadBytes int64
+}
+
 type CoordinatorOption func(*Coordinator) error
 
 func WithFetchFunc(fetch FetchFunc) CoordinatorOption {
@@ -42,6 +59,7 @@ func WithFetchFunc(fetch FetchFunc) CoordinatorOption {
 			return &ValidationError{Field: "recovery fetch function", Reason: "must not be nil"}
 		}
 		c.fetch = fetch
+		c.backgroundFetch = fetch
 		return nil
 	}
 }
@@ -84,10 +102,11 @@ type manifestState struct {
 // Coordinator performs narrowly-scoped, on-demand reconstruction. It does
 // not own the Store or NNTP Client; Close only flushes its manifest updates.
 type Coordinator struct {
-	store  *Store
-	client *nntp.Client
-	policy Policy
-	fetch  FetchFunc
+	store           *Store
+	client          *nntp.Client
+	policy          Policy
+	fetch           FetchFunc
+	backgroundFetch FetchFunc
 
 	mu        sync.Mutex
 	lifecycle sync.RWMutex
@@ -135,6 +154,18 @@ func NewCoordinator(store *Store, client *nntp.Client, policy Policy, options ..
 			var body []byte
 			var metadata *nntp.YencMetadata
 			err := client.ExecuteWithFailover(ctx, func(connection *nntp.Connection) error {
+				var err error
+				body, metadata, err = connection.GetDecodedBodyWithMetadata(messageID)
+				return err
+			})
+			return body, metadata, err
+		}
+	}
+	if c.backgroundFetch == nil && client != nil {
+		c.backgroundFetch = func(ctx context.Context, messageID string) ([]byte, *nntp.YencMetadata, error) {
+			var body []byte
+			var metadata *nntp.YencMetadata
+			err := client.ExecuteBackgroundWithFailover(ctx, func(connection *nntp.Connection) error {
 				var err error
 				body, metadata, err = connection.GetDecodedBodyWithMetadata(messageID)
 				return err
@@ -282,14 +313,8 @@ func (c *Coordinator) recoverArticleWithSource(ctx context.Context, nzbID string
 	if !c.policy.Enabled {
 		return nil, ErrRecoveryDisabled
 	}
-	if segment.RawFileKey == 0 {
-		return nil, &LayoutError{Reason: "logical segment has no raw-file origin"}
-	}
-	if segment.RawOffset < 0 || segment.RawLength <= 0 || segment.SegmentDataStart < 0 {
-		return nil, &LayoutError{RawFile: RawFileKey(segment.RawFileKey), Offset: segment.RawOffset, Length: segment.RawLength, Reason: "invalid raw article range"}
-	}
-	if segment.RawOffset > math.MaxInt64-segment.RawLength || segment.RawLength > int64(maxInt()) || segment.SegmentDataStart > int64(maxInt())-segment.RawLength {
-		return nil, &LayoutError{RawFile: RawFileKey(segment.RawFileKey), Offset: segment.RawOffset, Length: segment.RawLength, Reason: "raw article-shaped range exceeds addressable memory"}
+	if err := validateRecoverySegment(segment); err != nil {
+		return nil, err
 	}
 	c.lifecycle.RLock()
 	defer c.lifecycle.RUnlock()
@@ -304,8 +329,18 @@ func (c *Coordinator) recoverArticleWithSource(ctx context.Context, nzbID string
 		operationLock := c.operationLock(nzbID)
 		operationLock.Lock()
 		defer operationLock.Unlock()
+		manifest, err := c.manifest(nzbID)
+		if err != nil {
+			return nil, err
+		}
+		op := &repairOperation{
+			coordinator: c, ctx: ctx, nzbID: nzbID, manifest: manifest,
+			meter: newTrafficMeter(c.policy, manifest), articleCache: make(map[string]fetchedArticle),
+			reserved: make(map[string]bool), parsedRaw: make(map[RawFileKey]bool), aliases: make(map[FileID][]RawFileKey),
+			local: source, fetch: c.fetch,
+		}
 		c.counters.repairs.Add(1)
-		data, recoverErr := c.recoverArticle(ctx, nzbID, segment, source)
+		data, recoverErr := op.recoverArticle(segment)
 		if recoverErr != nil {
 			c.counters.repairFailures.Add(1)
 		}
@@ -316,6 +351,89 @@ func (c *Coordinator) recoverArticleWithSource(ctx context.Context, nzbID string
 	}
 	// singleflight shares values between callers; each gets owned memory.
 	return bytes.Clone(value.([]byte)), nil
+}
+
+// RecoverArticles repairs several known-missing ranges under one NZB-wide
+// traffic budget and routes network reads through the background repair pool.
+func (c *Coordinator) RecoverArticles(ctx context.Context, nzbID string, segments []reader.SegmentMeta, options RecoverBatchOptions) (RecoverBatchResult, error) {
+	result := RecoverBatchResult{Articles: make([]RecoveredArticle, 0, len(segments))}
+	if c == nil || c.store == nil {
+		return result, ErrStoreClosed
+	}
+	if !c.policy.Enabled {
+		return result, ErrRecoveryDisabled
+	}
+	if options.NumGoroutines < 0 {
+		return result, &ValidationError{Field: "PAR2 recovery goroutines", Reason: "must not be negative"}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return result, ErrStoreClosed
+	}
+	manifest, err := c.manifest(nzbID)
+	if err != nil {
+		return result, err
+	}
+
+	meter := newTrafficMeter(c.policy, manifest)
+	articleCache := make(map[string]fetchedArticle)
+	reserved := make(map[string]bool)
+	knownMissing := make(map[string]struct{}, len(segments))
+	for _, segment := range segments {
+		if segment.MessageID != "" {
+			knownMissing[segment.MessageID] = struct{}{}
+		}
+	}
+	parsedRaw := make(map[RawFileKey]bool)
+	aliases := make(map[FileID][]RawFileKey)
+	operationLock := c.operationLock(nzbID)
+	for _, segment := range segments {
+		if err := ctx.Err(); err != nil {
+			result.ModeledDownloadBytes = meter.used
+			return result, err
+		}
+		if err := validateRecoverySegment(segment); err != nil {
+			result.Articles = append(result.Articles, RecoveredArticle{Err: err})
+			continue
+		}
+		op := &repairOperation{
+			coordinator: c, ctx: ctx, nzbID: nzbID, manifest: manifest,
+			meter: meter, articleCache: articleCache, reserved: reserved, knownMissing: knownMissing,
+			parsedRaw: parsedRaw, aliases: aliases, fetch: c.backgroundFetch,
+			numWorkers: options.NumGoroutines,
+		}
+		operationLock.Lock()
+		c.counters.repairs.Add(1)
+		data, recoverErr := op.recoverArticle(segment)
+		if recoverErr != nil {
+			c.counters.repairFailures.Add(1)
+		}
+		operationLock.Unlock()
+		result.Articles = append(result.Articles, RecoveredArticle{Bytes: len(data), Err: recoverErr})
+	}
+	result.ModeledDownloadBytes = meter.used
+	return result, nil
+}
+
+func validateRecoverySegment(segment reader.SegmentMeta) error {
+	if segment.RawFileKey == 0 {
+		return &LayoutError{Reason: "logical segment has no raw-file origin"}
+	}
+	if segment.RawOffset < 0 || segment.RawLength <= 0 || segment.SegmentDataStart < 0 {
+		return &LayoutError{RawFile: RawFileKey(segment.RawFileKey), Offset: segment.RawOffset, Length: segment.RawLength, Reason: "invalid raw article range"}
+	}
+	if segment.RawOffset > math.MaxInt64-segment.RawLength || segment.RawLength > int64(maxInt()) || segment.SegmentDataStart > int64(maxInt())-segment.RawLength {
+		return &LayoutError{RawFile: RawFileKey(segment.RawFileKey), Offset: segment.RawOffset, Length: segment.RawLength, Reason: "raw article-shaped range exceeds addressable memory"}
+	}
+	return nil
 }
 
 func (c *Coordinator) operationLock(nzbID string) *sync.Mutex {

@@ -26,6 +26,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 	"github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -246,6 +247,8 @@ type Usenet struct {
 	cleanupStop              chan struct{}
 	cleanupWg                sync.WaitGroup
 	closeOnce                sync.Once
+	repairFlights            singleflight.Group
+	backgroundRepairSlots    chan struct{}
 
 	fs *xsync.Map[string, *fsEntry]
 }
@@ -368,6 +371,10 @@ func New() (*Usenet, error) {
 		prefetchSize = 16 * 1024 * 1024 // Default to 16MB
 	}
 
+	backgroundRepairs := cfg.Repair.Workers
+	if backgroundRepairs <= 0 {
+		backgroundRepairs = 1
+	}
 	u := &Usenet{
 		nzbStorage:               nzbStorage,
 		nntp:                     client,
@@ -382,6 +389,7 @@ func New() (*Usenet, error) {
 		fs:                       xsync.NewMap[string, *fsEntry](),
 		failedFiles:              xsync.NewMap[string, error](),
 		cleanupStop:              make(chan struct{}),
+		backgroundRepairSlots:    make(chan struct{}, min(backgroundRepairs, 2)),
 	}
 
 	// Start background cleanup for idle sessions

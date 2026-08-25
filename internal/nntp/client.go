@@ -711,6 +711,18 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 	return ErrAllProvidersFailed
 }
 
+// ExecuteBackgroundWithFailover runs one provider-failover operation through
+// the shared repair pool so background BODY traffic shares its connection cap
+// with availability scans.
+func (c *Client) ExecuteBackgroundWithFailover(ctx context.Context, fn func(conn *Connection) error) error {
+	if c.closed.Load() {
+		return errors.New("nntp client is closed")
+	}
+	return c.repairPool.execute(ctx, func(*Client) error {
+		return c.ExecuteWithFailover(ctx, fn)
+	})
+}
+
 // ErrAllProvidersFailed marks an error returned after ExecuteWithFailover
 // exhausted both its per-provider retries and provider failover; outer retry
 // loops should not multiply attempts on it.

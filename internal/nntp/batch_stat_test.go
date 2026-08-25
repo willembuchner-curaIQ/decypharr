@@ -3,7 +3,9 @@ package nntp
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/testutil/nntpd"
@@ -55,6 +57,58 @@ func TestBatchStatAllChecksEveryArticle(t *testing.T) {
 		}
 		if !article.Available || article.Error != nil {
 			t.Fatalf("available result %d=%+v", i, article)
+		}
+	}
+}
+
+func TestBackgroundOperationsUseRepairPoolCapacity(t *testing.T) {
+	server, err := nntpd.New(nntpd.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Close)
+	host, port := server.Addr()
+	client, err := NewClient(&config.Config{
+		Usenet: config.Usenet{Providers: []config.UsenetProvider{{
+			Host: host, Port: port, MaxConnections: 1,
+		}}},
+		Repair: config.RepairConfig{NNTPConnectionPercent: 100},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseAll()
+	errors := make(chan error, 2)
+	for range 2 {
+		go func() {
+			errors <- client.ExecuteBackgroundWithFailover(context.Background(), func(*Connection) error {
+				entered <- struct{}{}
+				<-release
+				return nil
+			})
+		}()
+	}
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first background operation did not start")
+	}
+	select {
+	case <-entered:
+		t.Fatal("repair pool ran two background operations with capacity one")
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseAll()
+	for range 2 {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
 		}
 	}
 }

@@ -37,9 +37,12 @@ type repairOperation struct {
 	manifest    *Manifest
 	meter       *trafficMeter
 	local       reader.ArticleRangeSource
+	fetch       FetchFunc
+	numWorkers  int
 
 	articleCache     map[string]fetchedArticle
 	reserved         map[string]bool
+	knownMissing     map[string]struct{}
 	parsedRaw        map[RawFileKey]bool
 	aliases          map[FileID][]RawFileKey
 	mappingProbe     int
@@ -106,7 +109,7 @@ func (op *repairOperation) recover(binding targetBinding, segment reader.Segment
 	// BODY. If this fails after first-time discovery, only the bounded base PAR2
 	// bootstrap has been downloaded.
 	networkRanges := alignRecoveryRanges(ranges, int64(binding.set.SliceSize))
-	selectedVolumes, sourceRefs, err := op.remainingPlan(binding.set, shards, missingSet, networkRanges, len(missing))
+	selectedVolumes, sourceRefs, err := op.remainingPlan(binding.set, shards, missingSet, networkRanges)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +211,7 @@ func (op *repairOperation) recover(binding targetBinding, segment reader.Segment
 			}
 			op.coordinator.counters.patchBytes.Add(uint64(len(patch)))
 			return nil
-		}, par2.RecoverOptions{})
+		}, par2.RecoverOptions{NumGoroutines: op.numWorkers})
 		if err == nil {
 			break
 		}
@@ -334,12 +337,14 @@ func alignRecoveryRanges(ranges []par2.ByteRange, sliceSize int64) []par2.ByteRa
 	return mergeByteRanges(aligned, sliceSize)
 }
 
-func (op *repairOperation) remainingPlan(set StoredSet, shards []flatShard, missing map[int]bool, ranges []par2.ByteRange, needed int) ([]RawFile, []articleRef, error) {
+func (op *repairOperation) remainingPlan(set StoredSet, shards []flatShard, missing map[int]bool, ranges []par2.ByteRange) ([]RawFile, []articleRef, error) {
 	refs := make([]articleRef, 0)
 	for _, shard := range shards {
 		if missing[shard.index] {
 			continue
 		}
+		shardRefs := make([]articleRef, 0)
+		knownMissing := false
 		for _, requested := range ranges {
 			if requested.Offset >= shard.actual {
 				continue // PAR2 tail padding is local zeroes, not network data.
@@ -349,14 +354,28 @@ func (op *repairOperation) remainingPlan(set StoredSet, shards []flatShard, miss
 			if err != nil {
 				return nil, nil, err
 			}
-			refs = append(refs, covered...)
+			for _, ref := range covered {
+				if _, ok := op.knownMissing[ref.article.MessageID]; ok {
+					knownMissing = true
+					break
+				}
+			}
+			if knownMissing {
+				break
+			}
+			shardRefs = append(shardRefs, covered...)
 		}
+		if knownMissing {
+			missing[shard.index] = true
+			continue
+		}
+		refs = append(refs, shardRefs...)
 	}
 	parity, err := op.availableParity(set)
 	if err != nil {
 		return nil, nil, err
 	}
-	volumes, err := op.selectVolumes(set, needed-len(parity))
+	volumes, err := op.selectVolumes(set, len(missing)-len(parity))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -766,17 +785,9 @@ func (e *sourceShardFailure) Error() string {
 }
 func (e *sourceShardFailure) Unwrap() error { return e.cause }
 
-func (c *Coordinator) recoverArticle(ctx context.Context, nzbID string, segment reader.SegmentMeta, local reader.ArticleRangeSource) ([]byte, error) {
-	manifest, err := c.manifest(nzbID)
-	if err != nil {
-		return nil, err
-	}
-	op := &repairOperation{
-		coordinator: c, ctx: ctx, nzbID: nzbID, manifest: manifest,
-		meter: newTrafficMeter(c.policy, manifest), articleCache: make(map[string]fetchedArticle),
-		reserved: make(map[string]bool), parsedRaw: make(map[RawFileKey]bool), aliases: make(map[FileID][]RawFileKey),
-		local: local,
-	}
+func (op *repairOperation) recoverArticle(segment reader.SegmentMeta) ([]byte, error) {
+	c := op.coordinator
+	nzbID := op.nzbID
 	targetKey := RawFileKey(segment.RawFileKey)
 	sets, err := c.store.ListParsedSets(nzbID)
 	if err != nil {
@@ -1118,11 +1129,11 @@ func (op *repairOperation) fetchArticle(raw RawFileKey, article Article) ([]byte
 			return nil, nil, err
 		}
 	}
-	if op.coordinator.fetch == nil {
+	if op.fetch == nil {
 		return nil, nil, &ValidationError{Field: "NNTP recovery client", Reason: "no client or fetch function configured"}
 	}
 	op.coordinator.counters.bodyCalls.Add(1)
-	body, metadata, err := op.coordinator.fetch(op.ctx, article.MessageID)
+	body, metadata, err := op.fetch(op.ctx, article.MessageID)
 	if err == nil {
 		if metadata == nil || metadata.Offset < 0 || metadata.PartSize <= 0 || metadata.PartSize != int64(len(body)) {
 			err = &LayoutError{RawFile: raw, Reason: "BODY response has no consistent yEnc range"}

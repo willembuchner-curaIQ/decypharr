@@ -154,6 +154,212 @@ func testCoordinatorRange(t *testing.T, dataStart int64) {
 	}
 }
 
+func TestCoordinatorRecoverArticlesSharesArticleCache(t *testing.T) {
+	const sliceSize = 64
+	target := testBytes(sliceSize, 3)
+	healthy := testBytes(sliceSize, 101)
+	parity := par2test.Recovery([][]byte{target, healthy}, 0)
+	store, set := coordinatorFixture(t, [][]byte{target, healthy}, [][]byte{parity})
+
+	var calls atomic.Int64
+	coordinator, err := NewCoordinator(store, nil, Policy{Enabled: true, MaxDownloadBytes: 100}, WithFetchFunc(func(_ context.Context, messageID string) ([]byte, *nntp.YencMetadata, error) {
+		calls.Add(1)
+		if messageID != "healthy" {
+			t.Fatalf("unexpected BODY %q", messageID)
+		}
+		return slices.Clone(healthy), &nntp.YencMetadata{Name: "healthy.bin", Size: sliceSize, Offset: 0, PartSize: sliceSize}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	segments := []reader.SegmentMeta{
+		{MessageID: "missing", RawFileKey: 1, RawOffset: 1, RawLength: 8},
+		{MessageID: "missing", RawFileKey: 1, RawOffset: 40, RawLength: 8},
+	}
+	result, err := coordinator.RecoverArticles(context.Background(), "fixture", segments, RecoverBatchOptions{NumGoroutines: 1})
+	if err != nil {
+		t.Fatalf("RecoverArticles: %v", err)
+	}
+	if len(result.Articles) != len(segments) {
+		t.Fatalf("results=%d, want %d", len(result.Articles), len(segments))
+	}
+	for i, article := range result.Articles {
+		if article.Err != nil {
+			t.Fatalf("article %d: %v", i, article.Err)
+		}
+		start := segments[i].RawOffset
+		patch, err := store.ReadRepairedRange("fixture", set.SetID, FileID{1}, uint64(start), uint64(segments[i].RawLength))
+		if err != nil || !slices.Equal(patch, target[start:start+segments[i].RawLength]) {
+			t.Fatalf("article %d patch=%x err=%v", i, patch, err)
+		}
+		if article.Bytes != int(segments[i].RawLength) {
+			t.Fatalf("article %d bytes=%d", i, article.Bytes)
+		}
+	}
+	if calls.Load() != 1 || result.ModeledDownloadBytes != 100 {
+		t.Fatalf("BODY calls=%d modeled bytes=%d", calls.Load(), result.ModeledDownloadBytes)
+	}
+}
+
+func TestCoordinatorRecoverArticlesEnforcesOneNZBBudget(t *testing.T) {
+	const sliceSize = 64
+	targetA := testBytes(sliceSize, 5)
+	healthyA := testBytes(sliceSize, 75)
+	targetB := testBytes(sliceSize, 145)
+	healthyB := testBytes(sliceSize, 215)
+	parityA := par2test.Recovery([][]byte{targetA, healthyA}, 0)
+	parityB := par2test.Recovery([][]byte{targetB, healthyB}, 0)
+
+	store, err := Open(t.TempDir() + "/par2.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	manifest := &Manifest{Version: ManifestVersion, NZBID: "batch-budget", Files: []RawFile{
+		{Key: 1, BaseFilename: "target-a.bin", Articles: []Article{{Number: 1, MessageID: "missing-a", PostedBytes: 60, DecodedSize: sliceSize, Layout: LayoutExact}}},
+		{Key: 2, BaseFilename: "healthy-a.bin", Articles: []Article{{Number: 1, MessageID: "healthy-a", PostedBytes: 60, DecodedSize: sliceSize, Layout: LayoutExact}}},
+		{Key: 3, BaseFilename: "target-b.bin", Articles: []Article{{Number: 1, MessageID: "missing-b", PostedBytes: 60, DecodedSize: sliceSize, Layout: LayoutExact}}},
+		{Key: 4, BaseFilename: "healthy-b.bin", Articles: []Article{{Number: 1, MessageID: "healthy-b", PostedBytes: 60, DecodedSize: sliceSize, Layout: LayoutExact}}},
+	}}
+	if err := store.PutManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	sets := []struct {
+		set    StoredSet
+		parity []byte
+	}{
+		{set: StoredSet{Version: StoredSetVersion, SetID: SetID{1}, SliceSize: sliceSize, Files: []StoredSourceFile{
+			{FileID: FileID{1}, RawFile: 1, Name: "target-a.bin", Length: sliceSize},
+			{FileID: FileID{2}, RawFile: 2, Name: "healthy-a.bin", Length: sliceSize},
+		}}, parity: parityA},
+		{set: StoredSet{Version: StoredSetVersion, SetID: SetID{2}, SliceSize: sliceSize, Files: []StoredSourceFile{
+			{FileID: FileID{3}, RawFile: 3, Name: "target-b.bin", Length: sliceSize},
+			{FileID: FileID{4}, RawFile: 4, Name: "healthy-b.bin", Length: sliceSize},
+		}}, parity: parityB},
+	}
+	for i := range sets {
+		sets[i].set.Recovery = []RecoverySliceDescriptor{{
+			Exponent: 0, RawFile: RawFileKey(10 + i), PayloadLength: sliceSize,
+			PacketMD5: recoveryPacketMD5(sets[i].set.SetID, 0, sets[i].parity),
+		}}
+		if err := store.PutParsedSet("batch-budget", sets[i].set); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.PutRecoverySlice("batch-budget", sets[i].set.SetID, 0, sets[i].parity); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var calls []string
+	coordinator, err := NewCoordinator(store, nil, Policy{Enabled: true, MaxDownloadBytes: 100}, WithFetchFunc(func(_ context.Context, messageID string) ([]byte, *nntp.YencMetadata, error) {
+		calls = append(calls, messageID)
+		switch messageID {
+		case "healthy-a":
+			return slices.Clone(healthyA), &nntp.YencMetadata{Name: "healthy-a.bin", Size: sliceSize, PartSize: sliceSize}, nil
+		case "healthy-b":
+			return slices.Clone(healthyB), &nntp.YencMetadata{Name: "healthy-b.bin", Size: sliceSize, PartSize: sliceSize}, nil
+		default:
+			return nil, nil, errors.New("unexpected article")
+		}
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.RecoverArticles(context.Background(), "batch-budget", []reader.SegmentMeta{
+		{MessageID: "missing-a", RawFileKey: 1, RawLength: 8},
+		{MessageID: "missing-b", RawFileKey: 3, RawLength: 8},
+	}, RecoverBatchOptions{NumGoroutines: 1})
+	if err != nil {
+		t.Fatalf("RecoverArticles: %v", err)
+	}
+	if len(result.Articles) != 2 || result.Articles[0].Err != nil || !errors.Is(result.Articles[1].Err, ErrBudgetExceeded) {
+		t.Fatalf("unexpected results: %+v", result.Articles)
+	}
+	patch, err := store.ReadRepairedRange("batch-budget", sets[0].set.SetID, FileID{1}, 0, 8)
+	if err != nil || !slices.Equal(patch, targetA[:8]) || result.Articles[0].Bytes != 8 {
+		t.Fatalf("first patch=%x bytes=%d err=%v", patch, result.Articles[0].Bytes, err)
+	}
+	if !slices.Equal(calls, []string{"healthy-a"}) || result.ModeledDownloadBytes != 60 {
+		t.Fatalf("BODY calls=%v modeled bytes=%d", calls, result.ModeledDownloadBytes)
+	}
+}
+
+func TestCoordinatorRecoverArticlesPlansKnownMissingShardsTogether(t *testing.T) {
+	const sliceSize = 64
+	targetA := testBytes(sliceSize, 11)
+	targetB := testBytes(sliceSize, 91)
+	healthy := testBytes(sliceSize, 171)
+	data := [][]byte{targetA, targetB, healthy}
+	parity := [][]byte{par2test.Recovery(data, 0), par2test.Recovery(data, 1)}
+
+	store, err := Open(t.TempDir() + "/par2.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	manifest := &Manifest{Version: ManifestVersion, NZBID: "known-missing", Files: []RawFile{
+		{Key: 1, BaseFilename: "target-a.bin", Articles: []Article{{Number: 1, MessageID: "missing-a", PostedBytes: 100, DecodedSize: sliceSize, Layout: LayoutExact}}},
+		{Key: 2, BaseFilename: "target-b.bin", Articles: []Article{{Number: 1, MessageID: "missing-b", PostedBytes: 100, DecodedSize: sliceSize, Layout: LayoutExact}}},
+		{Key: 3, BaseFilename: "healthy.bin", Articles: []Article{{Number: 1, MessageID: "healthy", PostedBytes: 100, DecodedSize: sliceSize, Layout: LayoutExact}}},
+	}}
+	if err := store.PutManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	set := StoredSet{Version: StoredSetVersion, SetID: SetID{9}, SliceSize: sliceSize, Files: []StoredSourceFile{
+		{FileID: FileID{1}, RawFile: 1, Name: "target-a.bin", Length: sliceSize},
+		{FileID: FileID{2}, RawFile: 2, Name: "target-b.bin", Length: sliceSize},
+		{FileID: FileID{3}, RawFile: 3, Name: "healthy.bin", Length: sliceSize},
+	}}
+	for exponent, payload := range parity {
+		set.Recovery = append(set.Recovery, RecoverySliceDescriptor{
+			Exponent: uint32(exponent), RawFile: RawFileKey(10 + exponent), PayloadLength: sliceSize,
+			PacketMD5: recoveryPacketMD5(set.SetID, uint32(exponent), payload),
+		})
+	}
+	if err := store.PutParsedSet("known-missing", set); err != nil {
+		t.Fatal(err)
+	}
+	for exponent, payload := range parity {
+		if err := store.PutRecoverySlice("known-missing", set.SetID, uint32(exponent), payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var calls []string
+	coordinator, err := NewCoordinator(store, nil, Policy{Enabled: true, MaxDownloadBytes: 100}, WithFetchFunc(func(_ context.Context, messageID string) ([]byte, *nntp.YencMetadata, error) {
+		calls = append(calls, messageID)
+		if messageID != "healthy" {
+			return nil, nil, errors.New("unexpected missing-source BODY")
+		}
+		return slices.Clone(healthy), &nntp.YencMetadata{Name: "healthy.bin", Size: sliceSize, PartSize: sliceSize}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := coordinator.RecoverArticles(context.Background(), "known-missing", []reader.SegmentMeta{
+		{MessageID: "missing-a", RawFileKey: 1, RawLength: 8},
+		{MessageID: "missing-b", RawFileKey: 2, RawLength: 8},
+	}, RecoverBatchOptions{NumGoroutines: 1})
+	if err != nil {
+		t.Fatalf("RecoverArticles: %v", err)
+	}
+	if len(result.Articles) != 2 || result.Articles[0].Err != nil || result.Articles[1].Err != nil {
+		t.Fatalf("unexpected results: %+v", result.Articles)
+	}
+	patchA, errA := store.ReadRepairedRange("known-missing", set.SetID, FileID{1}, 0, 8)
+	patchB, errB := store.ReadRepairedRange("known-missing", set.SetID, FileID{2}, 0, 8)
+	if errA != nil || errB != nil || !slices.Equal(patchA, targetA[:8]) || !slices.Equal(patchB, targetB[:8]) {
+		t.Fatalf("recovered patches A=%x (%v) B=%x (%v)", patchA, errA, patchB, errB)
+	}
+	if result.Articles[0].Bytes != 8 || result.Articles[1].Bytes != 8 {
+		t.Fatalf("recovered byte counts=%d,%d", result.Articles[0].Bytes, result.Articles[1].Bytes)
+	}
+	if !slices.Equal(calls, []string{"healthy"}) || result.ModeledDownloadBytes != 100 {
+		t.Fatalf("BODY calls=%v modeled bytes=%d", calls, result.ModeledDownloadBytes)
+	}
+}
+
 func TestCoordinatorAtomicallyRejectsOverBudgetPlan(t *testing.T) {
 	const sliceSize = 64
 	target := testBytes(sliceSize, 9)
