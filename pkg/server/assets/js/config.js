@@ -1105,7 +1105,9 @@ class ConfigManager {
         Object.entries(data).forEach(([key, value]) => {
             const input = document.querySelector(`[name="arr[${index}].${key}"]`);
             if (input) {
-                if (input.type === 'checkbox') {
+                if (key === 'download_uncached' && input.tagName === 'SELECT') {
+                    input.value = value === true ? 'true' : value === false ? 'false' : '';
+                } else if (input.type === 'checkbox') {
                     input.checked = value;
                 } else {
                     input.value = value;
@@ -1196,11 +1198,15 @@ class ConfigManager {
                         </div>
 
                         <div class="rounded-box bg-base-200/50 px-3 py-2">
-                            <label class="label cursor-pointer justify-start gap-2 p-0">
-                                <input type="checkbox" class="checkbox checkbox-sm checkbox-primary"
-                                       name="arr[${index}].download_uncached" id="arr[${index}].download_uncached">
-                                <span class="text-sm leading-tight">Download Uncached</span>
+                            <label class="label p-0 pb-1" for="arr[${index}].download_uncached">
+                                <span class="text-sm leading-tight">Uncached Torrents</span>
                             </label>
+                            <select class="select select-sm w-full"
+                                    name="arr[${index}].download_uncached" id="arr[${index}].download_uncached">
+                                <option value="">Inherit provider setting</option>
+                                <option value="true">Allow for this Arr</option>
+                                <option value="false">Require cached for this Arr</option>
+                            </select>
                         </div>
                     </div>
                 </div>
@@ -1581,10 +1587,13 @@ class ConfigManager {
                 host: hostInput.value,
                 token: tokenInput.value,
                 skip_repair: skipRepairInput.checked,
-                download_uncached: downloadUncachedInput.checked,
                 selected_debrid: selectedDebridInput.value,
                 source: sourceInput.value
             };
+
+            if (downloadUncachedInput.value !== '') {
+                arr.download_uncached = downloadUncachedInput.value === 'true';
+            }
 
             if (arr.name && arr.host) {
                 arrs.push(arr);
