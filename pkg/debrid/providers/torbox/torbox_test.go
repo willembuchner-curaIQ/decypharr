@@ -13,7 +13,61 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
+
+func TestSubmissionRequestsUseDedicatedClient(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+
+	var (
+		mu    sync.Mutex
+		lanes []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		lanes = append(lanes, r.Header.Get("X-Lane"))
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/torrents/createtorrent":
+			_, _ = fmt.Fprint(w, `{"success":true,"data":{"torrent_id":17,"hash":"ABC"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/torrents/mylist":
+			_, _ = fmt.Fprint(w, `{"success":true,"data":{"id":17,"name":"Release.mkv","size":100,"progress":1,"download_state":"completed","download_finished":true,"created_at":"2026-01-02T03:04:05Z","hash":"ABC","files":[{"id":1,"name":"Release.mkv","absolute_path":"Release.mkv","size":100}]}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	tb := testTorbox(server.URL)
+	tb.client = request.New(
+		request.WithHeaders(map[string]string{"X-Lane": "main"}),
+		request.WithMaxRetries(0),
+	)
+	tb.submitClient = request.New(
+		request.WithHeaders(map[string]string{"X-Lane": "submit"}),
+		request.WithMaxRetries(0),
+	)
+
+	torrent := &types.Torrent{
+		Magnet: &utils.Magnet{Link: "magnet:?xt=urn:btih:ABC"},
+	}
+	added, err := tb.SubmitMagnet(torrent)
+	if err != nil {
+		t.Fatalf("SubmitMagnet() error = %v", err)
+	}
+	if _, err := tb.CheckStatus(added); err != nil {
+		t.Fatalf("CheckStatus() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(lanes, []string{"submit", "submit"}) {
+		t.Fatalf("request lanes = %v, want dedicated submission lane", lanes)
+	}
+}
 
 func TestGetTorrentsBypassesTorboxCache(t *testing.T) {
 	config.SetConfigPath(t.TempDir())
