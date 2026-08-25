@@ -39,6 +39,7 @@ type RepairStatus struct {
 type RepairRunOptions struct {
 	IgnoreLastChecked bool
 	AutoRepair        *bool
+	DeepNZB           bool
 	UnrestrictLink    bool
 	// VerifyContent additionally head-verifies each NZB media file through
 	// the serving stack (container-signature check). Catches files whose
@@ -59,6 +60,7 @@ const (
 	repairStopSchedulerTag = "repair-sweep-stop"
 	repairDefaultWorkers   = 5
 	repairDefaultRecheck   = 7 * 24 * time.Hour
+	repairDefaultDeepNZB   = 30 * 24 * time.Hour
 	repairHistoryRetained  = 100
 	// At most this many files probed concurrently within a single entry. The
 	// outer worker count comes from cfg.Repair.Workers.
@@ -151,6 +153,32 @@ func (r *Repair) recheckInterval() time.Duration {
 		return repairDefaultRecheck
 	}
 	return d
+}
+
+func (r *Repair) deepNZBInterval() time.Duration {
+	raw := strings.TrimSpace(r.cfg().DeepNZBInterval)
+	if raw == "0" {
+		return 0
+	}
+	if raw == "" {
+		return repairDefaultDeepNZB
+	}
+	d, err := utils.ParseDuration(raw)
+	if err != nil || d < 0 {
+		return repairDefaultDeepNZB
+	}
+	return d
+}
+
+func (r *Repair) shouldDeepNZB(lastAudit time.Time, force, autoRepair bool, now time.Time) bool {
+	if !autoRepair {
+		return false
+	}
+	if force {
+		return true
+	}
+	interval := r.deepNZBInterval()
+	return interval > 0 && (lastAudit.IsZero() || now.Sub(lastAudit) >= interval)
 }
 
 // Start registers the recurring sweep with the scheduler if repair is
@@ -573,10 +601,11 @@ func notificationEventFor(status storage.RepairRunStatus) config.NotificationEve
 func discordContextFor(run *storage.RepairRun) string {
 	const dateFmt = "2006-01-02 15:04:05"
 	return fmt.Sprintf(
-		"\n**Run**: %s\n**Trigger**: %s\n**Source**: %s\n**Status**: %s\n**Started**: %s\n**Completed**: %s\n**Probed**: %d (broken: %d, repaired: %d)\n",
+		"\n**Run**: %s\n**Trigger**: %s\n**Source**: %s\n**Status**: %s\n**Started**: %s\n**Completed**: %s\n**Probed**: %d (broken: %d, repaired: %d)\n**PAR2**: %d articles scanned, %d missing, %d ranges patched\n",
 		run.ID, run.Trigger, run.Source, run.Status,
 		run.StartedAt.Format(dateFmt), run.CompletedAt.Format(dateFmt),
 		run.Stats.Probed, run.Stats.Broken, run.Stats.Repaired,
+		run.Stats.PAR2ArticlesScanned, run.Stats.PAR2ArticlesMissing, run.Stats.PAR2RangesRepaired,
 	)
 }
 

@@ -762,9 +762,6 @@ func (u *Usenet) CheckFile(ctx context.Context, nzoID, filename string) error {
 		return fmt.Errorf("file has no Segments: %s", filename)
 	}
 	err = u.checkAvailability(ctx, filename, messageIDs)
-	if err != nil && u.canRecoverWithPAR2(nzoID) {
-		return nil
-	}
 	return err
 }
 
@@ -774,6 +771,12 @@ func (u *Usenet) canRecoverWithPAR2(nzbID string) bool {
 	}
 	manifest, err := u.par2Store.GetManifest(nzbID)
 	return err == nil && manifest.HasPAR2()
+}
+
+// CanRecoverWithPAR2 reports whether an NZB has a registered PAR2 manifest and
+// automatic recovery is enabled.
+func (u *Usenet) CanRecoverWithPAR2(nzbID string) bool {
+	return u.canRecoverWithPAR2(nzbID)
 }
 
 func (u *Usenet) CheckFileAvailability(ctx context.Context, file *storage.NZBFile, samplePercent int) error {

@@ -20,7 +20,7 @@ Every entry has exactly one health record with one of these statuses:
 | `stale`       | Last check is older than `recheck_interval`.                   |
 | `unsupported` | The entry has no probe path on this protocol.                  |
 
-Each record also stores the file fingerprint, last-checked / last-OK / last-failed timestamps, the next-due time, and the list of broken files (with their Arr IDs when the source is Arr).
+Each record also stores the file fingerprint, last-checked / last-OK / last-failed timestamps, the next-due time, PAR2 audit/patch counts, and the list of broken files (with their Arr IDs when the source is Arr).
 
 When an entry's file set changes, its fingerprint is invalidated and the entry is marked **dirty**, forcing a re-probe on the next sweep.
 
@@ -52,6 +52,7 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
     "workers": 5,
     "strategy": "per_entry",
     "recheck_interval": "168h",
+    "deep_nzb_interval": "720h",
     "arrs": [],
     "auto_repair": true,
     "skip_nzb_repair": false,
@@ -71,6 +72,7 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
 | `workers`                 | Number of concurrent probe workers.                                                      | `5`         |
 | `strategy`                | `per_entry` (stop after first broken file in an entry) or `per_file` (probe all files).  | `per_entry` |
 | `recheck_interval`        | How long a healthy entry's check stays fresh before it becomes a candidate again.        | `168h`      |
+| `deep_nzb_interval`       | Full distinct-article STAT audit cadence for NZBs when auto-repair is enabled. Use `0` to disable. | `720h` |
 | `arrs`                    | Optional filter when `source=arr`. Empty list means all eligible Arrs.                   | `[]`        |
 | `auto_repair`             | When `true`, brokens are repaired in the same sweep. When `false`, the sweep is detect-only. | `false` |
 | `skip_nzb_repair`         | Skip NZB / Usenet entries during scheduled sweeps.                                      | `false` |
@@ -86,7 +88,7 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
 - The repair sweep is cancelled at the next firing of `stop_schedule`, mid-probe if necessary. Entries not yet probed are left as they were before this repair sweep (their existing health and `next_check_due_at` are untouched, so they're picked up again on the next scheduled run).
 - The run is recorded as `completed` (not `cancelled`), with `cancel_reason` noting it was stopped by schedule.
 - What happens to entries this repair sweep *did* manage to probe and found broken is controlled by `auto_repair`, same as any other repair sweep:
-  - `auto_repair: true` repairs them via the normal Arr delete + re-search flow.
+  - `auto_repair: true` attempts bounded local PAR2 repair first, then uses Arr delete + re-search only for files that remain broken.
   - `auto_repair: false` leaves them recorded as broken without triggering Arr repair.
 
 #### Multi-day coverage
@@ -119,9 +121,12 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 1. The cron tick (or a manual **Run Now**) opens a new run.
 2. Candidates are selected per the rules above.
 3. For each candidate, the entry is marked `repairing` and probed by a worker.
-4. The entry's health is updated with the probe outcome (`healthy` / `broken` / `unknown`), broken files, fingerprint, and timestamps.
-5. If `auto_repair` is on and the entry has Arr-known broken files, they are batched per Arr and submitted via delete + search. After the repair attempt, only those entries are re-probed.
-6. The run record's stats are updated live throughout, so the status panel reflects progress without needing to wait for completion.
+4. NZB probes normally sample article availability. A sampled hole, a due `deep_nzb_interval`, or a manual **Deep NZB audit** triggers an exhaustive STAT pass over distinct content articles.
+5. Confirmed missing ranges are reconstructed with PAR2 under one NZB-wide traffic budget. Healthy articles are never BODY-downloaded by the audit, and repaired ranges are stored as narrow local patches.
+6. If PAR2 cannot cover a missing range and `auto_repair` is on, Arr delete + search is used as the fallback. Connection and provider errors remain `unknown` and never trigger replacement.
+7. The entry's health and the run's PAR2 scanned/missing/repaired/failed/traffic counters are persisted live.
+
+Foreground playback and scheduled repair use the same patch store. A scheduled patch removes the first-play repair pause; a patch created mid-stream is reused by later scheduled audits. Background STAT and BODY work shares the configured `nntp_connection_percent` pool and is globally limited so active streams retain capacity.
 
 A failure to persist a single entry's health update is logged but never aborts the sweep.
 

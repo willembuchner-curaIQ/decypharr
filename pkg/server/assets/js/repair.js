@@ -58,9 +58,11 @@ class RepairManager {
         const ignore = document.getElementById('runIgnoreLastChecked');
         const autoRepair = document.getElementById('runAutoRepair');
         const verifyContent = document.getElementById('runVerifyContent');
+        const deepNZB = document.getElementById('runDeepNZB');
         if (ignore) ignore.checked = false;
         if (autoRepair) autoRepair.checked = !!this.repairConfig.auto_repair;
         if (verifyContent) verifyContent.checked = !!this.repairConfig.verify_content;
+        if (deepNZB) deepNZB.checked = false;
         const defaultProtocol = this.repairConfig.skip_nzb_repair ? 'torrent' : 'all';
         const protocol = document.querySelector(`input[name="runProtocol"][value="${defaultProtocol}"]`)
             || document.getElementById('runProtocolAll');
@@ -225,6 +227,7 @@ class RepairManager {
             const ignoreLastChecked = !!document.getElementById('runIgnoreLastChecked')?.checked;
             const autoRepair = !!document.getElementById('runAutoRepair')?.checked;
             const verifyContent = !!document.getElementById('runVerifyContent')?.checked;
+            const deepNZB = !!document.getElementById('runDeepNZB')?.checked;
             const protocol = document.querySelector('input[name="runProtocol"]:checked')?.value || 'all';
             const res = await fetch(`${this.api}/repair/run`, {
                 method: 'POST',
@@ -232,6 +235,7 @@ class RepairManager {
                 body: JSON.stringify({
                     ignore_last_checked: ignoreLastChecked,
                     auto_repair: autoRepair,
+                    deep_nzb: deepNZB,
                     // One-off runs always probe torrents via link generation;
                     // the toggle was removed in favor of this default.
                     unrestrict_link: true,
@@ -447,12 +451,19 @@ class RepairManager {
             ['repaired', 'Repaired'],
             ['cleared', 'Cleared'],
             ['repair_failed', 'Repair fail'],
+            ['par2_articles_scanned', 'PAR2 scanned'],
+            ['par2_articles_missing', 'PAR2 missing'],
+            ['par2_ranges_repaired', 'PAR2 patches'],
+            ['par2_ranges_failed', 'PAR2 failed'],
+            ['par2_download_bytes', 'PAR2 traffic'],
         ];
         container.innerHTML = '';
         for (const [k, label] of fields) {
+            if (k.startsWith('par2_') && stats[k] == null) continue;
             const el = document.createElement('div');
             el.className = 'bg-base-100 rounded p-2';
-            el.innerHTML = `<div class="text-[10px] opacity-60 uppercase">${label}</div><div class="font-mono">${stats[k] || 0}</div>`;
+            const value = k === 'par2_download_bytes' ? this.formatBytes(stats[k]) : (stats[k] ?? 0);
+            el.innerHTML = `<div class="text-[10px] opacity-60 uppercase">${label}</div><div class="font-mono">${value}</div>`;
             container.appendChild(el);
         }
     }
@@ -734,6 +745,7 @@ class RepairManager {
                 <td>${run.stats?.probed ?? 0}</td>
                 <td class="${run.stats?.broken ? 'text-error font-medium' : ''}">${run.stats?.broken ?? 0}</td>
                 <td class="${run.stats?.repaired ? 'text-success font-medium' : ''}">${run.stats?.repaired ?? 0}</td>
+                <td class="${run.stats?.par2_ranges_repaired ? 'text-success font-medium' : ''}">${run.stats?.par2_ranges_repaired ?? 0}</td>
                 <td class="${run.stats?.cleared ? 'text-warning font-medium' : ''}">${run.stats?.cleared ?? 0}</td>
                 <td>${duration}</td>
                 <td class="text-xs text-error">${run.error || ''}</td>

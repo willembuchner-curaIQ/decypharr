@@ -46,15 +46,20 @@ const (
 )
 
 type RepairRunStats struct {
-	Candidates   int `json:"candidates"`
-	SkippedFresh int `json:"skipped_fresh"`
-	Probed       int `json:"probed"`
-	Healthy      int `json:"healthy"`
-	Broken       int `json:"broken"`
-	Unknown      int `json:"unknown"`
-	Repaired     int `json:"repaired"`
-	Cleared      int `json:"cleared,omitempty"`
-	RepairFailed int `json:"repair_failed"`
+	Candidates          int   `json:"candidates"`
+	SkippedFresh        int   `json:"skipped_fresh"`
+	Probed              int   `json:"probed"`
+	Healthy             int   `json:"healthy"`
+	Broken              int   `json:"broken"`
+	Unknown             int   `json:"unknown"`
+	Repaired            int   `json:"repaired"`
+	Cleared             int   `json:"cleared,omitempty"`
+	RepairFailed        int   `json:"repair_failed"`
+	PAR2ArticlesScanned int   `json:"par2_articles_scanned,omitempty"`
+	PAR2ArticlesMissing int   `json:"par2_articles_missing,omitempty"`
+	PAR2RangesRepaired  int   `json:"par2_ranges_repaired,omitempty"`
+	PAR2RangesFailed    int   `json:"par2_ranges_failed,omitempty"`
+	PAR2DownloadBytes   int64 `json:"par2_download_bytes,omitempty"`
 }
 
 // RepairRun is the append-only history record produced by a single sweep.
@@ -230,25 +235,28 @@ type BrokenFile struct {
 // updated live during a sweep — once when probing starts, once when it
 // finishes.
 type EntryHealth struct {
-	EntryName     string          `json:"entry_name"`
-	Protocol      config.Protocol `json:"protocol,omitempty"`
-	Status        HealthStatus    `json:"status"`
-	Fingerprint   string          `json:"fingerprint,omitempty"`
-	FileCount     int             `json:"file_count"`
-	BrokenCount   int             `json:"broken_count"`
-	BrokenFiles   []BrokenFile    `json:"broken_files,omitempty"`
-	FailureReason string          `json:"failure_reason,omitempty"`
+	EntryName           string          `json:"entry_name"`
+	Protocol            config.Protocol `json:"protocol,omitempty"`
+	Status              HealthStatus    `json:"status"`
+	Fingerprint         string          `json:"fingerprint,omitempty"`
+	FileCount           int             `json:"file_count"`
+	BrokenCount         int             `json:"broken_count"`
+	BrokenFiles         []BrokenFile    `json:"broken_files,omitempty"`
+	FailureReason       string          `json:"failure_reason,omitempty"`
+	PAR2MissingArticles int             `json:"par2_missing_articles,omitempty"`
+	PAR2RepairedRanges  int             `json:"par2_repaired_ranges,omitempty"`
 
 	Dirty       bool   `json:"dirty"`
 	DirtyReason string `json:"dirty_reason,omitempty"`
 
-	LastCheckedAt  time.Time    `json:"last_checked_at"`
-	LastOKAt       time.Time    `json:"last_ok_at"`
-	LastFailedAt   time.Time    `json:"last_failed_at"`
-	LastRepairAt   time.Time    `json:"last_repair_at"`
-	NextCheckDueAt time.Time    `json:"next_check_due_at"`
-	ActiveRunID    string       `json:"active_run_id,omitempty"`
-	PreviousStatus HealthStatus `json:"previous_status,omitempty"`
+	LastCheckedAt   time.Time    `json:"last_checked_at"`
+	LastOKAt        time.Time    `json:"last_ok_at"`
+	LastFailedAt    time.Time    `json:"last_failed_at"`
+	LastRepairAt    time.Time    `json:"last_repair_at"`
+	LastPAR2AuditAt time.Time    `json:"last_par2_audit_at"`
+	NextCheckDueAt  time.Time    `json:"next_check_due_at"`
+	ActiveRunID     string       `json:"active_run_id,omitempty"`
+	PreviousStatus  HealthStatus `json:"previous_status,omitempty"`
 
 	UpdatedAt time.Time `json:"updated_at"`
 }

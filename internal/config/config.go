@@ -221,6 +221,7 @@ type RepairConfig struct {
 	NNTPConnectionPercent int          `json:"nntp_connection_percent,omitempty"`
 	Strategy              string       `json:"strategy,omitempty"`
 	RecheckInterval       string       `json:"recheck_interval,omitempty"`
+	DeepNZBInterval       string       `json:"deep_nzb_interval,omitempty"`
 	Arrs                  []string     `json:"arrs,omitempty"`
 	AutoRepair            bool         `json:"auto_repair,omitempty"`
 	SkipNZBRepair         bool         `json:"skip_nzb_repair,omitempty"`
@@ -244,7 +245,7 @@ type RepairConfig struct {
 func (r RepairConfig) IsZero() bool {
 	return !r.Enabled && r.Source == "" && r.Schedule == "" && r.Workers == 0 &&
 		r.NNTPConnectionPercent == 0 && r.Strategy == "" && r.RecheckInterval == "" && len(r.Arrs) == 0 &&
-		!r.AutoRepair && !r.SkipNZBRepair && r.StopSchedule == ""
+		!r.AutoRepair && !r.SkipNZBRepair && r.StopSchedule == "" && r.DeepNZBInterval == ""
 }
 
 type Config struct {
@@ -720,6 +721,9 @@ func (c *Config) applyRepairDefaults() {
 	}
 	if c.Repair.RecheckInterval == "" {
 		c.Repair.RecheckInterval = "168h"
+	}
+	if c.Repair.DeepNZBInterval == "" {
+		c.Repair.DeepNZBInterval = "720h"
 	}
 
 	if c.Repair.NNTPConnectionPercent == 0 {

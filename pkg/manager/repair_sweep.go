@@ -7,9 +7,11 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,10 +21,14 @@ import (
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
+	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	usenetpkg "github.com/sirrobot01/decypharr/pkg/usenet"
+	"github.com/sirrobot01/decypharr/pkg/usenet/par2"
+	"github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 )
 
 // candidate is the unit of work for a sweep. One per entry-folder.
@@ -46,6 +52,41 @@ type candidate struct {
 type healCache struct {
 	sf      singleflight.Group
 	results *xsync.Map[string, error] // infohash -> heal error (nil if healed)
+}
+
+type nzbRepairOutcome struct {
+	report  usenetpkg.NZBRepairReport
+	err     error
+	counted atomic.Bool
+}
+
+type nzbRepairCache struct {
+	sf      singleflight.Group
+	results *xsync.Map[string, *nzbRepairOutcome]
+}
+
+func newNZBRepairCache() *nzbRepairCache {
+	return &nzbRepairCache{results: xsync.NewMap[string, *nzbRepairOutcome]()}
+}
+
+func (c *nzbRepairCache) do(nzbID string, repair func() (usenetpkg.NZBRepairReport, error)) *nzbRepairOutcome {
+	if c == nil || nzbID == "" {
+		report, err := repair()
+		return &nzbRepairOutcome{report: report, err: err}
+	}
+	if result, ok := c.results.Load(nzbID); ok {
+		return result
+	}
+	value, _, _ := c.sf.Do(nzbID, func() (any, error) {
+		if result, ok := c.results.Load(nzbID); ok {
+			return result, nil
+		}
+		report, err := repair()
+		result := &nzbRepairOutcome{report: report, err: err}
+		c.results.Store(nzbID, result)
+		return result, nil
+	})
+	return value.(*nzbRepairOutcome)
 }
 
 func newHealCache() *healCache {
@@ -79,7 +120,17 @@ type fileResult struct {
 	protocol config.Protocol
 	healthy  bool
 	broken   bool
-	reason   string // populated only when broken or unknown
+	reason   string
+	par2     *nzbRepairOutcome
+}
+
+type par2ProbeStats struct {
+	articles       int
+	missing        int
+	repairedRanges int
+	failedRanges   int
+	downloadBytes  int64
+	repairedNZBs   int
 }
 
 // executeSweep is the body of a sweep: enumerate, filter due, probe, repair.
@@ -160,6 +211,9 @@ func (r *Repair) executeSweep(ctx context.Context, run *storage.RepairRun, opts 
 		Int("healthy", run.Stats.Healthy).
 		Int("repaired", run.Stats.Repaired).
 		Int("repair_failed", run.Stats.RepairFailed).
+		Int("par2_articles", run.Stats.PAR2ArticlesScanned).
+		Int("par2_missing", run.Stats.PAR2ArticlesMissing).
+		Int("par2_ranges_repaired", run.Stats.PAR2RangesRepaired).
 		Msg("Sweep: completed")
 }
 
@@ -239,6 +293,7 @@ func (r *Repair) probeAndHealCandidates(ctx context.Context, run *storage.Repair
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(max(1, r.workers()))
+	nzbRepairs := newNZBRepairCache()
 
 	for _, name := range names {
 		c := candidates[name]
@@ -250,7 +305,7 @@ func (r *Repair) probeAndHealCandidates(ctx context.Context, run *storage.Repair
 				return gctx.Err()
 			}
 
-			h := r.probeEntry(gctx, run.ID, c, heal, opts, autoRepair)
+			h, par2Stats := r.probeEntry(gctx, run.ID, c, heal, nzbRepairs, opts, autoRepair)
 			if h == nil {
 				// Entry vanished or had no files between enumeration and probe;
 				// skip without counting. Release any loaded body.
@@ -266,6 +321,12 @@ func (r *Repair) probeAndHealCandidates(ctx context.Context, run *storage.Repair
 			}
 
 			runMu.Lock()
+			run.Stats.PAR2ArticlesScanned += par2Stats.articles
+			run.Stats.PAR2ArticlesMissing += par2Stats.missing
+			run.Stats.PAR2RangesRepaired += par2Stats.repairedRanges
+			run.Stats.PAR2RangesFailed += par2Stats.failedRanges
+			run.Stats.PAR2DownloadBytes += par2Stats.downloadBytes
+			run.Stats.Repaired += par2Stats.repairedNZBs
 			run.Stats.Probed++
 			switch h.Status {
 			case storage.HealthHealthy:
@@ -291,7 +352,7 @@ func (r *Repair) probeAndHealCandidates(ctx context.Context, run *storage.Repair
 // probeEntry probes one entry: marks it repairing, probes its files (≤2 in
 // parallel), runs auto-heal on broken torrents (only when autoRepair is set),
 // then persists final health.
-func (r *Repair) probeEntry(ctx context.Context, runID string, c *candidate, heal *healCache, opts RepairRunOptions, autoRepair bool) *storage.EntryHealth {
+func (r *Repair) probeEntry(ctx context.Context, runID string, c *candidate, heal *healCache, nzbRepairs *nzbRepairCache, opts RepairRunOptions, autoRepair bool) (*storage.EntryHealth, par2ProbeStats) {
 	s := r.manager.storage
 	// Lazily load the entry body. Enumeration only recorded the name, so the
 	// store isn't fully decoded up front. A vanished or empty entry is a skip
@@ -299,7 +360,7 @@ func (r *Repair) probeEntry(ctx context.Context, runID string, c *candidate, hea
 	if c.item == nil {
 		item, err := s.GetEntryItem(c.name)
 		if err != nil || item == nil || len(item.Files) == 0 {
-			return nil
+			return nil, par2ProbeStats{}
 		}
 		c.item = item
 	}
@@ -317,10 +378,43 @@ func (r *Repair) probeEntry(ctx context.Context, runID string, c *candidate, hea
 	h.Protocol = ""
 	r.saveHealth(h)
 
+	deepNZB := r.shouldDeepNZB(h.LastPAR2AuditAt, opts.DeepNZB, autoRepair, time.Now())
+
 	names := orderedFilenames(c.item)
-	results := r.probeFiles(ctx, c.item, names, opts)
+	results := r.probeFiles(ctx, c.item, names, nzbRepairs, opts, autoRepair, deepNZB)
 	if autoRepair {
 		r.autoHealResults(ctx, results, heal)
+	}
+
+	var par2Stats par2ProbeStats
+	var healthMissing, healthRepaired int
+	completedAudit := false
+	seenOutcomes := make(map[*nzbRepairOutcome]struct{})
+	for i := range results {
+		outcome := results[i].par2
+		if outcome == nil {
+			continue
+		}
+		if _, ok := seenOutcomes[outcome]; ok {
+			continue
+		}
+		seenOutcomes[outcome] = struct{}{}
+		report := outcome.report
+		healthMissing += report.MissingArticles
+		healthRepaired += report.RepairedRanges
+		completedAudit = completedAudit || report.Articles > 0 && report.UnknownArticles == 0 &&
+			!errors.Is(outcome.err, context.Canceled) && !errors.Is(outcome.err, context.DeadlineExceeded)
+		if !outcome.counted.CompareAndSwap(false, true) {
+			continue
+		}
+		par2Stats.articles += report.Articles
+		par2Stats.missing += report.MissingArticles
+		par2Stats.repairedRanges += report.RepairedRanges
+		par2Stats.failedRanges += report.FailedRanges
+		par2Stats.downloadBytes += report.ModeledDownloadBytes
+		if report.MissingArticles > 0 && report.FailedRanges == 0 && report.RepairedRanges == report.RepairRanges {
+			par2Stats.repairedNZBs++
+		}
 	}
 
 	broken := r.brokenFiles(c, results)
@@ -333,6 +427,8 @@ func (r *Repair) probeEntry(ctx context.Context, runID string, c *candidate, hea
 	h.Fingerprint = storage.EntryItemRepairFingerprint(c.item)
 	h.LastCheckedAt = time.Now()
 	h.NextCheckDueAt = h.LastCheckedAt.Add(r.recheckInterval())
+	h.PAR2MissingArticles = healthMissing
+	h.PAR2RepairedRanges = healthRepaired
 	h.Dirty = false
 	h.DirtyReason = ""
 	h.ActiveRunID = ""
@@ -348,14 +444,20 @@ func (r *Repair) probeEntry(ctx context.Context, runID string, c *candidate, hea
 		h.LastFailedAt = h.LastCheckedAt
 		h.FailureReason = topReason(broken)
 	}
+	if healthRepaired > 0 {
+		h.LastRepairAt = h.LastCheckedAt
+	}
+	if completedAudit {
+		h.LastPAR2AuditAt = h.LastCheckedAt
+	}
 
 	r.saveHealth(h)
-	return h
+	return h, par2Stats
 }
 
 // probeFiles fans per-file probes inside a single entry, capped at
 // repairFilesPerEntry concurrent workers.
-func (r *Repair) probeFiles(ctx context.Context, item *storage.EntryItem, names []string, opts RepairRunOptions) []fileResult {
+func (r *Repair) probeFiles(ctx context.Context, item *storage.EntryItem, names []string, nzbRepairs *nzbRepairCache, opts RepairRunOptions, autoRepair, deepNZB bool) []fileResult {
 	results := make([]fileResult, len(names))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(repairFilesPerEntry)
@@ -365,7 +467,7 @@ func (r *Repair) probeFiles(ctx context.Context, item *storage.EntryItem, names 
 				results[i] = fileResult{name: name, reason: "context_cancelled"}
 				return nil
 			}
-			results[i] = r.probeFile(gctx, item, name, opts)
+			results[i] = r.probeFile(gctx, item, name, nzbRepairs, opts, autoRepair, deepNZB)
 			return nil
 		})
 	}
@@ -376,7 +478,7 @@ func (r *Repair) probeFiles(ctx context.Context, item *storage.EntryItem, names 
 // probeFile checks one file. NZB probes use usenet.CheckFile. Torrent probes
 // use the provider CheckFile endpoint unless this run requests unrestrict-link
 // probing.
-func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name string, opts RepairRunOptions) fileResult {
+func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name string, nzbRepairs *nzbRepairCache, opts RepairRunOptions, autoRepair, deepNZB bool) fileResult {
 	file := item.Files[name]
 	res := fileResult{name: name}
 
@@ -398,17 +500,51 @@ func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name st
 	}
 
 	if entry.IsNZB() {
-		return r.probeNZBFile(ctx, entry, name, res, opts)
+		return r.probeNZBFile(ctx, entry, name, res, nzbRepairs, opts, autoRepair, deepNZB)
 	}
 	return r.probeTorrentFile(ctx, entry, file, name, res, opts)
 }
 
-func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name string, res fileResult, opts RepairRunOptions) fileResult {
+func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name string, res fileResult, repairs *nzbRepairCache, opts RepairRunOptions, autoRepair, deepNZB bool) fileResult {
 	if r.manager.usenet == nil {
 		res.reason = "usenet_client_not_configured"
 		return res
 	}
 	err := r.manager.usenet.CheckFile(ctx, entry.InfoHash, name)
+	sampledMissing := errors.Is(err, customerror.UsenetSegmentMissingError)
+	shouldRepair := autoRepair && r.manager.usenet.CanRecoverWithPAR2(entry.InfoHash) && (sampledMissing || deepNZB && err == nil)
+	if shouldRepair {
+		outcome := repairs.do(entry.InfoHash, func() (usenetpkg.NZBRepairReport, error) {
+			return r.manager.usenet.RepairNZB(ctx, entry.InfoHash)
+		})
+		report, repairErr := outcome.report, outcome.err
+		res.par2 = outcome
+		fileUnknown := slices.Contains(report.UnknownFiles, name)
+		fileFailed := slices.Contains(report.FailedFiles, name)
+		unattributed := len(report.AffectedFiles) == 0 && len(report.UnknownFiles) == 0 &&
+			len(report.RepairedFiles) == 0 && len(report.FailedFiles) == 0
+		switch {
+		case repairErr == nil:
+			err = nil
+		case errors.Is(repairErr, context.Canceled), errors.Is(repairErr, context.DeadlineExceeded), fileUnknown, unattributed:
+			res.reason = "usenet_par2_probe_error"
+			return res
+		case fileFailed || sampledMissing:
+			fileErr := report.FileError(name)
+			if fileErr == nil {
+				fileErr = repairErr
+			}
+			if reason, definitive := par2RepairFailureReason(fileErr); definitive {
+				res.broken = true
+				res.reason = reason
+				return res
+			}
+			res.reason = "usenet_par2_repair_error"
+			return res
+		default:
+			err = nil
+		}
+	}
 	if err == nil && opts.VerifyContent != nil && *opts.VerifyContent {
 		// Deep probe: the STAT check passes NZBs whose articles all exist but
 		// were assembled wrong (e.g. RAR volumes out of order). Reading the
@@ -430,6 +566,37 @@ func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name st
 		res.reason = "usenet_probe_error"
 	}
 	return res
+}
+
+func par2RepairFailureReason(err error) (string, bool) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "", false
+	}
+	var nntpErr *nntp.Error
+	if errors.As(err, &nntpErr) {
+		switch nntpErr.Type {
+		case nntp.ErrorTypeArticleNotFound:
+			return "usenet_par2_insufficient", true
+		case nntp.ErrorTypeYencDecode:
+			return "usenet_par2_corrupt", true
+		default:
+			return "", false
+		}
+	}
+	switch {
+	case errors.Is(err, recovery.ErrBudgetExceeded), errors.Is(err, recovery.ErrUnboundedTraffic):
+		return "usenet_par2_budget_exceeded", true
+	case errors.Is(err, recovery.ErrStorageBudget):
+		return "usenet_par2_storage_exceeded", true
+	case errors.Is(err, recovery.ErrNoRecoverySet), errors.Is(err, par2.ErrNotEnoughRecovery), errors.Is(err, par2.ErrSingularSelection):
+		return "usenet_par2_insufficient", true
+	case errors.Is(err, recovery.ErrLayoutUnavailable), errors.Is(err, recovery.ErrAmbiguousMapping), errors.Is(err, recovery.ErrLegacyManifestUnsupported), errors.Is(err, recovery.ErrUnsupported), errors.Is(err, recovery.ErrInvalid):
+		return "usenet_par2_unsupported", true
+	case errors.Is(err, recovery.ErrCorrupt), errors.Is(err, recovery.ErrChecksumMismatch), errors.Is(err, par2.ErrInvalidMagic), errors.Is(err, par2.ErrInvalidLength), errors.Is(err, par2.ErrPacketTooLarge), errors.Is(err, par2.ErrPacketHash), errors.Is(err, par2.ErrTruncated), errors.Is(err, par2.ErrInvalidPacket):
+		return "usenet_par2_corrupt", true
+	default:
+		return "", false
+	}
 }
 
 func (r *Repair) probeTorrentFile(ctx context.Context, entry *storage.Entry, file *storage.File, name string, res fileResult, opts RepairRunOptions) fileResult {
@@ -1357,7 +1524,10 @@ func (r *Repair) RecheckEntry(ctx context.Context, entryName string, fix bool) (
 			r.attachArrContext(ctx, c)
 		}
 		heal := newHealCache()
-		final := r.probeEntry(ctx, runID, c, heal, RepairRunOptions{}, fix)
+		final, _ := r.probeEntry(ctx, runID, c, heal, newNZBRepairCache(), RepairRunOptions{}, fix)
+		if final == nil {
+			return
+		}
 		if !fix || final.Status != storage.HealthBroken {
 			return
 		}

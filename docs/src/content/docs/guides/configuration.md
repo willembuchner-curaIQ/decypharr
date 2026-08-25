@@ -384,6 +384,7 @@ move the cache to another filesystem.
     "workers": 5,
     "strategy": "per_entry",
     "recheck_interval": "168h",
+    "deep_nzb_interval": "720h",
     "auto_repair": true,
     "skip_nzb_repair": false,
     "nntp_connection_percent": 20
@@ -399,8 +400,9 @@ move the cache to another filesystem.
 | `workers`                 | Concurrent probe workers                                                   | `5`         |
 | `strategy`                | `per_entry` (stop at first broken file) or `per_file` (probe every file)   | `per_entry` |
 | `recheck_interval`        | How long a healthy entry stays fresh before becoming a candidate again     | `168h`      |
+| `deep_nzb_interval`       | Full NZB STAT audit cadence with auto-repair; `0` disables periodic deep audits | `720h` |
 | `arrs`                    | Optional Arr filter when `source=arr`. Empty = all eligible                | `[]`        |
-| `auto_repair`             | When `true`, brokens are repaired in-sweep. When `false`, detect-only      | `false`     |
+| `auto_repair`             | When `true`, missing NZB ranges use PAR2 first; remaining brokens fall back to Arr replacement | `false` |
 | `skip_nzb_repair`         | Skip NZB / Usenet entries during scheduled repair sweeps                   | `false`     |
 | `nntp_connection_percent` | Share of NNTP connections probes may use, to avoid starving downloads      | `20`        |
 

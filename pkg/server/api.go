@@ -695,6 +695,7 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 		IgnoreLastChecked bool   `json:"ignore_last_checked,omitempty"`
 		Force             bool   `json:"force,omitempty"`
 		AutoRepair        *bool  `json:"auto_repair,omitempty"`
+		DeepNZB           bool   `json:"deep_nzb,omitempty"`
 		UnrestrictLink    bool   `json:"unrestrict_link,omitempty"`
 		VerifyContent     *bool  `json:"verify_content,omitempty"`
 		Protocol          string `json:"protocol,omitempty"`
@@ -722,6 +723,13 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	case "0", "false", "no", "off":
 		v := false
 		autoRepair = &v
+	}
+	deepNZB := req.DeepNZB
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("deep_nzb"))) {
+	case "1", "true", "yes", "on":
+		deepNZB = true
+	case "0", "false", "no", "off":
+		deepNZB = false
 	}
 	unrestrictLink := req.UnrestrictLink
 	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("unrestrict_link"))) {
@@ -761,6 +769,7 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	id, err := svc.RunNow(manager.RepairRunOptions{
 		IgnoreLastChecked: ignoreLastChecked,
 		AutoRepair:        autoRepair,
+		DeepNZB:           deepNZB,
 		UnrestrictLink:    unrestrictLink,
 		VerifyContent:     verifyContent,
 		ProtocolScope:     protocolScope,

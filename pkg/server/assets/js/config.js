@@ -200,6 +200,7 @@ class ConfigManager {
         if ($('repair.source')) $('repair.source').value = repair.source || 'arr';
         if ($('repair.schedule')) $('repair.schedule').value = repair.schedule || '';
         if ($('repair.recheck_interval')) $('repair.recheck_interval').value = repair.recheck_interval || '';
+        if ($('repair.deep_nzb_interval')) $('repair.deep_nzb_interval').value = repair.deep_nzb_interval || '';
         if ($('repair.workers')) $('repair.workers').value = repair.workers || 5;
         if ($('repair.nntp_connection_percent')) $('repair.nntp_connection_percent').value = repair.nntp_connection_percent || 20;
         if ($('repair.strategy')) $('repair.strategy').value = repair.strategy || 'per_entry';
@@ -220,6 +221,7 @@ class ConfigManager {
             source: $('repair.source')?.value || 'arr',
             schedule: $('repair.schedule')?.value.trim() || '',
             recheck_interval: $('repair.recheck_interval')?.value.trim() || '',
+            deep_nzb_interval: $('repair.deep_nzb_interval')?.value.trim() || '',
             workers: parseInt($('repair.workers')?.value, 10) || 0,
             nntp_connection_percent: parseInt($('repair.nntp_connection_percent')?.value, 10) || 0,
             strategy: $('repair.strategy')?.value || 'per_entry',

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"runtime"
+	"slices"
 	"sort"
 
 	"github.com/sirrobot01/decypharr/internal/nntp"
@@ -15,19 +17,28 @@ import (
 
 // NZBRepairReport summarizes one exhaustive availability and PAR2 repair pass.
 type NZBRepairReport struct {
-	Articles             int   `json:"articles"`
-	AvailableArticles    int   `json:"available_articles"`
-	MissingArticles      int   `json:"missing_articles"`
-	UnknownArticles      int   `json:"unknown_articles"`
-	RepairRanges         int   `json:"repair_ranges"`
-	RepairedRanges       int   `json:"repaired_ranges"`
-	FailedRanges         int   `json:"failed_ranges"`
-	ModeledDownloadBytes int64 `json:"modeled_download_bytes"`
+	Articles             int      `json:"articles"`
+	AvailableArticles    int      `json:"available_articles"`
+	MissingArticles      int      `json:"missing_articles"`
+	UnknownArticles      int      `json:"unknown_articles"`
+	RepairRanges         int      `json:"repair_ranges"`
+	RepairedRanges       int      `json:"repaired_ranges"`
+	FailedRanges         int      `json:"failed_ranges"`
+	ModeledDownloadBytes int64    `json:"modeled_download_bytes"`
+	AffectedFiles        []string `json:"affected_files,omitempty"`
+	UnknownFiles         []string `json:"unknown_files,omitempty"`
+	RepairedFiles        []string `json:"repaired_files,omitempty"`
+	FailedFiles          []string `json:"failed_files,omitempty"`
+	fileErrors           map[string]error
+}
+
+func (r NZBRepairReport) FileError(name string) error {
+	return r.fileErrors[name]
 }
 
 type articleRepairTarget struct {
-	fileName string
-	segment  storage.NZBSegment
+	fileNames []string
+	segment   storage.NZBSegment
 }
 
 type articleRepairGroup struct {
@@ -47,9 +58,13 @@ func collectArticleRepairGroups(nzb *storage.NZB) []articleRepairGroup {
 		rawLength        int64
 		segmentDataStart int64
 	}
+	type targetLocation struct {
+		messageID string
+		index     int
+	}
 
 	targets := make(map[string][]articleRepairTarget)
-	seen := make(map[rangeKey]struct{})
+	seen := make(map[rangeKey]targetLocation)
 	for i := range nzb.Files {
 		file := &nzb.Files[i]
 		if file.IsDeleted || file.FileType == storage.NZBFileTypePar2 || file.FileType == storage.NZBFileTypeIgnore {
@@ -66,13 +81,17 @@ func collectArticleRepairGroups(nzb *storage.NZB) []articleRepairGroup {
 				rawLength:        segment.RawLength,
 				segmentDataStart: segment.SegmentDataStart,
 			}
-			if _, ok := seen[key]; ok {
+			if location, ok := seen[key]; ok {
+				target := &targets[location.messageID][location.index]
+				if !slices.Contains(target.fileNames, file.Name) {
+					target.fileNames = append(target.fileNames, file.Name)
+				}
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[key] = targetLocation{messageID: segment.MessageID, index: len(targets[segment.MessageID])}
 			targets[segment.MessageID] = append(targets[segment.MessageID], articleRepairTarget{
-				fileName: file.Name,
-				segment:  segment,
+				fileNames: []string{file.Name},
+				segment:   segment,
 			})
 		}
 	}
@@ -111,8 +130,18 @@ func (u *Usenet) RepairNZB(ctx context.Context, nzoID string) (NZBRepairReport, 
 	return value.(NZBRepairReport), err
 }
 
-func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (NZBRepairReport, error) {
-	var report NZBRepairReport
+func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (report NZBRepairReport, resultErr error) {
+	affectedFiles := make(map[string]struct{})
+	unknownFiles := make(map[string]struct{})
+	repairedFiles := make(map[string]struct{})
+	failedFiles := make(map[string]struct{})
+	report.fileErrors = make(map[string]error)
+	defer func() {
+		report.AffectedFiles = slices.Sorted(maps.Keys(affectedFiles))
+		report.UnknownFiles = slices.Sorted(maps.Keys(unknownFiles))
+		report.RepairedFiles = slices.Sorted(maps.Keys(repairedFiles))
+		report.FailedFiles = slices.Sorted(maps.Keys(failedFiles))
+	}()
 	if u.backgroundRepairSlots != nil {
 		select {
 		case u.backgroundRepairSlots <- struct{}{}:
@@ -140,6 +169,15 @@ func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (NZBRepairReport, 
 	}
 	stat, err := u.nntp.BatchStatAll(ctx, messageIDs)
 	if err != nil {
+		report.UnknownArticles = len(groups)
+		for i := range groups {
+			for _, target := range groups[i].targets {
+				for _, fileName := range target.fileNames {
+					unknownFiles[fileName] = struct{}{}
+					report.fileErrors[fileName] = errors.Join(report.fileErrors[fileName], err)
+				}
+			}
+		}
 		return report, fmt.Errorf("audit NZB articles: %w", err)
 	}
 
@@ -148,7 +186,14 @@ func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (NZBRepairReport, 
 	for i := range groups {
 		if i >= len(stat.Results) {
 			report.UnknownArticles++
-			failures = append(failures, fmt.Errorf("STAT %s returned no result", groups[i].messageID))
+			failure := fmt.Errorf("STAT %s returned no result", groups[i].messageID)
+			failures = append(failures, failure)
+			for _, target := range groups[i].targets {
+				for _, fileName := range target.fileNames {
+					unknownFiles[fileName] = struct{}{}
+					report.fileErrors[fileName] = errors.Join(report.fileErrors[fileName], failure)
+				}
+			}
 			continue
 		}
 		result := stat.Results[i]
@@ -158,12 +203,25 @@ func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (NZBRepairReport, 
 		case nntp.IsArticleNotFoundError(result.Error):
 			report.MissingArticles++
 			targets = append(targets, groups[i].targets...)
+			for _, target := range groups[i].targets {
+				for _, fileName := range target.fileNames {
+					affectedFiles[fileName] = struct{}{}
+				}
+			}
 		default:
 			report.UnknownArticles++
+			failure := result.Error
 			if result.Error == nil {
-				failures = append(failures, fmt.Errorf("STAT %s had no terminal result", groups[i].messageID))
+				failure = fmt.Errorf("STAT %s had no terminal result", groups[i].messageID)
 			} else {
-				failures = append(failures, fmt.Errorf("STAT %s: %w", groups[i].messageID, result.Error))
+				failure = fmt.Errorf("STAT %s: %w", groups[i].messageID, result.Error)
+			}
+			failures = append(failures, failure)
+			for _, target := range groups[i].targets {
+				for _, fileName := range target.fileNames {
+					unknownFiles[fileName] = struct{}{}
+					report.fileErrors[fileName] = errors.Join(report.fileErrors[fileName], failure)
+				}
 			}
 		}
 	}
@@ -180,18 +238,44 @@ func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (NZBRepairReport, 
 		NumGoroutines: max(1, runtime.GOMAXPROCS(0)/2),
 	})
 	report.ModeledDownloadBytes = batch.ModeledDownloadBytes
-	for i, result := range batch.Articles {
-		if result.Err != nil {
-			report.FailedRanges++
-			failures = append(failures, fmt.Errorf("repair %q article %s: %w", targets[i].fileName, targets[i].segment.MessageID, result.Err))
+	for i, target := range targets {
+		if i >= len(batch.Articles) {
+			failure := batchErr
+			if failure == nil {
+				failure = fmt.Errorf("repair files %q article %s returned no result", target.fileNames, target.segment.MessageID)
+				failures = append(failures, failure)
+			}
+			for _, fileName := range target.fileNames {
+				unknownFiles[fileName] = struct{}{}
+				report.fileErrors[fileName] = errors.Join(report.fileErrors[fileName], failure)
+			}
 			continue
 		}
-		if result.Bytes != int(targets[i].segment.SegmentDataStart+targets[i].segment.RawLength) {
+		result := batch.Articles[i]
+		if result.Err != nil {
 			report.FailedRanges++
-			failures = append(failures, fmt.Errorf("repair %q article %s returned %d bytes", targets[i].fileName, targets[i].segment.MessageID, result.Bytes))
+			failure := fmt.Errorf("repair files %q article %s: %w", target.fileNames, target.segment.MessageID, result.Err)
+			failures = append(failures, failure)
+			for _, fileName := range target.fileNames {
+				failedFiles[fileName] = struct{}{}
+				report.fileErrors[fileName] = errors.Join(report.fileErrors[fileName], result.Err)
+			}
+			continue
+		}
+		if result.Bytes != int(target.segment.SegmentDataStart+target.segment.RawLength) {
+			report.FailedRanges++
+			failure := fmt.Errorf("repair files %q article %s returned %d bytes", target.fileNames, target.segment.MessageID, result.Bytes)
+			failures = append(failures, failure)
+			for _, fileName := range target.fileNames {
+				failedFiles[fileName] = struct{}{}
+				report.fileErrors[fileName] = errors.Join(report.fileErrors[fileName], failure)
+			}
 			continue
 		}
 		report.RepairedRanges++
+		for _, fileName := range target.fileNames {
+			repairedFiles[fileName] = struct{}{}
+		}
 	}
 	if batchErr != nil {
 		failures = append(failures, batchErr)
