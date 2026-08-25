@@ -15,6 +15,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 	"github.com/sourcegraph/conc/iter"
 )
@@ -113,6 +114,8 @@ type RARParser struct {
 	manager       *nntp.Client
 	maxConcurrent int
 	logger        zerolog.Logger
+	recovery      reader.ArticleRecovery
+	recoveryNZBID string
 }
 
 // NewRARParser creates a new RAR parser
@@ -122,6 +125,11 @@ func NewRARParser(manager *nntp.Client, maxConcurrent int, logger zerolog.Logger
 		maxConcurrent: maxConcurrent,
 		logger:        logger.With().Str("component", "rar_parser").Logger(),
 	}
+}
+
+func (p *RARParser) setArticleRecovery(nzbID string, recovery reader.ArticleRecovery) {
+	p.recoveryNZBID = nzbID
+	p.recovery = recovery
 }
 
 func (p *RARParser) Process(ctx context.Context, group *FileGroup, password string) ([]*storage.NZBFile, error) {
@@ -146,7 +154,10 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 		return group.Files[i].Number < group.Files[j].Number
 	})
 
-	volumes := buildArchiveVolumeDescriptors(group)
+	volumes, err := buildArchiveVolumeDescriptors(group)
+	if err != nil {
+		return nil, err
+	}
 	if len(volumes) == 0 {
 		return nil, fmt.Errorf("no RAR volumes found")
 	}
@@ -155,7 +166,10 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	filename = utils.RemoveInvalidChars(path.Base(filename))
 
 	// Build base segments and volume info
-	baseSegments, volumeInfos, _ := buildBaseSegments(group)
+	baseSegments, volumeInfos, _, err := buildBaseSegments(group)
+	if err != nil {
+		return nil, err
+	}
 	if len(baseSegments) == 0 {
 		return nil, fmt.Errorf("no base segments found for RAR volumes")
 	}
@@ -196,11 +210,11 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 		// Build segments for this file across all its volume parts
 		fileSegments, err := p.buildSegmentsForFile(rarFile, baseSegments, volumeOffsetMap)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("map stored RAR file %q: %w", rarFile.Name, err)
 		}
 
 		if len(fileSegments) == 0 {
-			continue
+			return nil, fmt.Errorf("stored RAR file %q has no source segments", rarFile.Name)
 		}
 
 		streamSize := int64(0)
@@ -252,7 +266,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	}
 
 	// Detect RAR version from first volume
-	firstStream := newRarReader(ctx, p.manager, []*types.Volume{volumes[0]})
+	firstStream := newRarReader(ctx, p.manager, []*types.Volume{volumes[0]}, withRARArticleRecovery(p.recoveryNZBID, p.recovery))
 	sig := make([]byte, 8)
 	if _, err := io.ReadFull(firstStream, sig); err != nil {
 		return nil, fmt.Errorf("failed to read RAR signature: %w", err)
@@ -297,7 +311,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		vol := input.vol
 
 		// Create stream reader for this specific volume
-		stream := newRarReader(ctx, p.manager, []*types.Volume{vol})
+		stream := newRarReader(ctx, p.manager, []*types.Volume{vol}, withRARArticleRecovery(p.recoveryNZBID, p.recovery))
 
 		// Skip signature (7 or 8 bytes depending on version)
 		sigSize := 8
@@ -349,7 +363,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	isHeaderEncrypted := false
 	for _, result := range results {
 		if result.err != nil {
-			continue
+			return nil, fmt.Errorf("parse RAR volume %d (%s): %w", result.index, volumes[result.index].Name, result.err)
 		}
 		if result.isHeaderEncrypted {
 			isHeaderEncrypted = true
@@ -1085,11 +1099,11 @@ func (p *RARParser) buildSegmentsForFile(
 		// part.UnpackedSize = how many bytes of the file are in this part (this is what we stream!)
 		partSegments, err := p.buildSegmentsForVolumePart(part, baseSegments, volumeOffsetMap)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("map volume part %d of %s: %w", part.PartNumber, rarFile.Name, err)
 		}
 
 		if len(partSegments) == 0 {
-			continue
+			return nil, fmt.Errorf("volume part %d of %s has no source segments", part.PartNumber, rarFile.Name)
 		}
 
 		// Ensure part segments are ordered by their segment number.
@@ -1148,6 +1162,9 @@ func (p *RARParser) buildSegmentsForVolumePart(
 	// part.DataOffset = offset within THIS volume where the file data starts
 	absoluteStartOffset := volumeStartOffset + part.DataOffset
 	absoluteEndOffset := absoluteStartOffset + part.UnpackedSize - 1
+	if absoluteStartOffset < 0 || absoluteEndOffset < absoluteStartOffset {
+		return nil, fmt.Errorf("invalid or overflowing volume range [%d, %d]", absoluteStartOffset, absoluteEndOffset)
+	}
 
 	// Find all segments that overlap with [absoluteStartOffset, absoluteEndOffset]
 	var result []storage.NZBSegment
@@ -1185,8 +1202,11 @@ func (p *RARParser) buildSegmentsForVolumePart(
 			Number:           seg.Number,
 			MessageID:        seg.MessageID,
 			Bytes:            bytesToRead,
-			SegmentDataStart: segmentDataStart, // Where to start reading within this NNTP segment
+			SegmentDataStart: seg.SegmentDataStart + segmentDataStart, // Where to start reading within this NNTP segment
 			Group:            seg.Group,
+			RawFileKey:       seg.RawFileKey,
+			RawOffset:        seg.RawOffset + segmentDataStart,
+			RawLength:        bytesToRead,
 			// StartOffset/EndOffset left as 0 - will be set by caller
 		}
 
@@ -1202,6 +1222,13 @@ func (p *RARParser) buildSegmentsForVolumePart(
 
 	if len(result) == 0 {
 		return nil, fmt.Errorf("no segments found for range [%d, %d]", absoluteStartOffset, absoluteEndOffset)
+	}
+	var covered int64
+	for _, segment := range result {
+		covered += segment.Bytes
+	}
+	if covered != part.UnpackedSize {
+		return nil, fmt.Errorf("range [%d, %d] is only partially covered (%d of %d bytes)", absoluteStartOffset, absoluteEndOffset, covered, part.UnpackedSize)
 	}
 
 	return result, nil
@@ -1223,6 +1250,9 @@ func sliceSegmentsForRangeSimple(
 
 	targetStart := offset
 	targetEnd := offset + length - 1
+	if targetEnd < targetStart {
+		return nil, fmt.Errorf("range overflows int64: offset=%d length=%d", offset, length)
+	}
 
 	var result []storage.NZBSegment
 	var currentPos int64
@@ -1265,7 +1295,10 @@ func sliceSegmentsForRangeSimple(
 			StartOffset:      outputPos,                   // Position in the OUTPUT file
 			EndOffset:        outputPos + bytesToRead - 1, // End position in OUTPUT file
 			Group:            seg.Group,
-			SegmentDataStart: relStart, // Where to start reading within this NNTP segment
+			SegmentDataStart: seg.SegmentDataStart + relStart, // Where to start reading within this NNTP segment
+			RawFileKey:       seg.RawFileKey,
+			RawOffset:        seg.RawOffset + relStart,
+			RawLength:        bytesToRead,
 		}
 
 		result = append(result, slicedSeg)
@@ -1279,7 +1312,7 @@ func sliceSegmentsForRangeSimple(
 		currentPos += seg.Bytes
 	}
 
-	return result, nil
+	return nil, fmt.Errorf("range [%d, %d] is only partially covered (%d of %d bytes)", targetStart, targetEnd, outputPos, length)
 }
 
 // aggregateFileParts combines file parts across volumes for multi-volume RAR archives

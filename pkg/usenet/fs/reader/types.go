@@ -6,8 +6,35 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
+
+// ArticleRecovery is the narrow boundary between the streaming cache and a
+// recovery engine. RecoverArticle returns one decoded article-shaped buffer;
+// callers still apply SegmentDataStart and Bytes exactly as they do for a
+// normal yEnc response. ObserveArticle must not retain or mutate body.
+type ArticleRecovery interface {
+	ObserveArticle(ctx context.Context, nzbID string, segment SegmentMeta, body []byte, metadata *nntp.YencMetadata)
+	RecoverArticle(ctx context.Context, nzbID string, segment SegmentMeta) ([]byte, error)
+}
+
+// ArticleRangeSource exposes verified decoded ranges already held by a
+// streaming cache. It never triggers a download. HasArticleRange is a
+// planning snapshot; ReadArticleRange may still report false if eviction wins
+// the race, in which case recovery stops rather than bypassing its preflight.
+type ArticleRangeSource interface {
+	HasArticleRange(rawFileKey uint32, messageID string, rawOffset, length int64) bool
+	ReadArticleRange(rawFileKey uint32, messageID string, rawOffset int64, dst []byte) (bool, error)
+}
+
+// SourceAwareArticleRecovery is an optional extension used when the caller
+// has locally cached source ranges. Implementations must remain correct when
+// source is nil or a range disappears after HasArticleRange.
+type SourceAwareArticleRecovery interface {
+	ArticleRecovery
+	RecoverArticleWithSource(ctx context.Context, nzbID string, segment SegmentMeta, source ArticleRangeSource) ([]byte, error)
+}
 
 // SegmentMeta holds metadata for a single Usenet segment.
 // This is a simplified view of the segment data needed for downloading and caching.
@@ -22,6 +49,13 @@ type SegmentMeta struct {
 
 	// yEnc decoding hints
 	SegmentDataStart int64 // Offset within decoded data where actual file data begins
+
+	// Raw origin within the PAR2-protected posted file. Zero RawFileKey means
+	// this is legacy metadata and cannot be repaired without re-importing the
+	// original NZB.
+	RawFileKey uint32
+	RawOffset  int64
+	RawLength  int64
 }
 
 // NewSegmentMeta creates a SegmentMeta from a storage.NZBSegment.
@@ -33,6 +67,9 @@ func NewSegmentMeta(seg storage.NZBSegment) SegmentMeta {
 		StartOffset:      seg.StartOffset,
 		EndOffset:        seg.EndOffset,
 		SegmentDataStart: seg.SegmentDataStart,
+		RawFileKey:       seg.RawFileKey,
+		RawOffset:        seg.RawOffset,
+		RawLength:        seg.RawLength,
 	}
 }
 
@@ -120,6 +157,12 @@ type Config struct {
 
 	// RetryDelay is the delay between retry attempts (default: 1s).
 	RetryDelay time.Duration
+
+	// Recovery is consulted only after ordinary provider/backbone failover.
+	// RecoveryNZBID scopes all durable state without duplicating the ID on
+	// every segment in the compact NZB metadata codec.
+	Recovery      ArticleRecovery
+	RecoveryNZBID string
 }
 
 // DefaultConfig returns a ReaderConfig with sensible defaults.
@@ -216,6 +259,14 @@ func WithDownloadTimeout(d time.Duration) Option {
 	}
 }
 
+// WithArticleRecovery enables on-demand recovery for this reader.
+func WithArticleRecovery(nzbID string, recovery ArticleRecovery) Option {
+	return func(c *Config) {
+		c.RecoveryNZBID = nzbID
+		c.Recovery = recovery
+	}
+}
+
 // EncryptionConfig holds encryption parameters for decrypting segment data.
 type EncryptionConfig struct {
 	// Enabled indicates whether encryption is active.
@@ -245,6 +296,9 @@ type ReaderStats struct {
 	DownloadBytes   atomic.Int64
 	DownloadRetries atomic.Int64
 	DownloadErrors  atomic.Int64
+	Repairs         atomic.Int64
+	RepairBytes     atomic.Int64
+	RepairErrors    atomic.Int64
 
 	// Prefetch
 	PrefetchHits      atomic.Int64
@@ -265,6 +319,9 @@ func (s *ReaderStats) Snapshot() map[string]int64 {
 		"download_bytes":     s.DownloadBytes.Load(),
 		"download_retries":   s.DownloadRetries.Load(),
 		"download_errors":    s.DownloadErrors.Load(),
+		"repairs":            s.Repairs.Load(),
+		"repair_bytes":       s.RepairBytes.Load(),
+		"repair_errors":      s.RepairErrors.Load(),
 		"prefetch_hits":      s.PrefetchHits.Load(),
 		"prefetch_misses":    s.PrefetchMisses.Load(),
 		"prefetch_cancelled": s.PrefetchCancelled.Load(),

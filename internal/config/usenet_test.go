@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
+
+func boolPointer(v bool) *bool { return &v }
 
 func TestUsenetProviderID(t *testing.T) {
 	a := UsenetProvider{Host: "news.example.com", Port: 563, Username: "alice"}
@@ -29,5 +34,58 @@ func TestValidateUsenetRejectsDuplicateProvider(t *testing.T) {
 	second.Username = "bob"
 	if err := validateUsenet([]UsenetProvider{dup, second}); err != nil {
 		t.Fatalf("dual-account setup rejected: %v", err)
+	}
+}
+
+func TestPAR2RepairDefaultsAreEnabledAndBounded(t *testing.T) {
+	p := PAR2Repair{}
+	if !p.IsEnabled() {
+		t.Fatal("omitted PAR2 config should enable bounded on-demand repair")
+	}
+	if got, want := p.ExtraDownloadBudget(20<<30), int64(512<<20); got != want {
+		t.Fatalf("absolute budget = %d, want %d", got, want)
+	}
+	if got, want := p.ExtraDownloadBudget(1<<30), int64((1<<30)/10); got != want {
+		t.Fatalf("percentage budget = %d, want %d", got, want)
+	}
+	if got, want := p.StorageBytes(), int64(8<<30); got != want {
+		t.Fatalf("storage budget = %d, want %d", got, want)
+	}
+}
+
+func TestPAR2RepairCanBeDisabledAndCannotRequestFullNZB(t *testing.T) {
+	disabled := PAR2Repair{Enabled: boolPointer(false)}
+	if got := disabled.ExtraDownloadBudget(10 << 30); got != 0 {
+		t.Fatalf("disabled repair budget = %d, want 0", got)
+	}
+
+	p := PAR2Repair{MaxDownloadPercent: 100, MaxDownloadBytes: "100GB"}
+	if got, want := p.ExtraDownloadBudget(4<<30), int64(1<<30); got != want {
+		t.Fatalf("hard-capped budget = %d, want %d", got, want)
+	}
+	if got, want := p.ExtraDownloadBudget(math.MaxInt64), int64(100<<30); got != want {
+		t.Fatalf("overflow-safe absolute budget = %d, want %d", got, want)
+	}
+}
+
+func TestApplyUsenetEnvVarsPAR2(t *testing.T) {
+	t.Setenv("DECYPHARR_USENET__PAR2__ENABLED", "false")
+	t.Setenv("DECYPHARR_USENET__PAR2__MAX_DOWNLOAD_PERCENT", "7")
+	t.Setenv("DECYPHARR_USENET__PAR2__MAX_DOWNLOAD_BYTES", "64MB")
+	t.Setenv("DECYPHARR_USENET__PAR2__MAX_STORAGE", "2GB")
+
+	var c Config
+	c.applyUsenetEnvVars()
+	if c.Usenet.PAR2.IsEnabled() {
+		t.Fatal("environment override did not disable PAR2 repair")
+	}
+	if got := c.Usenet.PAR2.DownloadPercent(); got != 7 {
+		t.Fatalf("download percent = %d, want 7", got)
+	}
+	if got, want := c.Usenet.PAR2.DownloadBytes(), int64(64<<20); got != want {
+		t.Fatalf("download bytes = %d, want %d", got, want)
+	}
+	if got, want := c.Usenet.PAR2.StorageBytes(), int64(2<<30); got != want {
+		t.Fatalf("storage bytes = %d, want %d", got, want)
 	}
 }

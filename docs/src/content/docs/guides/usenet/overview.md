@@ -183,10 +183,48 @@ Streams use disk buffer for assembly. Ensure sufficient disk space.
 ```json
 {
   "usenet": {
-    "skip_repair": false
+    "par2": {
+      "enabled": true,
+      "max_download_percent": 10,
+      "max_download_bytes": "512MB",
+      "max_storage": "8GB"
+    }
   }
 }
 ```
+
+PAR2 recovery is lazy. A normal article request first exhausts provider and
+backbone failover, including failures caused by invalid yEnc data or CRCs.
+Only then does Decypharr fetch the smallest usable PAR2 metadata file, the
+minimum-cost standard recovery-volume combination, and the exact
+source-article ranges required by the requested repair. It writes only the
+repaired range, not a second complete copy of the media or archive.
+
+Verified source ranges still present in the active memory or disk stream cache
+are reused before the network plan is priced, so they consume no repair
+traffic. They remain owned by the normal stream cache and are not duplicated
+in `par2.db`.
+
+The operation is rejected before source/recovery downloads when its modeled
+traffic would exceed the smaller of `max_download_percent` and
+`max_download_bytes`. The percentage has a hard ceiling of 25%. This makes the
+limit a safety boundary rather than an instruction to download the whole NZB.
+The initial base PAR2 metadata file may need to be fetched before the final
+cost can be calculated; it is itself checked against the same budget.
+
+Repair covers directly posted media and raw files backing stored RAR, 7z, and
+ZIP members. PAR2 protects those posted source files, not bytes after archive
+decompression. Recovery state lives in `{main_path}/usenet/par2.db` and is
+removed with its NZB. NZBs imported by older versions do not contain the raw
+file origins required for safe reconstruction; re-import them to enable PAR2.
+
+During import, Decypharr must observe enough valid yEnc metadata to establish
+the exact byte layout of every protected source file it may repair. If no part
+of a source file survives, Decypharr refuses to guess its offsets or download
+the whole post. Automatic minimum-volume planning also requires the standard
+`.volSTART+COUNT.par2` naming scheme; an unusually named PAR2 file is used only
+when it is independently sufficient. In either case, try another NZB or
+provider rather than weakening the repair budget.
 
 ## Arr Integration
 
@@ -216,7 +254,8 @@ See [Sabnzbd Integration](./sabnzbd/) for details.
 
 ### Incomplete Downloads
 
-- Enable `skip_repair: false` for PAR2 repair
+- Keep `usenet.par2.enabled` set to `true` (the default)
+- Check logs for a repair traffic/storage budget rejection
 - Check provider retention (old files may be incomplete)
 - Try backup provider if available
 
@@ -245,7 +284,12 @@ Full Usenet config with optimal settings:
     "processing_timeout": "15m",
     "availability_sample_percent": 5,
     "disk_buffer_path": "/cache/usenet",
-    "skip_repair": false
+    "par2": {
+      "enabled": true,
+      "max_download_percent": 10,
+      "max_download_bytes": "512MB",
+      "max_storage": "8GB"
+    }
   }
 }
 ```

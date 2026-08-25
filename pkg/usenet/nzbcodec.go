@@ -326,6 +326,26 @@ func encodeSegments(nzb *storage.NZB) (segMeta, msgIDs []byte) {
 		sw.uvarint(idx)
 	}
 
+	// Optional segment-origin extension. Keeping it at the end lets the v2
+	// decoder continue reading metadata written before PAR2 support; zero is
+	// reserved for legacy/unknown origins.
+	sw.uvarint(1) // extension version
+	for i := range nzb.Files {
+		for j := range nzb.Files[i].Segments {
+			sw.uvarint(uint64(nzb.Files[i].Segments[j].RawFileKey))
+		}
+	}
+	for i := range nzb.Files {
+		for j := range nzb.Files[i].Segments {
+			sw.varint(nzb.Files[i].Segments[j].RawOffset)
+		}
+	}
+	for i := range nzb.Files {
+		for j := range nzb.Files[i].Segments {
+			sw.varint(nzb.Files[i].Segments[j].RawLength)
+		}
+	}
+
 	// Message id region (its own buffer so a full decode retains only these
 	// bytes, not the numeric columns).
 	for i := range nzb.Files {
@@ -607,6 +627,42 @@ func decodeSegments(nzb *storage.NZB, counts []int, segMeta, msgIDs []byte) erro
 			return fmt.Errorf("nzbcodec: group index %d out of range", idx)
 		}
 		segs[i].Group = groups[idx]
+	}
+
+	// Segment origins were added as a trailing v2 extension. Old v2 blobs end
+	// immediately after the group column and intentionally decode to zero
+	// origins, which the recovery layer reports as legacy metadata.
+	if r.pos < len(r.buf) {
+		extVersion, err := r.uvarint()
+		if err != nil {
+			return err
+		}
+		if extVersion != 1 {
+			return fmt.Errorf("nzbcodec: unsupported segment extension %d", extVersion)
+		}
+		for i := 0; i < total; i++ {
+			v, err := r.uvarint()
+			if err != nil {
+				return err
+			}
+			if v > math.MaxUint32 {
+				return fmt.Errorf("nzbcodec: raw file key %d out of range", v)
+			}
+			segs[i].RawFileKey = uint32(v)
+		}
+		for i := 0; i < total; i++ {
+			if segs[i].RawOffset, err = r.varint(); err != nil {
+				return err
+			}
+		}
+		for i := 0; i < total; i++ {
+			if segs[i].RawLength, err = r.varint(); err != nil {
+				return err
+			}
+		}
+		if r.pos != len(r.buf) {
+			return fmt.Errorf("nzbcodec: %d trailing segment metadata bytes", len(r.buf)-r.pos)
+		}
 	}
 
 	// Message ids alias the msgIDs buffer (no per-id allocation).

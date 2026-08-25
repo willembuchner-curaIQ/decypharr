@@ -119,7 +119,13 @@ Array of Debrid services:
     "processing_timeout": "10m",
     "availability_sample_percent": 10,
     "import_availability_sample_percent": 1,
-    "disk_buffer_path": "/cache/usenet/streams"
+    "disk_buffer_path": "/cache/usenet/streams",
+    "par2": {
+      "enabled": true,
+      "max_download_percent": 10,
+      "max_download_bytes": "512MB",
+      "max_storage": "8GB"
+    }
   }
 }
 ```
@@ -136,6 +142,20 @@ Array of Debrid services:
 | `availability_sample_percent` | int    | % of segments to check during repairs (1-100) | `10`             |
 | `import_availability_sample_percent` | int | % of segments to check when adding an NZB (1-100) | `1`         |
 | `disk_buffer_path`            | string | Disk buffer location            | `{main_path}/usenet/streams` |
+| `par2`                        | object | Bounded, on-demand PAR2 recovery | See below                    |
+
+### PAR2 Fields
+
+| Field                  | Type   | Description                                                        | Default |
+|------------------------|--------|--------------------------------------------------------------------|---------|
+| `enabled`              | bool   | Repair missing or corrupt articles after all backbones fail        | `true`  |
+| `max_download_percent` | int    | Maximum extra repair traffic as a percentage of posted NZB bytes   | `10` (hard maximum `25`) |
+| `max_download_bytes`   | string | Absolute extra-traffic cap; the smaller traffic limit always wins  | `512MB` |
+| `max_storage`          | string | Maximum dedicated PAR2 metadata, recovery-slice, and patch storage | `8GB`   |
+
+Recovery data is stored separately at `{main_path}/usenet/par2.db`, keyed by
+NZB metadata ID. Existing NZBs imported before raw-origin tracking was added
+must be re-imported before they can be repaired safely.
 
 ### Provider Fields
 

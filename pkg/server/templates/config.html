@@ -747,6 +747,48 @@
                                                     </div>
                                                 </label>
                                             </div>
+                                            <div>
+                                                <label class="label cursor-pointer justify-start gap-3">
+                                                    <input type="checkbox" class="checkbox checkbox-secondary"
+                                                           name="usenet.par2.enabled" id="usenet.par2.enabled" checked>
+                                                    <div>
+                                                        <span class="font-medium">PAR2 Repair</span>
+                                                        <div class="label-text-alt">Repair missing or corrupt articles only
+                                                            after normal provider and backbone failover.</div>
+                                                    </div>
+                                                </label>
+                                            </div>
+                                            <div>
+                                                <label class="label" for="usenet.par2.max_download_percent">
+                                                    <span class="font-medium">PAR2 Traffic Limit %</span>
+                                                </label>
+                                                <input type="number" class="input w-full"
+                                                       name="usenet.par2.max_download_percent"
+                                                       id="usenet.par2.max_download_percent" min="1" max="25"
+                                                       value="10">
+                                                <span class="text-sm opacity-70">Extra repair traffic as a percentage of
+                                                    posted NZB bytes (hard maximum: 25%)</span>
+                                            </div>
+                                            <div>
+                                                <label class="label" for="usenet.par2.max_download_bytes">
+                                                    <span class="font-medium">PAR2 Absolute Traffic Limit</span>
+                                                </label>
+                                                <input type="text" class="input w-full"
+                                                       name="usenet.par2.max_download_bytes"
+                                                       id="usenet.par2.max_download_bytes" value="512MB">
+                                                <span class="text-sm opacity-70">Absolute extra-download cap; the smaller
+                                                    of this and the percentage limit wins</span>
+                                            </div>
+                                            <div>
+                                                <label class="label" for="usenet.par2.max_storage">
+                                                    <span class="font-medium">PAR2 Storage Limit</span>
+                                                </label>
+                                                <input type="text" class="input w-full"
+                                                       name="usenet.par2.max_storage"
+                                                       id="usenet.par2.max_storage" value="8GB">
+                                                <span class="text-sm opacity-70">Dedicated metadata, recovery-slice, and
+                                                    repaired-patch storage</span>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>

@@ -16,6 +16,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
+	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 )
 
 // SevenZParser parses 7z archives from NNTP segments
@@ -24,6 +25,14 @@ type SevenZParser struct {
 	maxConcurrent int
 	logger        zerolog.Logger
 	rarParser     *RARParser
+	recovery      reader.ArticleRecovery
+	recoveryNZBID string
+}
+
+func (p *SevenZParser) setArticleRecovery(nzbID string, recovery reader.ArticleRecovery) {
+	p.recoveryNZBID = nzbID
+	p.recovery = recovery
+	p.rarParser.setArticleRecovery(nzbID, recovery)
 }
 
 // NewSevenZParser creates a new 7z parser
@@ -41,17 +50,27 @@ func (p *SevenZParser) Process(ctx context.Context, group *FileGroup, password s
 		return group.Files[i].Filename < group.Files[j].Filename
 	})
 
-	volumes := buildArchiveVolumeDescriptors(group)
+	volumes, err := buildArchiveVolumeDescriptors(group)
+	if err != nil {
+		return nil, err
+	}
 	if len(volumes) == 0 {
 		return nil, fmt.Errorf("no volumes built from group")
 	}
 
-	baseSegments, volumeInfos, _ := buildBaseSegments(group)
+	baseSegments, volumeInfos, _, err := buildBaseSegments(group)
+	if err != nil {
+		return nil, err
+	}
 	if len(baseSegments) == 0 {
 		return nil, fmt.Errorf("no base segments built from group")
 	}
 
-	usenetFS, err := fs.NewFS(ctx, p.manager, p.maxConcurrent, 0, volumes, p.logger) // 0 prefetch for parsing
+	options := []fs.Option(nil)
+	if p.recovery != nil && p.recoveryNZBID != "" {
+		options = append(options, fs.WithArticleRecovery(p.recoveryNZBID, p.recovery))
+	}
+	usenetFS, err := fs.NewFS(ctx, p.manager, p.maxConcurrent, 0, volumes, p.logger, options...) // 0 prefetch for parsing
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
@@ -90,12 +109,9 @@ func (p *SevenZParser) Process(ctx context.Context, group *FileGroup, password s
 	if len(rarFiles) > 0 {
 		rarNZBFiles, err := p.processRARFilesFromPositions(ctx, rarFiles, group, readerAt, baseSegments, volumeInfos, password)
 		if err != nil {
-			p.logger.Warn().
-				Err(err).
-				Msg("Failed to process RAR files from 7z, continuing with non-RAR files")
-		} else {
-			files = append(files, rarNZBFiles...)
+			return nil, fmt.Errorf("process RAR files embedded in 7z: %w", err)
 		}
+		files = append(files, rarNZBFiles...)
 	}
 
 	// Parse non-RAR files as regular files
@@ -115,15 +131,15 @@ func (p *SevenZParser) Process(ctx context.Context, group *FileGroup, password s
 		if file.Offset >= 0 && file.Size > 0 {
 			sliced, err := sliceSegmentsForRangeSimple(baseSegments, file.Offset, int64(file.Size))
 			if err != nil || len(sliced) == 0 {
-				// Fallback to all segments
-				segments = make([]storage.NZBSegment, len(baseSegments))
-				copy(segments, baseSegments)
+				if err == nil {
+					err = fmt.Errorf("no source segments overlap the file range")
+				}
+				return nil, fmt.Errorf("map 7z file %q to raw source: %w", internal, err)
 			} else {
 				segments = sliced
 			}
 		} else {
-			segments = make([]storage.NZBSegment, len(baseSegments))
-			copy(segments, baseSegments)
+			return nil, fmt.Errorf("7z file %q has no usable source offset", internal)
 		}
 
 		files = append(files, &storage.NZBFile{
@@ -279,18 +295,11 @@ func (p *SevenZParser) processRARFilesFromPositions(
 		// get segments for this file by processing all its volume parts
 		fileSegments, err := p.buildSegmentsForRARFile(rarEntry, rarFileOffsets, baseSegments, volumeInfos)
 		if err != nil {
-			p.logger.Warn().
-				Err(err).
-				Str("file", rarEntry.Name).
-				Msg("Failed to build segments for RAR file")
-			continue
+			return nil, fmt.Errorf("map RAR file %q embedded in 7z: %w", rarEntry.Name, err)
 		}
 
 		if len(fileSegments) == 0 {
-			p.logger.Warn().
-				Str("file", rarEntry.Name).
-				Msg("No segments found for RAR file")
-			continue
+			return nil, fmt.Errorf("RAR file %q embedded in 7z has no source segments", rarEntry.Name)
 		}
 
 		p.logger.Debug().
@@ -338,11 +347,7 @@ func (p *SevenZParser) buildSegmentsForRARFile(
 		rarVolumeName := filepath.Base(part.Name)
 		rarVolumeOffset, ok := rarFileOffsets[rarVolumeName]
 		if !ok {
-			p.logger.Warn().
-				Str("part_name", part.Name).
-				Str("file", rarEntry.Name).
-				Msg("RAR part not found in 7z file list")
-			continue
+			return nil, fmt.Errorf("RAR part %q for %s is absent from the 7z file list", part.Name, rarEntry.Name)
 		}
 
 		// The file data starts at: rarVolumeOffset (in 7z) + part.DataOffset (in RAR volume)
@@ -360,13 +365,7 @@ func (p *SevenZParser) buildSegmentsForRARFile(
 		}
 
 		if len(partSegments) == 0 {
-			p.logger.Warn().
-				Str("file", rarEntry.Name).
-				Int("part_index", partIdx).
-				Int64("offset", absoluteDataOffset).
-				Int64("size", part.PackedSize).
-				Msg("No segments found for RAR part")
-			continue
+			return nil, fmt.Errorf("RAR part %d of %s has no source segments", partIdx, rarEntry.Name)
 		}
 
 		// Assign output-file positions cumulatively across parts (same
@@ -398,6 +397,9 @@ func sliceSegmentsForRange(
 
 	targetStart := offset
 	targetEnd := offset + length - 1
+	if targetEnd < targetStart {
+		return nil, fmt.Errorf("range overflows int64: offset=%d length=%d", offset, length)
+	}
 
 	// Build cumulative offset map for volumes
 	var absPos int64
@@ -415,6 +417,7 @@ func sliceSegmentsForRange(
 	}
 
 	var result []storage.NZBSegment
+	var covered int64
 
 	// Parse each volume
 	for _, volOffset := range volumeOffsets {
@@ -428,7 +431,7 @@ func sliceSegmentsForRange(
 		segEnd := volOffset.info.SegmentEnd
 
 		if segStart < 0 || segEnd > len(baseSegments) || segStart >= segEnd {
-			continue
+			return nil, fmt.Errorf("invalid segment bounds [%d, %d) for archive volume", segStart, segEnd)
 		}
 
 		// Parse each segment in this volume
@@ -466,14 +469,21 @@ func sliceSegmentsForRange(
 				Number:           seg.Number,
 				MessageID:        seg.MessageID,
 				Bytes:            overlapEnd - overlapStart + 1,
-				SegmentDataStart: relStart,
+				SegmentDataStart: seg.SegmentDataStart + relStart,
 				Group:            seg.Group,
+				RawFileKey:       seg.RawFileKey,
+				RawOffset:        seg.RawOffset + relStart,
+				RawLength:        overlapEnd - overlapStart + 1,
 			}
 
 			result = append(result, slicedSeg)
+			covered += slicedSeg.Bytes
 
 			if overlapEnd == targetEnd {
 				// We've covered the entire range
+				if covered != length {
+					return nil, fmt.Errorf("range [%d, %d] has a source gap (%d of %d bytes covered)", targetStart, targetEnd, covered, length)
+				}
 				return result, nil
 			}
 
@@ -481,24 +491,13 @@ func sliceSegmentsForRange(
 		}
 	}
 
-	return result, nil
+	return nil, fmt.Errorf("range [%d, %d] is only partially covered (%d of %d bytes)", targetStart, targetEnd, covered, length)
 }
 
 // isRARFile checks if a filename is a RAR file
 func isRARFile(filename string) bool {
 	lower := strings.ToLower(filename)
-	return strings.HasSuffix(lower, ".rar") ||
-		strings.HasSuffix(lower, ".r00") ||
-		strings.HasSuffix(lower, ".r01") ||
-		strings.HasSuffix(lower, ".r02") ||
-		strings.HasSuffix(lower, ".r03") ||
-		strings.HasSuffix(lower, ".r04") ||
-		strings.HasSuffix(lower, ".r05") ||
-		strings.HasSuffix(lower, ".r06") ||
-		strings.HasSuffix(lower, ".r07") ||
-		strings.HasSuffix(lower, ".r08") ||
-		strings.HasSuffix(lower, ".r09") ||
-		(len(lower) > 3 && lower[len(lower)-4] == '.' && lower[len(lower)-3] == 'r' &&
-			lower[len(lower)-2] >= '0' && lower[len(lower)-2] <= '9' &&
-			lower[len(lower)-1] >= '0' && lower[len(lower)-1] <= '9')
+	return rarMainPattern.MatchString(lower) ||
+		rarPartPattern.MatchString(lower) ||
+		rarVolumePattern.MatchString(lower)
 }

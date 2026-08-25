@@ -17,6 +17,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
+	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
 
@@ -63,6 +64,13 @@ type ZIPParser struct {
 	manager       *nntp.Client
 	maxConcurrent int
 	logger        zerolog.Logger
+	recovery      reader.ArticleRecovery
+	recoveryNZBID string
+}
+
+func (p *ZIPParser) setArticleRecovery(nzbID string, recovery reader.ArticleRecovery) {
+	p.recoveryNZBID = nzbID
+	p.recovery = recovery
 }
 
 // NewZIPParser creates a new ZIP parser
@@ -76,15 +84,26 @@ func NewZIPParser(manager *nntp.Client, maxConcurrent int, logger zerolog.Logger
 
 func (p *ZIPParser) Process(ctx context.Context, group *FileGroup, password string) ([]*storage.NZBFile, error) {
 	sort.Slice(group.Files, func(i, j int) bool {
+		oi := getZIPVolumeOrder(group.Files[i].Filename)
+		oj := getZIPVolumeOrder(group.Files[j].Filename)
+		if oi != oj {
+			return oi < oj
+		}
 		return group.Files[i].Filename < group.Files[j].Filename
 	})
 
-	volumes := buildArchiveVolumeDescriptors(group)
+	volumes, err := buildArchiveVolumeDescriptors(group)
+	if err != nil {
+		return nil, err
+	}
 	if len(volumes) == 0 {
 		return nil, fmt.Errorf("no volumes built from group")
 	}
 
-	baseSegments, volumeInfos, _ := buildBaseSegments(group)
+	baseSegments, volumeInfos, _, err := buildBaseSegments(group)
+	if err != nil {
+		return nil, err
+	}
 	if len(baseSegments) == 0 {
 		return nil, fmt.Errorf("no base segments built from group")
 	}
@@ -146,7 +165,7 @@ func (p *ZIPParser) Process(ctx context.Context, group *FileGroup, password stri
 		return nil, fmt.Errorf("no stored files found in ZIP archive")
 	}
 
-	return buildExtractedArchiveFiles(group, password, storage.NZBFileTypeZip, baseSegments, volumeInfos, extracted), nil
+	return buildExtractedArchiveFiles(group, password, storage.NZBFileTypeZip, baseSegments, volumeInfos, extracted)
 }
 
 // ParseArchive parses ZIP archive from volumes
@@ -201,24 +220,18 @@ func (p *ZIPParser) fetchVolumeEndSnippet(ctx context.Context, vol *types.Volume
 		return nil, fmt.Errorf("volume has no segments")
 	}
 
-	fetch := func(messageID string) ([]byte, error) {
-		var body []byte
-		err := p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
-			data, e := conn.GetDecodedBody(messageID)
-			body = data
-			return e
-		})
-		return body, err
+	fetch := func(segment storage.NZBSegment) ([]byte, error) {
+		return fetchSegmentData(ctx, p.manager, p.recoveryNZBID, p.recovery, segment)
 	}
 
 	last := len(vol.Segments) - 1
-	body, err := fetch(vol.Segments[last].MessageID)
+	body, err := fetch(vol.Segments[last])
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch segment: %w", err)
 	}
 
 	for i := last - 1; i >= 0 && len(body) < defaultZIPEndSnippetSize && last-i <= 3; i-- {
-		data, err := fetch(vol.Segments[i].MessageID)
+		data, err := fetch(vol.Segments[i])
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch segment %s: %w", vol.Segments[i].MessageID, err)
 		}
@@ -484,7 +497,11 @@ func (p *ZIPParser) calculateZIPDataOffset(ctx context.Context, volumes []*types
 	headerOffset := file.LocalHeaderOffset
 
 	// Create a temporary FS to read the local header
-	usenetFS, err := fs.NewFS(ctx, p.manager, p.maxConcurrent, 0, volumes, p.logger) // 0 prefetch for parsing
+	options := []fs.Option(nil)
+	if p.recovery != nil && p.recoveryNZBID != "" {
+		options = append(options, fs.WithArticleRecovery(p.recoveryNZBID, p.recovery))
+	}
+	usenetFS, err := fs.NewFS(ctx, p.manager, p.maxConcurrent, 0, volumes, p.logger, options...) // 0 prefetch for parsing
 	if err != nil {
 		return 0, fmt.Errorf("failed to create FS: %w", err)
 	}

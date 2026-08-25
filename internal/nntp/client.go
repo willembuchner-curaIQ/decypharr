@@ -685,7 +685,11 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 		var nntpErr *Error
 		if errors.As(err, &nntpErr) {
 			switch nntpErr.Type {
-			case ErrorTypeArticleNotFound:
+			case ErrorTypeArticleNotFound, ErrorTypeYencDecode:
+				// A CRC/decode failure is article-specific just like a 430:
+				// retrying the same replicated copy cannot heal it. Try a
+				// different provider/backbone before declaring the article a
+				// recovery candidate.
 				excludeForArticleNotFound(&exclusions, connProvider)
 			case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
 				exclusions.excludeHost(connProvider.Host)

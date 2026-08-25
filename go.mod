@@ -13,6 +13,7 @@ require (
 	github.com/gorilla/sessions v1.4.0
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/hashicorp/go-retryablehttp v0.7.8
+	github.com/javi11/gopar-turbo v0.2.0
 	github.com/javi11/sevenzip v1.6.2-0.20251026160715-ca961b7f1239
 	github.com/klauspost/compress v1.19.2
 	github.com/mnightingale/rapidyenc v0.0.0-20260606125752-cdd7bcd89529
@@ -82,7 +83,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/huandu/xstrings v1.3.2 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
-	github.com/klauspost/cpuid/v2 v2.2.9 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/minio/sha256-simd v1.0.0 // indirect
@@ -108,7 +109,6 @@ require (
 	github.com/pion/turn/v4 v4.0.0 // indirect
 	github.com/pion/webrtc/v4 v4.0.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/protolambda/ctxlock v0.1.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rs/dnscache v0.0.0-20211102005908-e0241e321417 // indirect

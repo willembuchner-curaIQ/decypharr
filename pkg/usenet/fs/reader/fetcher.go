@@ -279,15 +279,25 @@ func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx, restarts i
 		}
 
 		var n int64
+		var metadata *nntp.YencMetadata
 		var err error
 		if decodeBuffer := writer.DecodeBuffer(); decodeBuffer != nil {
 			var decoded []byte
-			decoded, err = conn.DecodeBodyInto(messageID, decodeBuffer)
+			decoded, metadata, err = conn.DecodeBodyIntoWithMetadata(messageID, decodeBuffer)
 			if err == nil {
+				if sf.config.Recovery != nil {
+					sf.config.Recovery.ObserveArticle(downloadCtx, sf.config.RecoveryNZBID, *seg, decoded, metadata)
+				}
 				n, err = writer.Adopt(decoded)
 			}
 		} else {
-			n, err = conn.StreamBody(messageID, writer)
+			n, metadata, err = conn.StreamBodyWithMetadata(messageID, writer)
+			if err == nil && sf.config.Recovery != nil {
+				// The disk writer has already consumed the pooled body by the
+				// time StreamBodyWithMetadata returns. The exact yEnc layout is
+				// still valuable and requires no second BODY request.
+				sf.config.Recovery.ObserveArticle(downloadCtx, sf.config.RecoveryNZBID, *seg, nil, metadata)
+			}
 		}
 		if err != nil {
 			writer.Discard()
@@ -318,6 +328,37 @@ func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx, restarts i
 	})
 
 	if err != nil {
+		definitiveArticleFailure := nntp.IsArticleNotFoundError(err) || nntp.IsYencDecodeError(err)
+		if definitiveArticleFailure && ctx.Err() == nil && sf.ctx.Err() == nil && sf.config.Recovery != nil && seg.RawFileKey != 0 && sf.config.RecoveryNZBID != "" {
+			var recovered []byte
+			var repairErr error
+			if sourceAware, ok := sf.config.Recovery.(SourceAwareArticleRecovery); ok {
+				recovered, repairErr = sourceAware.RecoverArticleWithSource(ctx, sf.config.RecoveryNZBID, *seg, cacheArticleRangeSource{cache: sf.cache})
+			} else {
+				recovered, repairErr = sf.config.Recovery.RecoverArticle(ctx, sf.config.RecoveryNZBID, *seg)
+			}
+			if repairErr == nil {
+				writer := sf.cache.StreamWriter(segIdx)
+				if writer == nil {
+					repairErr = ErrCacheClosed
+				} else {
+					n, writeErr := writer.Adopt(recovered)
+					repairErr = writeErr
+					if repairErr == nil && n > 0 {
+						writer.Finalize()
+						sf.stats.Repairs.Add(1)
+						sf.stats.RepairBytes.Add(n)
+						return nil
+					}
+					writer.Discard()
+					if repairErr == nil {
+						repairErr = fmt.Errorf("PAR2 recovery produced no data")
+					}
+				}
+			}
+			sf.stats.RepairErrors.Add(1)
+			err = fmt.Errorf("%w (PAR2 recovery: %v)", err, repairErr)
+		}
 		sf.stats.DownloadErrors.Add(1)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			sf.cache.ReleaseFetching(segIdx)
@@ -510,7 +551,7 @@ func (sf *SegmentFetcher) fetchWithRetryDirect(ctx context.Context, segIdx int) 
 		lastErr = err
 
 		// Don't retry permanent errors or cancellations.
-		if nntp.IsArticleNotFoundError(err) || ctx.Err() != nil || sf.ctx.Err() != nil {
+		if nntp.IsArticleNotFoundError(err) || nntp.IsYencDecodeError(err) || ctx.Err() != nil || sf.ctx.Err() != nil {
 			return err
 		}
 		// The failover layer already retried per provider and across

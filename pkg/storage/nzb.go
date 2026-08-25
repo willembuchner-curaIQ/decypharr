@@ -105,11 +105,14 @@ func (nzb *NZB) GetFiles() []NZBFile {
 type NZBSegment struct {
 	Number           int    `json:"number" msgpack:"number"`
 	MessageID        string `json:"message_id" msgpack:"message_id"`
-	Bytes            int64  `json:"bytes" msgpack:"bytes"`                           // Size of data to read from this segment
-	StartOffset      int64  `json:"start_offset" msgpack:"start_offset"`             // Position in the OUTPUT file where this segment's data goes
-	EndOffset        int64  `json:"end_offset" msgpack:"end_offset"`                 // End position in the OUTPUT file
-	Group            string `json:"group"`                                           // Newsgroup
-	SegmentDataStart int64  `json:"segment_data_start" msgpack:"segment_data_start"` // Offset within the decoded NNTP segment where reading should begin (for sliced reads)
+	Bytes            int64  `json:"bytes" msgpack:"bytes"`                                   // Size of data to read from this segment
+	StartOffset      int64  `json:"start_offset" msgpack:"start_offset"`                     // Position in the OUTPUT file where this segment's data goes
+	EndOffset        int64  `json:"end_offset" msgpack:"end_offset"`                         // End position in the OUTPUT file
+	Group            string `json:"group"`                                                   // Newsgroup
+	SegmentDataStart int64  `json:"segment_data_start" msgpack:"segment_data_start"`         // Offset within the decoded NNTP segment where reading should begin (for sliced reads)
+	RawFileKey       uint32 `json:"raw_file_key,omitempty" msgpack:"raw_file_key,omitempty"` // NZB-scoped recovery.RawFileKey (0 means unknown/legacy)
+	RawOffset        int64  `json:"raw_offset,omitempty" msgpack:"raw_offset,omitempty"`     // Offset within the PAR2-protected raw source file
+	RawLength        int64  `json:"raw_length,omitempty" msgpack:"raw_length,omitempty"`     // Bytes consumed from the raw source file
 }
 
 // ArchiveVolumeInfo holds metadata about archive volumes (internal parser use only)

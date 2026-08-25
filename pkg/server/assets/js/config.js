@@ -1480,7 +1480,13 @@ class ConfigManager {
             import_availability_sample_percent: parseInt(document.querySelector('[name="usenet.import_availability_sample_percent"]')?.value) || 1,
             disk_buffer_path: document.querySelector('[name="usenet.disk_buffer_path"]')?.value || "",
             buffer_to_disk: document.querySelector('[name="usenet.buffer_to_disk"]')?.checked || false,
-            buffer_memory: document.querySelector('[name="usenet.buffer_memory"]')?.value || ""
+            buffer_memory: document.querySelector('[name="usenet.buffer_memory"]')?.value || "",
+            par2: {
+                enabled: document.querySelector('[name="usenet.par2.enabled"]')?.checked ?? true,
+                max_download_percent: parseInt(document.querySelector('[name="usenet.par2.max_download_percent"]')?.value) || 10,
+                max_download_bytes: document.querySelector('[name="usenet.par2.max_download_bytes"]')?.value || "512MB",
+                max_storage: document.querySelector('[name="usenet.par2.max_storage"]')?.value || "8GB"
+            }
         };
     }
 
@@ -2332,6 +2338,19 @@ class ConfigManager {
                     input.value = value;
                 }
             }
+        });
+
+        const par2 = usenet.par2 || {};
+        const par2Enabled = document.getElementsByName('usenet.par2.enabled')[0];
+        if (par2Enabled) par2Enabled.checked = par2.enabled !== false;
+        const par2Fields = {
+            'max_download_percent': par2.max_download_percent ?? 10,
+            'max_download_bytes': par2.max_download_bytes || '512MB',
+            'max_storage': par2.max_storage || '8GB'
+        };
+        Object.entries(par2Fields).forEach(([id, value]) => {
+            const input = document.getElementsByName(`usenet.par2.${id}`)[0];
+            if (input) input.value = value;
         });
     }
 
