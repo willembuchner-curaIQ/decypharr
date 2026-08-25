@@ -5,8 +5,59 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"runtime"
 	"testing"
 )
+
+func TestFolderLifecycle(t *testing.T) {
+	var nilFolder *Folder
+	if !errors.Is(nilFolder.Fold(func(int, []byte) error { return nil }), ErrInvalidFold) {
+		t.Fatal("nil Folder.Fold did not return ErrInvalidFold")
+	}
+	if !errors.Is(nilFolder.FoldSize(2, func(int, []byte) error { return nil }), ErrInvalidFold) {
+		t.Fatal("nil Folder.FoldSize did not return ErrInvalidFold")
+	}
+	if nilFolder.Method() != "" || nilFolder.Accelerated() {
+		t.Fatal("nil folder reported a backend")
+	}
+	nilFolder.Close()
+	expectPanic(t, func() { nilFolder.Output(0) })
+
+	workers := DefaultWorkers()
+	if workers < 1 || workers > runtime.GOMAXPROCS(0) {
+		t.Fatalf("DefaultWorkers() = %d, GOMAXPROCS = %d", workers, runtime.GOMAXPROCS(0))
+	}
+	matrix := NewMatrix(1, 1, func(int, int) Element { return 1 })
+	folder, err := NewFolder(matrix, 64, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if folder.Method() == "" {
+		t.Fatal("folder method is empty")
+	}
+	source := make([]byte, 64)
+	for index := range source {
+		source[index] = byte(index)
+	}
+	if err := folder.Fold(func(_ int, buffer []byte) error {
+		copy(buffer, source)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(folder.Output(0), source) {
+		t.Fatal("identity fold changed source")
+	}
+	folder.Close()
+	folder.Close()
+	if !errors.Is(folder.Fold(func(int, []byte) error { return nil }), ErrInvalidFold) {
+		t.Fatal("closed Folder.Fold did not return ErrInvalidFold")
+	}
+	if folder.Method() != "" || folder.Accelerated() {
+		t.Fatal("closed folder reported a backend")
+	}
+	expectPanic(t, func() { folder.Output(0) })
+}
 
 func TestFolderAgainstPolynomialArithmetic(t *testing.T) {
 	matrix := NewMatrix(7, 19, func(row, column int) Element {
@@ -174,4 +225,14 @@ func referenceFold(coefficients []Element, inputs [][]byte) []byte {
 		output[offset+1] = byte(value >> 8)
 	}
 	return output
+}
+
+func expectPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("call did not panic")
+		}
+	}()
+	fn()
 }

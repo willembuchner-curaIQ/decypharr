@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	nativeRangeSize       = 128 << 10
+	nativeRangeSize        = 128 << 10
 	nativeInputGroupTarget = 12
 )
 

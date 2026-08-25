@@ -186,6 +186,151 @@ func TestRecoverRandomizedAgainstPolynomialParity(t *testing.T) {
 	}
 }
 
+func TestPlanContractAndCopies(t *testing.T) {
+	reader := func(context.Context, int64, []byte) error { return nil }
+	plan, err := NewPlan(PlanRequest{
+		DataShards: 2,
+		SliceSize:  64,
+		Missing:    []int{1},
+		Data:       []DataSource{{Shard: 0, Read: reader}},
+		Recovery:   []RecoverySource{{Exponent: 7, Read: reader}, {Exponent: 7, Read: reader}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.SliceSize() != 64 || plan.SelectionAttempts() != 1 {
+		t.Fatalf("unexpected plan metadata: size=%d attempts=%d", plan.SliceSize(), plan.SelectionAttempts())
+	}
+	missing := plan.MissingShards()
+	exponents := plan.RecoveryExponents()
+	if !slices.Equal(missing, []int{1}) || !slices.Equal(exponents, []uint16{7}) {
+		t.Fatalf("unexpected plan selection: missing=%v exponents=%v", missing, exponents)
+	}
+	missing[0] = 0
+	exponents[0] = 0
+	if !slices.Equal(plan.MissingShards(), []int{1}) || !slices.Equal(plan.RecoveryExponents(), []uint16{7}) {
+		t.Fatal("plan accessors exposed mutable storage")
+	}
+
+	var nilPlan *Plan
+	if nilPlan.MissingShards() != nil || nilPlan.SliceSize() != 0 ||
+		nilPlan.RecoveryExponents() != nil || nilPlan.SelectionAttempts() != 0 {
+		t.Fatal("nil plan accessors returned nonzero values")
+	}
+	sink := func(context.Context, int, int64, []byte) error { return nil }
+	if err := nilPlan.Recover(context.Background(), nil, sink, RecoverOptions{}); !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf("nil Plan.Recover error=%v, want ErrInvalidPlan", err)
+	}
+}
+
+func TestNewPlanRejectsInvalidContracts(t *testing.T) {
+	reader := func(context.Context, int64, []byte) error { return nil }
+	valid := func() PlanRequest {
+		return PlanRequest{
+			DataShards: 2,
+			SliceSize:  64,
+			Missing:    []int{1},
+			Data:       []DataSource{{Shard: 0, Read: reader}},
+			Recovery:   []RecoverySource{{Exponent: 0, Read: reader}},
+		}
+	}
+	tests := []struct {
+		name   string
+		change func(*PlanRequest)
+	}{
+		{name: "zero shard count", change: func(r *PlanRequest) { r.DataShards = 0 }},
+		{name: "excessive shard count", change: func(r *PlanRequest) { r.DataShards = maxPAR2DataShards + 1 }},
+		{name: "zero slice", change: func(r *PlanRequest) { r.SliceSize = 0 }},
+		{name: "odd slice", change: func(r *PlanRequest) { r.SliceSize = 63 }},
+		{name: "no missing shards", change: func(r *PlanRequest) { r.Missing = nil }},
+		{name: "missing shard out of range", change: func(r *PlanRequest) { r.Missing = []int{2} }},
+		{name: "duplicate missing shard", change: func(r *PlanRequest) { r.Missing = []int{1, 1} }},
+		{name: "data shard out of range", change: func(r *PlanRequest) { r.Data[0].Shard = 2 }},
+		{name: "missing shard supplied", change: func(r *PlanRequest) { r.Data[0].Shard = 1 }},
+		{name: "nil data reader", change: func(r *PlanRequest) { r.Data[0].Read = nil }},
+		{name: "duplicate data shard", change: func(r *PlanRequest) { r.Data = append(r.Data, r.Data[0]) }},
+		{name: "available shard absent", change: func(r *PlanRequest) { r.Data = nil }},
+		{name: "nil recovery reader", change: func(r *PlanRequest) { r.Recovery[0].Read = nil }},
+		{name: "negative matrix limit", change: func(r *PlanRequest) { r.MaxMatrixBytes = -1 }},
+		{name: "matrix limit exceeded", change: func(r *PlanRequest) { r.MaxMatrixBytes = 1 }},
+		{name: "negative selection limit", change: func(r *PlanRequest) { r.MaxSelectionAttempts = -1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := valid()
+			test.change(&request)
+			if _, err := NewPlan(request); !errors.Is(err, ErrInvalidPlan) {
+				t.Fatalf("NewPlan error=%v, want ErrInvalidPlan", err)
+			}
+		})
+	}
+}
+
+func TestRecoverContractErrors(t *testing.T) {
+	errRecovery := errors.New("recovery read failed")
+	errSink := errors.New("sink failed")
+	reader := func(context.Context, int64, []byte) error { return nil }
+	request := PlanRequest{
+		DataShards: 2,
+		SliceSize:  64,
+		Missing:    []int{1},
+		Data:       []DataSource{{Shard: 0, Read: reader}},
+		Recovery: []RecoverySource{{Exponent: 0, Read: func(context.Context, int64, []byte) error {
+			return errRecovery
+		}}},
+	}
+	plan, err := NewPlan(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := func(context.Context, int, int64, []byte) error { return nil }
+	if err := plan.Recover(context.Background(), nil, nil, RecoverOptions{}); !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf("nil sink error=%v, want ErrInvalidPlan", err)
+	}
+	if err := plan.Recover(context.Background(), []ByteRange{{Length: 0}}, sink, RecoverOptions{}); err != nil {
+		t.Fatalf("empty recovery: %v", err)
+	}
+	if err := plan.Recover(context.Background(), []ByteRange{{Length: 2}}, sink, RecoverOptions{StripeSize: 1}); !errors.Is(err, ErrInvalidRange) {
+		t.Fatalf("small stripe error=%v, want ErrInvalidRange", err)
+	}
+	if err := plan.Recover(context.Background(), []ByteRange{{Length: 2}}, sink, RecoverOptions{NumGoroutines: -1}); !errors.Is(err, ErrInvalidPlan) {
+		t.Fatalf("worker error=%v, want ErrInvalidPlan", err)
+	}
+	if err := plan.Recover(nil, []ByteRange{{Length: 2}}, sink, RecoverOptions{}); !errors.Is(err, errRecovery) {
+		t.Fatalf("recovery reader error=%v, want %v", err, errRecovery)
+	}
+
+	request.Recovery[0].Read = reader
+	plan, err = NewPlan(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := plan.Recover(ctx, []ByteRange{{Length: 2}}, sink, RecoverOptions{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled recovery error=%v, want context.Canceled", err)
+	}
+	if err := plan.Recover(context.Background(), []ByteRange{{Length: 2}}, func(context.Context, int, int64, []byte) error {
+		return errSink
+	}, RecoverOptions{}); !errors.Is(err, errSink) {
+		t.Fatalf("sink error=%v, want %v", err, errSink)
+	}
+}
+
+func TestRecoveryErrorsAndLimits(t *testing.T) {
+	notEnough := &NotEnoughRecoveryError{Missing: 3, Available: 2}
+	if !errors.Is(notEnough, ErrNotEnoughRecovery) || notEnough.Error() == "" {
+		t.Fatalf("invalid not-enough error: %v", notEnough)
+	}
+	singular := &SingularSelectionError{Attempts: 4, Exponents: []uint16{1, 2}, Exhausted: true}
+	if !errors.Is(singular, ErrSingularSelection) || singular.Error() == "" {
+		t.Fatalf("invalid singular error: %v", singular)
+	}
+	if saturatingDouble(math.MaxUint64) != math.MaxUint64 || saturatingDouble(7) != 14 {
+		t.Fatal("saturatingDouble returned an invalid result")
+	}
+}
+
 func TestPlannerRetriesSingularSelection(t *testing.T) {
 	zeroReader := func(context.Context, int64, []byte) error { return nil }
 	request := PlanRequest{

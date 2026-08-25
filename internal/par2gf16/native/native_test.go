@@ -9,6 +9,59 @@ import (
 	"unsafe"
 )
 
+func TestContextValidation(t *testing.T) {
+	for _, size := range []int{-2, 0, 1, 257} {
+		if context, err := NewContext(size); err == nil {
+			context.Close()
+			t.Fatalf("NewContext(%d) succeeded", size)
+		}
+	}
+	context, err := NewContext(258)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nilContext *Context
+	nilContext.Close()
+	defer context.Close()
+
+	expectPanic(t, func() { context.NewBuffers(0) })
+	storage := context.NewBuffers(2)
+	expectPanic(t, func() { context.Buffer(storage, -1) })
+	expectPanic(t, func() { context.Buffer(storage, 2) })
+
+	destination := context.Buffer(storage, 0)
+	source := context.Buffer(storage, 1)
+	expectPanic(t, func() { context.Prepare(destination[:len(destination)-1], []byte{0, 0}) })
+	expectPanic(t, func() { context.Prepare(destination, nil) })
+	expectPanic(t, func() { context.Finish(destination[:len(destination)-1], make([]byte, 2)) })
+	expectPanic(t, func() { context.Finish(destination, nil) })
+
+	context.MulAddMulti(nil, nil, 0, 0, 0, nil)
+	context.MulAddMulti(destination, source, context.BufferSize(), 0, 0, []uint16{1})
+	expectPanic(t, func() {
+		context.MulAddMulti(destination[:len(destination)-1], source, context.BufferSize(), 0, context.Stride(), []uint16{1})
+	})
+	expectPanic(t, func() {
+		context.MulAddMulti(destination, source, context.BufferSize()-1, 0, context.Stride(), []uint16{1})
+	})
+	expectPanic(t, func() {
+		context.MulAddMulti(destination, source, context.BufferSize(), 0, context.Stride(), []uint16{1, 1})
+	})
+	expectPanic(t, func() {
+		context.MulAddMulti(destination, source, context.BufferSize(), 1, context.Stride(), []uint16{1})
+	})
+	expectPanic(t, func() {
+		context.MulAddMulti(destination, source, context.BufferSize(), context.BufferSize(), context.Stride(), []uint16{1})
+	})
+	manySources := context.NewBuffers(65)
+	expectPanic(t, func() {
+		context.MulAddMulti(destination, manySources, context.BufferSize(), 0, context.Stride(), make([]uint16, 65))
+	})
+
+	context.Close()
+	context.Close()
+}
+
 func TestContextBuffersAndIdentityMultiply(t *testing.T) {
 	const sliceSize = 65538
 	context, err := NewContext(sliceSize)
@@ -122,4 +175,14 @@ func referenceProduct(left, right uint16) uint16 {
 		}
 	}
 	return uint16(product)
+}
+
+func expectPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("call did not panic")
+		}
+	}()
+	fn()
 }
