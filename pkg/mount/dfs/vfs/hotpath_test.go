@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirrobot01/decypharr/internal/buffer"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
 )
 
@@ -138,12 +139,26 @@ func TestCloseFlushesResidentBytesBeforeMetadata(t *testing.T) {
 }
 
 func TestDiskPersistenceChangeMarksMetadataDirty(t *testing.T) {
-	c, backend := newPlaybackCache(t, 8<<20, playbackConfig())
-	item, err := c.GetItem(backend.entry.Name, backend.filename, 8<<20)
+	const fileSize = 8 << 20
+	pool := buffer.NewPool(buffer.PoolConfig{Name: "test"})
+	t.Cleanup(func() { _ = pool.Close() })
+
+	var item *CacheItem
+	buf, err := pool.NewBuffer(buffer.Config{
+		DiskPath:  filepath.Join(t.TempDir(), "data.bin"),
+		TotalSize: fileSize,
+		OnPersistChange: func() {
+			if item != nil {
+				item.markMetadataDirty()
+			}
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	item.stopMetaWriter()
+	t.Cleanup(func() { _ = buf.Close() })
+	item = &CacheItem{buf: buf, info: ItemInfo{Size: fileSize}}
+
 	if _, _, err := item.WriteAtNoOverwrite(make([]byte, 128<<10), 0); err != nil {
 		t.Fatal(err)
 	}

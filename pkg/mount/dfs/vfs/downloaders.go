@@ -47,9 +47,9 @@ const (
 	// Without a cap, binary doubling eventually produces chunk sizes in the GB range,
 	// causing oversized HTTP range requests that are wasteful on seeks.
 	maxChunkSizeMultiplier = 16
-	// downloadBatchSize is how many streamed bytes accumulate before one
-	// cacheWriter.Write when no reader is parked; matches the buffer's
-	// block size.
+	// downloadBatchSize is the largest background-transfer batch. It matches
+	// the DFS buffer block size, while reads serving a parked caller are
+	// limited to that caller's remaining range instead.
 	downloadBatchSize = 1 << 20
 	// readAheadPokeInterval is how far a read may advance through cached bytes
 	// before keepAhead re-extends the download frontier. Playback crosses it
@@ -197,25 +197,75 @@ type downloader struct {
 	copyBuf []byte
 }
 
-// batchBuf returns the downloader's reusable copy buffer.
-func (dl *downloader) batchBuf() []byte {
-	if dl.copyBuf == nil {
-		dl.copyBuf = make([]byte, downloadBatchSize)
+// batchBuf returns a reusable copy buffer no larger than the current missing
+// range. Small probes therefore do not retain a full 1 MiB allocation.
+func (dl *downloader) batchBuf(size int64) []byte {
+	want := int(min(size, int64(downloadBatchSize)))
+	if want <= 0 {
+		return nil
 	}
-	return dl.copyBuf
+	if cap(dl.copyBuf) < want {
+		dl.copyBuf = make([]byte, want)
+	}
+	return dl.copyBuf[:want]
 }
 
 // copyBatched copies size bytes from src to dst through buf, coalescing
-// writes to len(buf) unless flushNow reports a latency-sensitive consumer
-// (then every read is flushed immediately). A src error is returned only
-// after the bytes read alongside it were flushed.
-func copyBatched(dst io.Writer, src io.Reader, size int64, buf []byte, flushNow func() bool) error {
+// writes to len(buf) in throughput mode. nextReadLimit returns zero for that
+// mode. A positive value switches to latency mode: pending bytes are published
+// before another source read, that read is capped to the returned size, and
+// its bytes are published immediately. A src error is returned only after the
+// bytes read alongside it were flushed.
+func copyBatched(dst io.Writer, src io.Reader, size int64, buf []byte, nextReadLimit func() int64) error {
+	if size < 0 {
+		return fmt.Errorf("copy size must be non-negative: %d", size)
+	}
+	if size == 0 {
+		return nil
+	}
+	if len(buf) == 0 {
+		return io.ErrShortBuffer
+	}
+
 	remaining := size
 	fill := 0
+	flush := func() error {
+		if fill == 0 {
+			return nil
+		}
+		n, err := dst.Write(buf[:fill])
+		if err != nil {
+			return err
+		}
+		if n != fill {
+			return io.ErrShortWrite
+		}
+		fill = 0
+		return nil
+	}
+
 	for remaining > 0 {
+		var limit int64
+		if nextReadLimit != nil {
+			limit = nextReadLimit()
+		}
+		latencyMode := limit > 0
+
+		// A waiter may arrive while a background batch is partly full. Publish
+		// those bytes before initiating any more potentially-blocking I/O.
+		if latencyMode && fill > 0 {
+			if err := flush(); err != nil {
+				return err
+			}
+			continue // dst progress may have changed the waiter's remaining range
+		}
+
 		want := min(int64(len(buf)-fill), remaining)
+		if latencyMode {
+			want = min(want, limit)
+		}
 		n, rerr := src.Read(buf[fill : fill+int(want)])
-		if n > int(want) {
+		if n < 0 || n > int(want) {
 			// A Reader that reports more bytes than the slice it was handed
 			// would make the write below slice past the batch buffer and
 			// panic the process (this goroutine has no recover). Fail the
@@ -224,12 +274,21 @@ func copyBatched(dst io.Writer, src io.Reader, size int64, buf []byte, flushNow 
 		}
 		fill += n
 		remaining -= int64(n)
-		if rerr != nil || fill == len(buf) || remaining == 0 || flushNow() {
-			if fill > 0 {
-				if _, werr := dst.Write(buf[:fill]); werr != nil {
-					return werr
-				}
-				fill = 0
+		if n == 0 && rerr == nil {
+			if err := flush(); err != nil {
+				return err
+			}
+			return io.ErrNoProgress
+		}
+
+		// Recheck after Read: a waiter could have arrived while the source was
+		// blocked, in which case the bytes just returned must be visible now.
+		if !latencyMode && nextReadLimit != nil {
+			latencyMode = nextReadLimit() > 0
+		}
+		if rerr != nil || fill == len(buf) || remaining == 0 || latencyMode {
+			if err := flush(); err != nil {
+				return err
 			}
 		}
 		if rerr != nil {
@@ -237,6 +296,20 @@ func copyBatched(dst io.Writer, src io.Reader, size int64, buf []byte, flushNow 
 		}
 	}
 	return nil
+}
+
+// waiterReadLimit returns how many bytes this downloader may request before it
+// reaches the earliest parked reader's end offset. Zero means this downloader
+// cannot currently advance that waiter and may use throughput-sized batches.
+func (dls *Downloaders) waiterReadLimit(off int64) int64 {
+	if dls.waiterCount.Load() <= 0 {
+		return 0
+	}
+	end := dls.minWaiterEnd.Load()
+	if end == math.MaxInt64 || end <= off {
+		return 0
+	}
+	return end - off
 }
 
 // NewDownloaders creates a new download coordinator
@@ -1307,11 +1380,12 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 		return writer.written, err
 	}
 
-	// Batch when nobody is waiting; flush per session read while a reader is
-	// parked so its first byte is never held back (see the cacheWriter doc
-	// comment for why that liveness matters).
-	err = copyBatched(writer, stream, missingRange.Size, dl.batchBuf(), func() bool {
-		return dl.dls.waiterCount.Load() > 0
+	// Batch to one DFS block in the background. While a reader is parked, cap
+	// the source Read itself at that reader's remaining range before publishing
+	// it. Checking only after Read is too late for Usenet: ReadAtContext waits
+	// for every segment covering the supplied slice.
+	err = copyBatched(writer, stream, missingRange.Size, dl.batchBuf(missingRange.Size), func() int64 {
+		return dl.dls.waiterReadLimit(writer.offset)
 	})
 	// io.EOF here is not a failure: either the session delivered the exact
 	// range and reported end-of-source, or the cacheWriter signaled a
@@ -1459,19 +1533,10 @@ func (dl *downloader) retryAttempts() int {
 
 // cacheWriter writes streamed body bytes straight through to the cache item.
 //
-// Earlier iterations buffered writes here into a 4–16 MB scratch slice
-// before flushing — the idea being to amortize sparse-file WriteAt syscalls.
-// That was the right optimization *before* the cache item had a real block
-// cache underneath. With the buffer.Buffer in place, the buffer's 1 MB
-// blocks already batch small writes into block-sized disk writes at the
-// correct layer; a second coalescer in front of WriteAtNoOverwrite only
-// delays when bytes become visible to waiting readers (a 16 MB buffer
-// pushes the first-byte latency for a player by seconds at typical NNTP
-// throughput, since the waiter is only woken when the buffer flushes).
-//
-// So Write goes directly to WriteAtNoOverwrite. The buffer underneath does
-// the actual write batching — at the right granularity, with the right
-// liveness, and without holding bytes hostage from readers.
+// copyBatched handles only transport batching: up to one 1 MiB DFS block when
+// nobody is waiting, or the exact waiter frontier on a latency-sensitive read.
+// Once Write is called, cacheWriter publishes immediately. The buffer beneath
+// it owns block storage, persistence, and disk-write coalescing.
 type cacheWriter struct {
 	dl      *downloader
 	item    *CacheItem
