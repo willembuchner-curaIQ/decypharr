@@ -4,10 +4,7 @@ import (
 	"context"
 	"io"
 	"io/fs"
-	"sync"
 	"sync/atomic"
-
-	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 // StreamingFile is the FUSE file interface for VFS
@@ -15,10 +12,6 @@ type StreamingFile struct {
 	item     *CacheItem
 	fileSize int64
 	closed   atomic.Bool
-
-	directMu     sync.Mutex
-	directOpened bool
-	direct       manager.DirectReader
 }
 
 // NewStreamingFile creates a new streaming file handle. It returns nil when
@@ -63,37 +56,7 @@ func (f *StreamingFile) ReadAtContext(ctx context.Context, p []byte, off int64) 
 		p = p[:readSize]
 	}
 
-	f.directMu.Lock()
-	if f.closed.Load() {
-		f.directMu.Unlock()
-		return 0, fs.ErrClosed
-	}
-	if !f.directOpened {
-		direct, err := f.item.cache.manager.OpenDirect(ctx, f.item.entry, f.item.filename)
-		if err != nil {
-			f.directMu.Unlock()
-			return 0, err
-		}
-		if f.closed.Load() {
-			if direct != nil {
-				_ = direct.Close()
-			}
-			f.directMu.Unlock()
-			return 0, fs.ErrClosed
-		}
-		f.direct = direct
-		f.directOpened = true
-	}
-	src := f.direct
-	f.directMu.Unlock()
-
-	var n int
-	var err error
-	if src != nil {
-		n, err = src.ReadAtContext(ctx, p, off)
-	} else {
-		n, err = f.item.ReadAtContext(ctx, p, off)
-	}
+	n, err := f.item.ReadAtContext(ctx, p, off)
 
 	if n < int(readSize) && err == nil {
 		err = io.EOF
@@ -111,14 +74,6 @@ func (f *StreamingFile) Close() error {
 	if f.closed.Swap(true) {
 		return nil
 	}
-	f.directMu.Lock()
-	direct := f.direct
-	f.direct = nil
-	f.directMu.Unlock()
-	var err error
-	if direct != nil {
-		err = direct.Close()
-	}
 	f.item.Release()
-	return err
+	return nil
 }

@@ -21,7 +21,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/buffer"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/manager"
 	dfsconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -488,19 +487,6 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 	}
 	_logger := c.logger.With().Str("entry", entryName).Str("filename", filename).Logger()
 	log := logger.NewRateLimitedLogger(logger.WithLogger(_logger))
-
-	if manager.SupportsDirectRead(entry) {
-		// No buffer, no downloaders, no metadata: the backend caches for
-		// itself and each handle reads it directly (see StreamingFile).
-		return &CacheItem{
-			cache:    c,
-			key:      key,
-			entry:    entry,
-			filename: filename,
-			info:     ItemInfo{Size: fileSize, ModTime: utils.Now(), ATime: utils.Now()},
-			logger:   log.Rate(key),
-		}, nil
-	}
 
 	itemDir := filepath.Join(c.config.CacheDir, entryName)
 	if err := os.MkdirAll(itemDir, 0o755); err != nil {

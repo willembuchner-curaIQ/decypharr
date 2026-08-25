@@ -466,8 +466,8 @@ type usenetTransport struct {
 	openFile func(ctx context.Context) (DirectReader, error)
 }
 
-// DirectReader is a random-access source that keeps its own byte cache and
-// read-ahead. Consumers must not stage it through a cache of their own.
+// DirectReader is a protocol-native random-access reader. The opener selects
+// whether it owns rewind persistence or sits beneath a downstream cache.
 type DirectReader interface {
 	ReadAtContext(ctx context.Context, p []byte, off int64) (int, error)
 	Prefetch(ctx context.Context, off, length int64)
@@ -542,13 +542,17 @@ func (m *Manager) OpenStreamWithRewindOwner(ctx context.Context, entry *storage.
 	return s, nil
 }
 
-// SupportsDirectRead reports whether a backend can own its read-ahead and
-// rewind storage instead of being staged through the DFS cache.
+// SupportsDirectRead reports whether an entry has a protocol-native
+// random-access reader. It does not imply that a downstream persistent cache
+// should be bypassed; cache owners should use OpenStreamUntrackedForCache.
 func SupportsDirectRead(entry *storage.Entry) bool {
 	return entry != nil && entry.Protocol == config.ProtocolNZB
 }
 
-// OpenDirect returns a per-consumer reader whose application tier owns rewind.
+// OpenDirect opens an application-owned protocol reader without active-stream
+// tracking. It is retained for non-cache consumers that explicitly need native
+// random access. Persistent cache layers should use
+// OpenStreamUntrackedForCache so cache ownership and observability stay intact.
 func (m *Manager) OpenDirect(ctx context.Context, entry *storage.Entry, filename string) (DirectReader, error) {
 	if !SupportsDirectRead(entry) {
 		return nil, nil
@@ -561,10 +565,24 @@ func (m *Manager) OpenDirect(ctx context.Context, entry *storage.Entry, filename
 
 // OpenStreamUntracked opens a session without registering it in the
 // active-streams view. It is for consumers that do their own stream tracking —
-// notably the vfs downloader, where several downloaders share one file and a
-// single registration is kept at the Downloaders level.
+// for example a background sidecar download.
 func (m *Manager) OpenStreamUntracked(ctx context.Context, entry *storage.Entry, filename string, offset int64) (StreamReader, error) {
 	s, _, _, err := m.openSession(ctx, entry, filename, offset, RewindOwnerApplication)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// OpenStreamUntrackedForCache opens an untracked session for a downstream
+// cache. The downstream owns rewind persistence, so protocol transports keep
+// only their active delivery window. DFS uses this to avoid writing every NZB
+// byte into both the Usenet session cache and the persistent DFS cache.
+//
+// The caller is responsible for aggregate stream tracking. DFS tracks once at
+// the shared Downloaders level rather than once per read-ahead worker.
+func (m *Manager) OpenStreamUntrackedForCache(ctx context.Context, entry *storage.Entry, filename string, offset int64) (StreamReader, error) {
+	s, _, _, err := m.openSession(ctx, entry, filename, offset, RewindOwnerDownstream)
 	if err != nil {
 		return nil, err
 	}
@@ -602,10 +620,7 @@ func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filenam
 		}
 		source, debrid = "nzb", ""
 		nzoID := entry.InfoHash
-		retention := usenet.RetentionRewind
-		if owner == RewindOwnerDownstream {
-			retention = usenet.RetentionWindow
-		}
+		retention := retentionForOwner(owner)
 		t = &usenetTransport{
 			size: file.Size,
 			openFile: func(ctx context.Context) (DirectReader, error) {
@@ -630,6 +645,13 @@ func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filenam
 	}
 
 	return newSession(ctx, t, file.Size, offset), source, debrid, nil
+}
+
+func retentionForOwner(owner RewindOwner) usenet.Retention {
+	if owner == RewindOwnerDownstream {
+		return usenet.RetentionWindow
+	}
+	return usenet.RetentionRewind
 }
 
 func sessionBackoff(attempt int) time.Duration {

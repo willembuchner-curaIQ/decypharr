@@ -1232,9 +1232,10 @@ func (dl *downloader) getRange() (start, offset int64) {
 	return dl.start, dl.offset
 }
 
-// ensureSession lazily opens the downloader's session. It is untracked: the
-// Downloaders keeps a single active-stream registration for the file (see
-// ensureStreamTracked), so per-downloader sessions must not register their own.
+// ensureSession lazily opens the downloader's session. It is untracked because
+// Downloaders keeps one active-stream registration for the shared file (see
+// ensureStreamTracked), and it declares DFS as the rewind owner so an NZB is
+// not staged through a second persistent cache underneath this one.
 func (dl *downloader) ensureSession() (manager.StreamReader, error) {
 	dl.mu.Lock()
 	defer dl.mu.Unlock()
@@ -1244,7 +1245,7 @@ func (dl *downloader) ensureSession() (manager.StreamReader, error) {
 	if dl.session != nil {
 		return dl.session, nil
 	}
-	s, err := dl.dls.manager.OpenStreamUntracked(dl.ctx, dl.dls.item.entry, dl.dls.item.filename, dl.offset)
+	s, err := dl.dls.manager.OpenStreamUntrackedForCache(dl.ctx, dl.dls.item.entry, dl.dls.item.filename, dl.offset)
 	if err != nil {
 		return nil, err
 	}

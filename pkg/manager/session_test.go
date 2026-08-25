@@ -17,6 +17,7 @@ import (
 
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/manager/link"
+	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
 func testPattern(n int) []byte {
@@ -458,6 +459,24 @@ func TestUsenetTransportResumesMidStream(t *testing.T) {
 	}
 	if !handles[1].closed.Load() {
 		t.Fatal("live handle was not closed with the session")
+	}
+}
+
+func TestRetentionForOwner(t *testing.T) {
+	tests := []struct {
+		name  string
+		owner RewindOwner
+		want  usenet.Retention
+	}{
+		{name: "application", owner: RewindOwnerApplication, want: usenet.RetentionRewind},
+		{name: "downstream cache", owner: RewindOwnerDownstream, want: usenet.RetentionWindow},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retentionForOwner(test.owner); got != test.want {
+				t.Fatalf("retentionForOwner(%d)=%d, want %d", test.owner, got, test.want)
+			}
+		})
 	}
 }
 

@@ -115,11 +115,8 @@ func (b *benchBackend) GetEntryByName(string, string) (*storage.Entry, error) {
 }
 func (b *benchBackend) TrackStream(*storage.Entry, string, string) string { return "bench" }
 func (b *benchBackend) UntrackStream(string)                              {}
-func (b *benchBackend) OpenDirect(context.Context, *storage.Entry, string) (manager.DirectReader, error) {
-	return nil, nil
-}
 
-func (b *benchBackend) OpenStreamUntracked(ctx context.Context, _ *storage.Entry, _ string, offset int64) (manager.StreamReader, error) {
+func (b *benchBackend) OpenStreamUntrackedForCache(ctx context.Context, _ *storage.Entry, _ string, offset int64) (manager.StreamReader, error) {
 	b.Opens.Add(1)
 	if b.resolved.CompareAndSwap(false, true) {
 		b.Resolves.Add(1)
