@@ -502,9 +502,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	// Decode the incoming config update
-	var newConfig config.Config
-	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&newConfig); err != nil {
+	// Decode the incoming update over the live config so API clients can send
+	// partial documents without clearing every omitted field.
+	currentConfig := config.Get()
+	newConfig, err := mergeConfigUpdate(currentConfig, r.Body)
+	if err != nil {
 		s.logger.Error().Err(err).Msg("Failed to decode config update request")
 		http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
@@ -524,7 +526,6 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Preserve fields that shouldn't be overwritten by frontend
-	currentConfig := config.Get()
 	newConfig.Auth = currentConfig.GetAuth()
 	// The frontend config form doesn't include use_auth or enable_webdav_auth,
 	// so they would be zero-valued (false) in the decoded payload. Preserve
@@ -588,6 +589,26 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	utils.JSONResponse(w, map[string]any{"status": "success", "restarted": restarted}, http.StatusOK)
+}
+
+func mergeConfigUpdate(current *config.Config, update io.Reader) (config.Config, error) {
+	if current == nil {
+		return config.Config{}, fmt.Errorf("current config is unavailable")
+	}
+
+	snapshot, err := json.Marshal(current)
+	if err != nil {
+		return config.Config{}, fmt.Errorf("copy current config: %w", err)
+	}
+
+	var merged config.Config
+	if err := json.Unmarshal(snapshot, &merged); err != nil {
+		return config.Config{}, fmt.Errorf("copy current config: %w", err)
+	}
+	if err := json.ConfigDefault.NewDecoder(update).Decode(&merged); err != nil {
+		return config.Config{}, err
+	}
+	return merged, nil
 }
 
 func (s *Server) handlePreviewVirtualFolder(w http.ResponseWriter, r *http.Request) {
