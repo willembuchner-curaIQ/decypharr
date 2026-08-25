@@ -11,7 +11,7 @@ type Element uint16
 
 func init() {
 	x := uint32(1)
-	for power := 0; power < multiplicativeOrder; power++ {
+	for power := range multiplicativeOrder {
 		element := Element(x)
 		exponent[power] = element
 		logarithm[element] = uint16(power)
