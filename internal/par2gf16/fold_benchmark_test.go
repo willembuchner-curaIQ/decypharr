@@ -21,14 +21,18 @@ func BenchmarkFolder(b *testing.B) {
 				b.Fatal(err)
 			}
 			defer folder.Close()
+			fill := func(index int, buffer []byte) error {
+				copy(buffer, inputs[index])
+				return nil
+			}
+			if err := folder.Fold(fill); err != nil {
+				b.Fatal(err)
+			}
 			b.SetBytes(int64(benchmarkInputs * benchmarkSliceSize * outputs))
 			b.ReportAllocs()
 			b.ResetTimer()
 			for range b.N {
-				if err := folder.Fold(func(index int, buffer []byte) error {
-					copy(buffer, inputs[index])
-					return nil
-				}); err != nil {
+				if err := folder.Fold(fill); err != nil {
 					b.Fatal(err)
 				}
 			}
