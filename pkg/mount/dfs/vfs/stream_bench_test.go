@@ -21,6 +21,12 @@ import (
 // real, and the Downloaders coordinator is real but pre-tracked and never
 // asked to download (callers pre-fill the item or write directly).
 func newBenchItem(tb testing.TB, fileSize int64) (*CacheItem, *Downloaders) {
+	return newBenchItemWindow(tb, fileSize, fileSize+(1<<20))
+}
+
+// newBenchItemWindow sizes the RAM window explicitly: pass more than fileSize
+// to measure reads served from memory, less to force the disk tier.
+func newBenchItemWindow(tb testing.TB, fileSize, window int64) (*CacheItem, *Downloaders) {
 	tb.Helper()
 	dir := tb.TempDir()
 
@@ -28,7 +34,7 @@ func newBenchItem(tb testing.TB, fileSize int64) (*CacheItem, *Downloaders) {
 	tb.Cleanup(func() { _ = pool.Close() })
 
 	buf, err := pool.NewBuffer(buffer.Config{
-		MemorySize: 32 << 20,
+		MemorySize: window,
 		DiskPath:   filepath.Join(dir, "data.bin"),
 		TotalSize:  fileSize,
 	})
@@ -97,6 +103,28 @@ func prefillItem(tb testing.TB, item *CacheItem, fileSize int64) {
 func BenchmarkReadAtContextWarm(b *testing.B) {
 	const fileSize = int64(64 << 20)
 	item, _ := newBenchItem(b, fileSize)
+	prefillItem(b, item, fileSize)
+
+	const readSize = 128 << 10
+	p := make([]byte, readSize)
+	ctx := context.Background()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		off := (int64(i) * readSize) % (fileSize - readSize)
+		if _, err := item.ReadAtContext(ctx, p, off); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkReadAtContextFromDisk is the same read with a RAM window too small
+// to hold the file, so every read falls through to the disk tier — the cost
+// the old write-through design paid on every read.
+func BenchmarkReadAtContextFromDisk(b *testing.B) {
+	const fileSize = int64(64 << 20)
+	item, _ := newBenchItemWindow(b, fileSize, 4<<20)
 	prefillItem(b, item, fileSize)
 
 	const readSize = 128 << 10

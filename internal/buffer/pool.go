@@ -5,29 +5,7 @@ import (
 	"sync/atomic"
 )
 
-// Pool is the buffer service: it owns a RAM budget and a disk limit shared
-// across every Buffer it hands out, plus the eviction policy that enforces
-// them. Instantiate one per workload (e.g. one for DFS, one for usenet) so the
-// two have independent budgets and can't starve each other.
-//
-// Memory (ModeMemory buffers): per-Buffer Config.MemorySize is a ceiling on
-// one stream's working set; the Pool's MemoryBudget caps the *sum* of
-// resident block RAM across all its Buffers, and each Buffer's weighted
-// slice of that budget (see shareFor) is the fair share it may not exceed
-// while the pool is short. A Buffer
-// over its own ceiling evicts inline as it writes; a Buffer over its share
-// is trimmed by the pool's reclaim worker (see reclaimMemory), so memory
-// comes from the streams hoarding it rather than from whichever stream
-// happens to be writing. Either way the lost ranges are reported via
-// OnEvict so the owner can re-fetch.
-//
-// Disk (ModeDisk buffers): the Pool tracks the total on-disk present bytes
-// across its Buffers. When that exceeds DiskLimit a background worker punches
-// holes behind each Buffer's read head (keeping a BackWindow of recent
-// history) until the total is back under the limit. This is what bounds a
-// cache directory even when a single huge file is being streamed and never
-// closed. DiskLimit == 0 disables the disk backstop entirely (usenet relies
-// on its own playback-aware sliding window instead).
+// Pool enforces shared RAM and sparse-disk budgets across its Buffers.
 type Pool struct {
 	name       string
 	memBudget  atomic.Int64 // RAM ceiling across Buffers; 0 = unlimited
@@ -35,7 +13,7 @@ type Pool struct {
 	backWindow int64        // bytes retained behind a read head before punching
 
 	memInUse  atomic.Int64 // sum of resident block RAM across Buffers
-	memDemand atomic.Int64 // sum of MemorySize across ModeMemory Buffers
+	memDemand atomic.Int64 // sum of MemorySize across Buffers
 	diskInUse atomic.Int64 // sum of on-disk present bytes across Buffers
 
 	mu      sync.RWMutex
@@ -118,14 +96,22 @@ func NewPool(cfg PoolConfig) *Pool {
 // NewBuffer creates a Buffer bound to this pool. Its RAM and disk usage count
 // against the pool's budgets.
 func (p *Pool) NewBuffer(cfg Config) (*Buffer, error) {
+	if p.closed.Load() {
+		return nil, ErrClosed
+	}
 	b, err := newBuffer(p, cfg)
 	if err != nil {
 		return nil, err
 	}
 	p.mu.Lock()
+	if p.closed.Load() {
+		p.mu.Unlock()
+		_ = b.Close()
+		return nil, ErrClosed
+	}
 	p.buffers[b] = struct{}{}
 	p.mu.Unlock()
-	if b.cfg.Mode == ModeMemory {
+	if !b.immutableDisk {
 		p.memDemand.Add(b.maxBytes)
 	}
 	return b, nil
@@ -137,7 +123,7 @@ func (p *Pool) remove(b *Buffer) {
 	_, known := p.buffers[b]
 	delete(p.buffers, b)
 	p.mu.Unlock()
-	if known && b.cfg.Mode == ModeMemory {
+	if known && !b.immutableDisk {
 		p.memDemand.Add(-b.maxBytes)
 	}
 }
@@ -193,28 +179,18 @@ func (p *Pool) wouldExceedMemory() bool {
 	return b > 0 && p.memInUse.Load()+int64(blockSize) > b
 }
 
-// shareFor is the RAM one Buffer may hold before it counts as greedy: the
-// budget divided across the live ModeMemory Buffers in proportion to what
-// each asked for. It is the cap that actually enforces MemoryBudget across
-// many concurrent streams — without it every Buffer sizes its window as if
-// it were alone, the sum oversubscribes the pool by the stream count, and
-// the pool sits permanently at its ceiling with every write forcing an
-// eviction.
-//
-// The split is weighted rather than even because the Buffers are not alike:
-// a playing stream asks for tens of MB and a probe reader for a few, so an
-// even split would let a library scan's short-lived probe readers squeeze a
-// player down to their size. A Buffer never gets more than it asked for, nor
-// less than one block. An unlimited budget (0) returns 0, meaning "no share
-// limit".
+// shareFor divides a constrained budget in proportion to each Buffer's ask.
 func (p *Pool) shareFor(b *Buffer) int64 {
 	budget := p.memBudget.Load()
-	if budget <= 0 || b.cfg.Mode != ModeMemory {
+	if budget <= 0 {
 		return 0
 	}
 	demand := p.memDemand.Load()
 	if demand <= b.maxBytes {
-		return b.maxBytes // sole claimant, or accounting not yet settled
+		// Sole claimant (or accounting not yet settled): it may have the whole
+		// budget, but not more than it — without the clamp one stream asking
+		// for more than the budget was never trimmed at all.
+		return min(b.maxBytes, budget)
 	}
 	share := int64(float64(budget) * (float64(b.maxBytes) / float64(demand)))
 	return min(max(share, int64(blockSize)), b.maxBytes)

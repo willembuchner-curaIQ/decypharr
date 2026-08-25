@@ -39,8 +39,8 @@ func (u UsenetProvider) ID() string {
 // Usenet configuration for usenet streaming and downloading
 type Usenet struct {
 	Providers []UsenetProvider `json:"providers,omitempty"` // Usenet provider configurations
-	// Per-stream/file configuration
-	MaxConnections           int `json:"max_connections,omitempty"`            // Maximum concurrent connections per streaming file (default: 15)
+	// Streaming and processing concurrency.
+	MaxConnections           int `json:"max_connections,omitempty"`            // Provider-wide streaming fetch limit (default: 15)
 	ProcessingMaxConnections int `json:"processing_max_connections,omitempty"` // Maximum concurrent connections per file for parsing and NZB downloads (default: max_connections)
 	// Read-ahead configuration
 	ReadAhead string `json:"read_ahead,omitempty"` // Bytes to prefetch ahead of streaming reads e.g. "16MB", "32MB" (default: 16MB)
@@ -65,20 +65,12 @@ type Usenet struct {
 	ImportAvailabilitySamplePercent int    `json:"import_availability_sample_percent,omitempty"` // Percentage of segments to check when adding an NZB (1-100, default: 1)
 	DiskBufferPath                  string `json:"disk_buffer_path,omitempty"`                   // Path for disk buffer storage (empty = main_path/usenet/streams)
 
-	// BufferToDisk writes each stream's cached window to the disk buffer
-	// instead of holding it in RAM. The default (false) keeps the window
-	// purely in memory — segment data never touches disk: RAM is capped per
-	// stream (sized from read_ahead) and in aggregate by buffer_memory, and
-	// when a budget runs out the oldest cached segments are dropped and
-	// re-downloaded on demand. Set true to trade RAM for disk I/O on
-	// memory-constrained hosts.
+	// BufferToDisk retains rewind for legacy callers that do not declare which
+	// layer owns it. DFS and WebDAV paths declare ownership explicitly.
 	BufferToDisk bool `json:"buffer_to_disk,omitempty"`
 
-	// BufferMemory caps the total RAM the streaming buffers hold in block
-	// cache across all open streams, e.g. "1GB". Ignored when
-	// buffer_to_disk is set: the disk-backed mode does not cache blocks in
-	// RAM (the kernel page cache serves warm re-reads). Empty = default
-	// (512MB); "0" disables the cap.
+	// BufferMemory caps resident Usenet extents across open window-mode streams.
+	// Empty defaults to 512MB; "0" disables the cap.
 	BufferMemory string `json:"buffer_memory,omitempty"`
 }
 
@@ -100,9 +92,9 @@ func (u Usenet) IsZero() bool {
 }
 
 func (c *Config) updateUsenetConfig() {
-	// Per-stream configuration defaults
+	// Provider-wide streaming scheduler width.
 	if c.Usenet.MaxConnections == 0 {
-		c.Usenet.MaxConnections = 15 // Default: 15 connections per file
+		c.Usenet.MaxConnections = 15
 	}
 	if c.Usenet.ProcessingMaxConnections <= 0 {
 		c.Usenet.ProcessingMaxConnections = c.Usenet.MaxConnections

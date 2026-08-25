@@ -3,6 +3,7 @@ package buffer
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -50,11 +51,14 @@ func newTestPool(t testing.TB, cfg PoolConfig) *Pool {
 	return p
 }
 
+// tempDisk returns a fresh backing-file path, enabling the disk tier.
+func tempDisk(t testing.TB) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "buf.bin")
+}
+
 func newTestBuffer(t testing.TB, p *Pool, cfg Config) *Buffer {
 	t.Helper()
-	if cfg.Mode == ModeDisk && cfg.DiskPath == "" {
-		cfg.DiskPath = filepath.Join(t.TempDir(), "buf.bin")
-	}
 	b, err := p.NewBuffer(cfg)
 	if err != nil {
 		t.Fatalf("NewBuffer: %v", err)
@@ -63,11 +67,15 @@ func newTestBuffer(t testing.TB, p *Pool, cfg Config) *Buffer {
 	return b
 }
 
-// bothModes runs f once per mode with a mode-appropriate base Config. Shared
-// contracts (roundtrip, presence, discard) must hold identically in both.
+// bothModes runs f once per tier with a base Config. Shared contracts
+// (roundtrip, presence, discard) must hold identically with and without a disk
+// tier. The disk variant gets a small RAM window on purpose, so most of the
+// data has to survive a flush-on-evict round trip.
 func bothModes(t *testing.T, f func(t *testing.T, cfg Config)) {
-	t.Run("disk", func(t *testing.T) { f(t, Config{Mode: ModeDisk, TotalSize: 64 << 20}) })
-	t.Run("memory", func(t *testing.T) { f(t, Config{Mode: ModeMemory, MemorySize: 64 << 20}) })
+	t.Run("disk", func(t *testing.T) {
+		f(t, Config{DiskPath: tempDisk(t), TotalSize: 64 << 20, MemorySize: 8 << 20})
+	})
+	t.Run("memory", func(t *testing.T) { f(t, Config{MemorySize: 64 << 20}) })
 }
 
 func TestWriteReadRoundtrip(t *testing.T) {
@@ -180,12 +188,12 @@ func TestDiscardMakesRangeNotPresent(t *testing.T) {
 	})
 }
 
-// TestDiskModeVisibility asserts the WriteAt→ReadAt contract in disk mode:
-// as soon as WriteAt returns, the exact bytes are readable — every write is
-// a pwrite, every read a pread, and no RAM blocks are ever admitted.
-func TestDiskModeVisibility(t *testing.T) {
+// TestDiskTierVisibility asserts the WriteAt→ReadAt contract with a disk tier
+// present: the exact bytes are readable as soon as WriteAt returns, and while
+// the data still fits the RAM window the file is never touched.
+func TestDiskTierVisibility(t *testing.T) {
 	p := newTestPool(t, PoolConfig{})
-	b := newTestBuffer(t, p, Config{Mode: ModeDisk, TotalSize: 16 << 20})
+	b := newTestBuffer(t, p, Config{DiskPath: tempDisk(t), TotalSize: 16 << 20})
 
 	const chunk = 256 << 10
 	for off := int64(0); off < 8<<20; off += chunk {
@@ -201,11 +209,11 @@ func TestDiskModeVisibility(t *testing.T) {
 		checkPattern(t, got, off)
 	}
 	st := b.Stats()
-	if st.DiskWrites == 0 {
-		t.Fatalf("expected disk writes, stats=%+v", st)
+	if st.DiskWrites != 0 || st.Misses != 0 {
+		t.Fatalf("touched disk while inside the RAM window: %+v", st)
 	}
-	if st.BlocksInRAM != 0 || st.BytesInRAM != 0 {
-		t.Fatalf("disk mode admitted RAM blocks: %+v", st)
+	if st.BytesInRAM != 8<<20 {
+		t.Fatalf("expected the writes to be resident: %+v", st)
 	}
 	// Whole-file verification after the fact.
 	whole := make([]byte, 8<<20)
@@ -215,29 +223,25 @@ func TestDiskModeVisibility(t *testing.T) {
 	checkPattern(t, whole, 0)
 }
 
-// TestDiskPersistsAcrossReopen: disk-mode data survives Close and reopens
-// via InitialRanges (which also seeds the lock-free fast-read states).
+// TestDiskPersistsAcrossReopen: disk data survives Close and InitialRanges.
 func TestDiskPersistsAcrossReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "buf.bin")
 	p := newTestPool(t, PoolConfig{})
-	b := newTestBuffer(t, p, Config{Mode: ModeDisk, DiskPath: path, TotalSize: 8 << 20})
+	b := newTestBuffer(t, p, Config{DiskPath: path, TotalSize: 8 << 20})
 
 	data := make([]byte, 3<<20)
 	fillPattern(data, 0)
 	if _, err := b.WriteAt(data, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Sync(); err != nil {
-		t.Fatal(err)
-	}
-	present := b.Present(0, 8<<20)
 	if err := b.Close(); err != nil {
 		t.Fatal(err)
 	}
+	present := b.PersistedRanges(0, 8<<20)
 
 	seed := make([]Range, 0, len(present))
 	seed = append(seed, present...)
-	b2 := newTestBuffer(t, p, Config{Mode: ModeDisk, DiskPath: path, TotalSize: 8 << 20, InitialRanges: seed})
+	b2 := newTestBuffer(t, p, Config{DiskPath: path, TotalSize: 8 << 20, InitialRanges: seed})
 	missesBefore := b2.Stats().Misses
 	got := make([]byte, 3<<20)
 	if _, err := b2.ReadAt(got, 0); err != nil {
@@ -249,17 +253,15 @@ func TestDiskPersistsAcrossReopen(t *testing.T) {
 	}
 }
 
-// TestMemoryModeDropVictims: passing the RAM budget drops blocks chosen
-// against the read head — furthest behind it first, else deepest prefetch
-// ahead — never the data the consumer is about to read. OnEvict reports the
-// lost ranges, and no file is ever created (DiskPath is ignored).
-func TestMemoryModeDropVictims(t *testing.T) {
+// TestDropVictimsWithoutDiskTier: with no file behind it, passing the RAM
+// budget drops blocks chosen against the read head — furthest behind it first,
+// else deepest prefetch ahead — never the data the consumer is about to read.
+// OnEvict reports the lost ranges and no file is ever created.
+func TestDropVictimsWithoutDiskTier(t *testing.T) {
 	newMemBuffer := func(t *testing.T, evicted *[]Range) (*Buffer, string) {
 		p := newTestPool(t, PoolConfig{})
 		path := filepath.Join(t.TempDir(), "buf.bin")
 		b := newTestBuffer(t, p, Config{
-			Mode:       ModeMemory,
-			DiskPath:   path, // ignored: memory mode owns no file
 			MemorySize: 4 << 20,
 			OnEvict:    func(off, length int64) { *evicted = append(*evicted, Range{off, length}) },
 		})
@@ -305,9 +307,6 @@ func TestMemoryModeDropVictims(t *testing.T) {
 			t.Fatalf("OnEvict reported %d bytes, want %d", reported, int64(4<<20))
 		}
 
-		if err := b.Sync(); err != nil {
-			t.Fatal(err)
-		}
 		if err := b.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -355,8 +354,8 @@ func TestMemoryModeDropVictims(t *testing.T) {
 // own blocks rather than growing the pool past its budget.
 func TestMemoryModePoolPressureTrimsGreediestBuffer(t *testing.T) {
 	p := newTestPool(t, PoolConfig{MemoryBudget: 4 << 20})
-	a := newTestBuffer(t, p, Config{Mode: ModeMemory, MemorySize: 64 << 20})
-	bb := newTestBuffer(t, p, Config{Mode: ModeMemory, MemorySize: 64 << 20})
+	a := newTestBuffer(t, p, Config{MemorySize: 64 << 20})
+	bb := newTestBuffer(t, p, Config{MemorySize: 64 << 20})
 
 	data := make([]byte, 4<<20)
 	fillPattern(data, 0)
@@ -399,14 +398,11 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// TestDiscardSubBlockFreesFullyTrimmedBlocks: discards smaller than a block
-// must free a resident block once they cumulatively cover it — the usenet
-// sweeper discards ~750KB segments. A block pinned by partial trims would
-// hold dead RAM until Close and force the drop path to evict live data
-// instead.
+// TestDiscardSubBlockFreesFullyTrimmedBlocks verifies that cumulative partial
+// discards eventually release a fully empty resident block.
 func TestDiscardSubBlockFreesFullyTrimmedBlocks(t *testing.T) {
 	p := newTestPool(t, PoolConfig{})
-	b := newTestBuffer(t, p, Config{Mode: ModeMemory, MemorySize: 8 << 20})
+	b := newTestBuffer(t, p, Config{MemorySize: 8 << 20})
 
 	data := make([]byte, 4<<20)
 	fillPattern(data, 0)
@@ -459,7 +455,7 @@ func TestDiscardSubBlockFreesFullyTrimmedBlocks(t *testing.T) {
 
 func TestClosedErrors(t *testing.T) {
 	p := newTestPool(t, PoolConfig{})
-	b := newTestBuffer(t, p, Config{Mode: ModeDisk, TotalSize: 1 << 20})
+	b := newTestBuffer(t, p, Config{DiskPath: tempDisk(t), TotalSize: 1 << 20})
 	if err := b.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -474,6 +470,28 @@ func TestClosedErrors(t *testing.T) {
 	}
 	if err := b.Close(); !errors.Is(err, ErrClosed) {
 		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestRangeAtMaximumOffset(t *testing.T) {
+	p := newTestPool(t, PoolConfig{})
+	b := newTestBuffer(t, p, Config{})
+	off := int64(math.MaxInt64 - 1)
+	if _, err := b.WriteAt([]byte{42}, off); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 1)
+	if _, err := b.ReadAt(got, off); err != nil {
+		t.Fatal(err)
+	}
+	if got[0] != 42 {
+		t.Fatalf("read %d, want 42", got[0])
+	}
+	if err := b.Discard(off, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.ReadAt(got, off); !errors.Is(err, ErrNotPresent) {
+		t.Fatalf("read discarded maximum offset: %v", err)
 	}
 }
 
@@ -492,7 +510,7 @@ func TestConcurrentStreamWorkload(t *testing.T) {
 	)
 	bothModes(t, func(t *testing.T, cfg Config) {
 		cfg.TotalSize = regions * regionSize
-		if cfg.Mode == ModeMemory {
+		if cfg.DiskPath == "" {
 			cfg.MemorySize = regions * regionSize
 		}
 		p := newTestPool(t, PoolConfig{})
@@ -581,8 +599,11 @@ func TestPoolDiskBackstopPunchesBehindHead(t *testing.T) {
 	)
 	p := newTestPool(t, PoolConfig{DiskLimit: 8 << 20, BackWindow: 2 << 20})
 	b := newTestBuffer(t, p, Config{
-		Mode:      ModeDisk,
+		DiskPath:  tempDisk(t),
 		TotalSize: 64 << 20,
+		// Small window so blocks reach the file and the backstop has
+		// something to reclaim.
+		MemorySize: 4 << 20,
 		OnEvict: func(off, length int64) {
 			evictMu.Lock()
 			evicted = append(evicted, Range{Off: off, Size: length})
@@ -625,5 +646,22 @@ func TestPoolDiskBackstopPunchesBehindHead(t *testing.T) {
 	// Far behind the head the bytes are gone.
 	if _, err := b.ReadAt(got, 0); !errors.Is(err, ErrNotPresent) {
 		t.Fatalf("read far behind head: err=%v, want ErrNotPresent", err)
+	}
+}
+
+// TestSoleStreamRespectsPoolBudget: one Buffer asking for more than the pool
+// budget must still be held to it. The sole-claimant branch of shareFor used
+// to hand back the full ask, so a single stream could never be trimmed and the
+// configured memory cap did nothing until a second stream opened.
+func TestSoleStreamRespectsPoolBudget(t *testing.T) {
+	const budget = 4 << 20
+	p := newTestPool(t, PoolConfig{MemoryBudget: budget})
+	b := newTestBuffer(t, p, Config{MemorySize: 16 << 20})
+
+	if _, err := b.WriteAt(make([]byte, 16<<20), 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Stats().MemoryInUse; got > budget {
+		t.Fatalf("single stream held %d bytes against a %d budget", got, budget)
 	}
 }

@@ -10,11 +10,12 @@ import (
 // usenet owns its streaming-buffer pool here rather than the buffer package
 // owning a "usenet" singleton — the buffer package stays generic. The pool is
 // created once with the configured usenet RAM budget and shared across every
-// SegmentCache. Disk is bounded per-stream by the sliding-window sweep
-// (see SegmentCache.sweepWindow), so the pool runs no disk backstop.
+// SegmentCache. Each disk-backed cache enforces its own disk cap.
 var (
 	bufPoolOnce sync.Once
 	bufPool     *buffer.Pool
+	extentOnce  sync.Once
+	extents     *extentPool
 )
 
 func usenetBufferPool() *buffer.Pool {
@@ -27,11 +28,9 @@ func usenetBufferPool() *buffer.Pool {
 	return bufPool
 }
 
-// poolMemoryPressured reports whether the shared pool is at ≥7/8 of its RAM
-// budget — the signal for memory-mode sweeps to tighten their back-windows
-// (see sweepWindow) so trailing history is given back before the buffers
-// must drop live blocks. Always false with an unlimited budget.
-func poolMemoryPressured() bool {
-	st := usenetBufferPool().Stats()
-	return st.MemoryBudget > 0 && st.MemoryInUse >= st.MemoryBudget-st.MemoryBudget/8
+func usenetExtentPool() *extentPool {
+	extentOnce.Do(func() {
+		extents = newExtentPool(config.Get().Usenet.BufferMemoryBytes())
+	})
+	return extents
 }

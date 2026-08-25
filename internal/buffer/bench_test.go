@@ -51,14 +51,14 @@ func reportPathStats(b *testing.B, buf *Buffer) {
 //   - memory: all data lives in resident blocks until Discard frees it;
 //     no file exists
 func BenchmarkStreamSequential(b *testing.B) {
-	b.Run("disk", func(b *testing.B) { benchStreamSequential(b, Config{Mode: ModeDisk}) })
-	b.Run("memory", func(b *testing.B) { benchStreamSequential(b, Config{Mode: ModeMemory, MemorySize: benchMemBudget}) })
+	b.Run("disk", func(b *testing.B) { benchStreamSequential(b, Config{DiskPath: tempDisk(b)}) })
+	b.Run("memory", func(b *testing.B) { benchStreamSequential(b, Config{MemorySize: benchMemBudget}) })
 }
 
 func benchStreamSequential(b *testing.B, cfg Config) {
 	p := NewPool(PoolConfig{Name: "bench"})
 	defer p.Close()
-	if cfg.Mode == ModeDisk {
+	if cfg.DiskPath != "" {
 		cfg.DiskPath = filepath.Join(b.TempDir(), "buf.bin")
 		cfg.TotalSize = 1 << 40 // sparse; real usage bounded by the discard window
 	}
@@ -104,14 +104,14 @@ func benchStreamSequential(b *testing.B, cfg Config) {
 // goroutines hammer random already-written offsets. Reports reader p50/p99/max
 // latency — the number the under-lock flush/mmap/pread work inflates.
 func BenchmarkStreamContendedReads(b *testing.B) {
-	b.Run("disk", func(b *testing.B) { benchStreamContendedReads(b, Config{Mode: ModeDisk}) })
-	b.Run("memory", func(b *testing.B) { benchStreamContendedReads(b, Config{Mode: ModeMemory, MemorySize: benchMemBudget}) })
+	b.Run("disk", func(b *testing.B) { benchStreamContendedReads(b, Config{DiskPath: tempDisk(b)}) })
+	b.Run("memory", func(b *testing.B) { benchStreamContendedReads(b, Config{MemorySize: benchMemBudget}) })
 }
 
 func benchStreamContendedReads(b *testing.B, cfg Config) {
 	p := NewPool(PoolConfig{Name: "bench"})
 	defer p.Close()
-	if cfg.Mode == ModeDisk {
+	if cfg.DiskPath != "" {
 		cfg.DiskPath = filepath.Join(b.TempDir(), "buf.bin")
 		cfg.TotalSize = 1 << 40
 	}
@@ -204,8 +204,7 @@ func benchStreamContendedReads(b *testing.B, cfg Config) {
 	}
 }
 
-// BenchmarkReadWarmDisk: pure lock-free fast-path reads (reopened buffer,
-// everything on disk, no resident blocks). Baseline for read-path overhead.
+// BenchmarkReadWarmDisk measures reopened, non-resident reads.
 func BenchmarkReadWarmDisk(b *testing.B) {
 	path := filepath.Join(b.TempDir(), "buf.bin")
 	p := NewPool(PoolConfig{Name: "bench"})
@@ -223,9 +222,6 @@ func BenchmarkReadWarmDisk(b *testing.B) {
 			if _, err := w.WriteAt(chunk, off); err != nil {
 				b.Fatal(err)
 			}
-		}
-		if err := w.Sync(); err != nil {
-			b.Fatal(err)
 		}
 		if err := w.Close(); err != nil {
 			b.Fatal(err)
@@ -258,17 +254,13 @@ func BenchmarkReadWarmDisk(b *testing.B) {
 	})
 }
 
-// BenchmarkReadWarmRAM: the resident twin of BenchmarkReadWarmDisk — every
-// block is in the memory-mode cache, so ReadAt takes the RLock'd memcpy path
-// instead of the lock-free pread. Isolates the read-path cost of the two
-// tiers without the streaming machinery around it.
+// BenchmarkReadWarmRAM measures the resident counterpart to ReadWarmDisk.
 func BenchmarkReadWarmRAM(b *testing.B) {
 	p := NewPool(PoolConfig{Name: "bench"})
 	defer p.Close()
 
 	const size = int64(64 << 20)
 	buf, err := p.NewBuffer(Config{
-		Mode:       ModeMemory,
 		MemorySize: 2 * size,
 	})
 	if err != nil {

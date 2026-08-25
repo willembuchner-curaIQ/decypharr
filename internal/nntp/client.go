@@ -1146,7 +1146,7 @@ func (c *Client) createConnection(ctx context.Context, provider config.UsenetPro
 	}
 	// bodyReader follows conn.reader, so this stays valid across the
 	// STARTTLS reader swap.
-	conn.bodyDec = nntpyenc.NewBodyDecoder(&bodyReader{c: conn}, getBodyBuf)
+	conn.bodyDec = nntpyenc.NewBodyDecoder(&bodyReader{c: conn}, conn.nextBodyBuffer)
 
 	// Set deadline for handshake (greeting + auth)
 	// If the server doesn't respond quickly during setup, we should abort.

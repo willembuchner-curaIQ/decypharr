@@ -51,8 +51,26 @@ func newBodyTestConn(t *testing.T) (*Connection, net.Conn) {
 		reader: bufio.NewReaderSize(client, 128*1024),
 		writer: bufio.NewWriterSize(client, 4*1024),
 	}
-	c.bodyDec = nntpyenc.NewBodyDecoder(&bodyReader{c: c}, getBodyBuf)
+	c.bodyDec = nntpyenc.NewBodyDecoder(&bodyReader{c: c}, c.nextBodyBuffer)
 	return c, server
+}
+
+func TestDecodeBodyIntoUsesCallerStorage(t *testing.T) {
+	c, server := newBodyTestConn(t)
+	payload := testPayload(64 * 1024)
+	serveResponses(t, server, "222 0 <a@b> body\r\n"+encodeBody(payload)+".\r\n")
+
+	dst := make([]byte, 0, DecodedBodyCapacity(int64(len(payload))))
+	got, err := c.DecodeBodyInto("<a@b>", dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("payload corrupted")
+	}
+	if &got[0] != &dst[:1][0] {
+		t.Fatal("decoder replaced caller storage")
+	}
 }
 
 // serveResponses answers each incoming command line with the next canned

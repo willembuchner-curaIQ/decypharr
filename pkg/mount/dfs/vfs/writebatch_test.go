@@ -208,16 +208,16 @@ func TestWaiterTickerRescue(t *testing.T) {
 
 	// Make the range present outside any cacheWriter (as another downloader
 	// or a reopen would).
-	item.metaMu.Lock()
-	item.info.Rs.Insert(wr)
-	item.metaMu.Unlock()
+	markCached(t, item.buf, wr)
 
 	select {
 	case err := <-errCh:
 		if err != nil {
 			t.Fatalf("waiter failed: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	// Generous: this waits on a 1s wall-clock ticker, which the race detector
+	// and a loaded machine can delay well past its nominal period.
+	case <-time.After(20 * time.Second):
 		t.Fatal("ticker never rescued the waiter")
 	}
 }

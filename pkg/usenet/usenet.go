@@ -231,27 +231,43 @@ func (r *contextSectionReader) Read(p []byte) (int, error) {
 
 type Usenet struct {
 	nntp                     *nntp.Client
+	fetchScheduler           *reader.FetchScheduler
 	logger                   zerolog.Logger
 	metadataDir              string
 	nzbStorage               *NZBStorage // File-based NZB metadata storage
-	maxConnections           int         // Connections allocated per streaming file
+	maxConnections           int         // Provider-wide streaming scheduler width
 	processingMaxConnections int         // Connections allocated per file for parsing and NZB downloads
 	prefetchSize             int64       // Streaming prefetch size in bytes
 	failedFiles              *xsync.Map[string, error]
+	cleanupStop              chan struct{}
+	cleanupWg                sync.WaitGroup
+	closeOnce                sync.Once
 
 	fs *xsync.Map[string, *fsEntry]
 }
 
-// fsKey builds a cache key for fs map entries efficiently.
-// Uses direct byte slice manipulation to avoid strings.Builder overhead.
+type Retention = reader.Retention
+
+const (
+	RetentionWindow = reader.RetentionWindow
+	RetentionRewind = reader.RetentionRewind
+)
+
+// fsKey identifies a file independently of its retention tier.
 func fsKey(nzoID, filename string) string {
-	// Single allocation: nzoID + "::" + filename
 	buf := make([]byte, len(nzoID)+2+len(filename))
 	n := copy(buf, nzoID)
 	buf[n] = ':'
 	buf[n+1] = ':'
 	copy(buf[n+2:], filename)
 	return string(buf)
+}
+
+func configuredRetention() Retention {
+	if config.Get().Usenet.BufferToDisk {
+		return RetentionRewind
+	}
+	return RetentionWindow
 }
 
 // New creates a new usenet instance
@@ -289,6 +305,30 @@ func New() (*Usenet, error) {
 		return nil, err
 	}
 
+	// Rewind files are session-scoped; clear any left by an interrupted run.
+	streamsDir := cfg.Usenet.DiskBufferPath
+	if strings.TrimSpace(streamsDir) == "" {
+		_ = client.Close()
+		return nil, fmt.Errorf("Usenet stream cache path is empty")
+	}
+	if err := os.MkdirAll(streamsDir, 0o755); err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("create Usenet stream cache: %w", err)
+	}
+	staleEntries, err := os.ReadDir(streamsDir)
+	if err != nil {
+		_ = client.Close()
+		return nil, fmt.Errorf("read Usenet stream cache: %w", err)
+	}
+	for _, entry := range staleEntries {
+		if strings.HasPrefix(entry.Name(), "cache-") {
+			if err := os.RemoveAll(filepath.Join(streamsDir, entry.Name())); err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("clear stale Usenet stream cache %q: %w", entry.Name(), err)
+			}
+		}
+	}
+
 	maxConns := usenetConfig.MaxConnections
 	if maxConns <= 0 {
 		maxConns = 10
@@ -306,6 +346,7 @@ func New() (*Usenet, error) {
 	u := &Usenet{
 		nzbStorage:               nzbStorage,
 		nntp:                     client,
+		fetchScheduler:           reader.NewFetchScheduler(maxConns),
 		logger:                   _logger,
 		metadataDir:              metadataDir,
 		maxConnections:           maxConns,
@@ -313,30 +354,23 @@ func New() (*Usenet, error) {
 		prefetchSize:             prefetchSize,
 		fs:                       xsync.NewMap[string, *fsEntry](),
 		failedFiles:              xsync.NewMap[string, error](),
+		cleanupStop:              make(chan struct{}),
 	}
-
-	// clean streams dir
-	u.initStreamsDir(cfg.Usenet.DiskBufferPath)
 
 	// Start background cleanup for idle sessions
-	go u.cleanupIdleFS()
+	u.cleanupWg.Add(1)
+	go func() {
+		defer u.cleanupWg.Done()
+		u.cleanupIdleFS()
+	}()
 
 	return u, nil
-}
-
-func (u *Usenet) initStreamsDir(streamsDir string) {
-	if err := os.RemoveAll(streamsDir); err != nil && !os.IsNotExist(err) {
-		return
-	}
-	if err := os.MkdirAll(streamsDir, 0755); err != nil {
-		return
-	}
 }
 
 // createEntry builds a standalone fs entry for one file. prefetchSize sets the
 // reader's read-ahead window; pass 0 for one-shot reads (head verification) so
 // a single small read doesn't queue a full window of article downloads.
-func (u *Usenet) createEntry(file *storage.NZBFile, prefetchSize int64) (*fsEntry, error) {
+func (u *Usenet) createEntry(file *storage.NZBFile, prefetchSize int64, retention Retention) (*fsEntry, error) {
 	volumes := GetFileVolumes(file)
 	if len(volumes) == 0 {
 		return nil, fmt.Errorf("no volumes available for file %s", file.Name)
@@ -344,7 +378,16 @@ func (u *Usenet) createEntry(file *storage.NZBFile, prefetchSize int64) (*fsEntr
 
 	fsCtx := context.Background()
 
-	usenetFS, err := fs.NewFS(fsCtx, u.nntp, u.maxConnections, prefetchSize, volumes, u.logger)
+	usenetFS, err := fs.NewFS(
+		fsCtx,
+		u.nntp,
+		u.maxConnections,
+		prefetchSize,
+		volumes,
+		u.logger,
+		fs.WithRetention(retention),
+		fs.WithFetchScheduler(u.fetchScheduler),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
@@ -356,8 +399,12 @@ func (u *Usenet) createEntry(file *storage.NZBFile, prefetchSize int64) (*fsEntr
 }
 
 // getOrCreateEntry returns the fsEntry and its cache key to avoid redundant key computation.
-func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string) (*fsEntry, string, error) {
-	key := fsKey(nzoID, filename)
+func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string, retention Retention) (*fsEntry, string, error) {
+	baseKey := fsKey(nzoID, filename)
+	key := baseKey + "::window"
+	if retention == RetentionRewind {
+		key = baseKey + "::rewind"
+	}
 
 	// Fast path: entry already exists and isn't being torn down. acquire() (a
 	// CAS, not a blind Add) is what closes the race against cleanupIdleFS:
@@ -379,7 +426,7 @@ func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string) (
 		return nil, key, err
 	}
 
-	newEntry, err := u.createEntry(file, u.prefetchSize)
+	newEntry, err := u.createEntry(file, u.prefetchSize, retention)
 	if err != nil {
 		return nil, key, err
 	}
@@ -429,7 +476,12 @@ func (u *Usenet) cleanupIdleFS() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
+	for {
+		select {
+		case <-u.cleanupStop:
+			return
+		case <-ticker.C:
+		}
 		now := utils.NowUnix()
 
 		u.fs.Range(func(key string, entry *fsEntry) bool {
@@ -691,27 +743,39 @@ func (u *Usenet) Stop() {
 
 // Close closes all usenet resources including NNTP connections
 func (u *Usenet) Close() error {
-	u.logger.Info().Msg("Closing Usenet NNTP client")
+	var closeErr error
+	u.closeOnce.Do(func() {
+		u.logger.Info().Msg("Closing Usenet NNTP client")
+		close(u.cleanupStop)
+		u.cleanupWg.Wait()
 
-	// Close NNTP client FIRST to force-close all active connections.
-	// This unblocks any in-flight StreamBody/TCP reads in prefetch workers,
-	// allowing SegmentFetcher.Close() (prefetchWg.Wait()) to complete without hanging.
-	if u.nntp != nil {
-		if err := u.nntp.Close(); err != nil {
-			u.logger.Warn().Err(err).Msg("Failed to close NNTP client")
+		if u.nntp != nil {
+			if err := u.nntp.Close(); err != nil {
+				closeErr = err
+				u.logger.Warn().Err(err).Msg("Failed to close NNTP client")
+			}
 		}
-	}
 
-	// Cleanup all active FS entries (fetcher.Close() now completes quickly
-	// because connections were already force-closed above)
-	u.fs.Range(func(key string, entry *fsEntry) bool {
-		entry.cleanup()
-		return true
+		entries := make([]*fsEntry, 0, u.fs.Size())
+		u.fs.Range(func(key string, entry *fsEntry) bool {
+			entries = append(entries, entry)
+			return true
+		})
+		u.fs.Clear()
+		var cleanup sync.WaitGroup
+		for _, entry := range entries {
+			cleanup.Add(1)
+			go func() {
+				defer cleanup.Done()
+				entry.cleanup()
+			}()
+		}
+		cleanup.Wait()
+		u.fetchScheduler.Close()
+
+		u.logger.Info().Msg("Usenet closed")
 	})
-	u.fs.Clear()
-
-	u.logger.Info().Msg("Usenet closed")
-	return nil
+	return closeErr
 }
 
 func (u *Usenet) getFile(nzoID, filename string) (*storage.NZBFile, error) {
@@ -774,19 +838,24 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 // refcount for its lifetime (blocking idle teardown) and releases it on
 // Close.
 type FileHandle struct {
-	u      *Usenet
-	key    string
-	entry  *fsEntry
-	cursor reader.ReadCursor
-	size   int64
-	closed atomic.Bool
+	u          *Usenet
+	entryKey   string
+	failureKey string
+	entry      *fsEntry
+	cursor     reader.ReadCursor
+	size       int64
+	closed     atomic.Bool
 }
 
 // OpenFile opens a pull-based handle for one file of an NZB. The returned
 // handle must be Closed; it pins the underlying fs entry (and its reader)
 // while open.
 func (u *Usenet) OpenFile(ctx context.Context, nzoID, filename string) (*FileHandle, error) {
-	entry, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	return u.OpenFileWithRetention(ctx, nzoID, filename, configuredRetention())
+}
+
+func (u *Usenet) OpenFileWithRetention(ctx context.Context, nzoID, filename string, retention Retention) (*FileHandle, error) {
+	entry, key, err := u.getOrCreateEntry(ctx, nzoID, filename, retention)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get or create file system: %w", err)
 	}
@@ -796,11 +865,12 @@ func (u *Usenet) OpenFile(ctx context.Context, nzoID, filename string) (*FileHan
 		return nil, fmt.Errorf("failed to get reader: %w", err)
 	}
 	return &FileHandle{
-		u:      u,
-		key:    key,
-		entry:  entry,
-		cursor: readerAt.OpenCursor(),
-		size:   size,
+		u:          u,
+		entryKey:   key,
+		failureKey: fsKey(nzoID, filename),
+		entry:      entry,
+		cursor:     readerAt.OpenCursor(),
+		size:       size,
 	}, nil
 }
 
@@ -819,7 +889,7 @@ func (h *FileHandle) ReadAtContext(ctx context.Context, p []byte, off int64) (in
 		return n, ctx.Err()
 	}
 	if err != nil && nntp.IsArticleNotFoundError(err) {
-		h.u.failedFiles.Store(h.key, err)
+		h.u.failedFiles.Store(h.failureKey, err)
 		return n, customerror.NewArticleNotFoundError(err)
 	}
 	return n, err
@@ -842,7 +912,7 @@ func (h *FileHandle) Close() error {
 		return nil
 	}
 	h.cursor.Close()
-	h.u.releaseFS(h.key)
+	h.u.releaseFS(h.entryKey)
 	return nil
 }
 
@@ -857,7 +927,7 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 
 	// Use getOrCreateEntry to get both entry and key in one call,
 	// avoiding redundant key computation in releaseFS.
-	ufsEntry, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	ufsEntry, key, err := u.getOrCreateEntry(ctx, nzoID, filename, configuredRetention())
 	if err != nil {
 		return fmt.Errorf("failed to get or create file system: %w", err)
 	}
@@ -921,7 +991,7 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 
 	// Mark file as failed if article not found (permanent error)
 	if err != nil && nntp.IsArticleNotFoundError(err) {
-		u.failedFiles.Store(key, err) // Reuse pre-computed key
+		u.failedFiles.Store(fsKey(nzoID, filename), err)
 		// Wrap error to mark as permanent
 		return customerror.NewArticleNotFoundError(err)
 	}
@@ -1018,7 +1088,7 @@ func (u *Usenet) Touch(ctx context.Context, nzoID, filename string) error {
 // Uses the shared entry/reader so the cache is available for Stream calls.
 func (u *Usenet) PreCache(ctx context.Context, nzoID, filename string) error {
 	// Use shared entry (same as Stream)
-	entry, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	entry, key, err := u.getOrCreateEntry(ctx, nzoID, filename, configuredRetention())
 	if err != nil {
 		return fmt.Errorf("failed to get or create entry: %w", err)
 	}

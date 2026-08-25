@@ -2,9 +2,12 @@ package vfs
 
 import (
 	"context"
-	"errors"
 	"io"
+	"io/fs"
+	"sync"
 	"sync/atomic"
+
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
 
 // StreamingFile is the FUSE file interface for VFS
@@ -12,6 +15,10 @@ type StreamingFile struct {
 	item     *CacheItem
 	fileSize int64
 	closed   atomic.Bool
+
+	directMu     sync.Mutex
+	directOpened bool
+	direct       manager.DirectReader
 }
 
 // NewStreamingFile creates a new streaming file handle. It returns nil when
@@ -38,27 +45,59 @@ func (f *StreamingFile) ReadAt(p []byte, off int64) (int, error) {
 // the operation can be interrupted by a read timeout or client disconnect.
 func (f *StreamingFile) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
 	if f.closed.Load() {
-		return 0, errors.New("file closed")
+		return 0, fs.ErrClosed
 	}
-
+	if off < 0 {
+		return 0, fs.ErrInvalid
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
 	if off >= f.fileSize {
 		return 0, io.EOF
 	}
 
-	// Clamp read size
 	readSize := int64(len(p))
-	if off+readSize > f.fileSize {
+	if readSize > f.fileSize-off {
 		readSize = f.fileSize - off
 		p = p[:readSize]
 	}
 
-	n, err := f.item.ReadAtContext(ctx, p, off)
+	f.directMu.Lock()
+	if f.closed.Load() {
+		f.directMu.Unlock()
+		return 0, fs.ErrClosed
+	}
+	if !f.directOpened {
+		direct, err := f.item.cache.manager.OpenDirect(ctx, f.item.entry, f.item.filename)
+		if err != nil {
+			f.directMu.Unlock()
+			return 0, err
+		}
+		if f.closed.Load() {
+			if direct != nil {
+				_ = direct.Close()
+			}
+			f.directMu.Unlock()
+			return 0, fs.ErrClosed
+		}
+		f.direct = direct
+		f.directOpened = true
+	}
+	src := f.direct
+	f.directMu.Unlock()
 
-	// Handle partial read at EOF
+	var n int
+	var err error
+	if src != nil {
+		n, err = src.ReadAtContext(ctx, p, off)
+	} else {
+		n, err = f.item.ReadAtContext(ctx, p, off)
+	}
+
 	if n < int(readSize) && err == nil {
 		err = io.EOF
 	}
-
 	return n, err
 }
 
@@ -72,7 +111,14 @@ func (f *StreamingFile) Close() error {
 	if f.closed.Swap(true) {
 		return nil
 	}
-	f.item.Release() // Decrement opens count
-
-	return nil
+	f.directMu.Lock()
+	direct := f.direct
+	f.direct = nil
+	f.directMu.Unlock()
+	var err error
+	if direct != nil {
+		err = direct.Close()
+	}
+	f.item.Release()
+	return err
 }

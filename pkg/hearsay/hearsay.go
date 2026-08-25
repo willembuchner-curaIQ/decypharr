@@ -60,9 +60,9 @@ func New(cfg *config.Config, log zerolog.Logger) (*Service, error) {
 		debrids:  map[string]string{},
 		uncached: map[string]string{},
 		usenets:  map[string]string{},
-		publish: !cfg.Hearsay.NoPublish,
-		port:    cfg.Hearsay.Port,
-		gossip:  cfg.Hearsay.GossipPort,
+		publish:  !cfg.Hearsay.NoPublish,
+		port:     cfg.Hearsay.Port,
+		gossip:   cfg.Hearsay.GossipPort,
 	}
 	var domains []hearsaylib.Domain
 	for _, d := range cfg.Debrids {

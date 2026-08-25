@@ -160,7 +160,29 @@ func Parse(cfg config.DFS, mountPath string, retries int) *FuseConfig {
 	// retry settings
 	fuseConfig.Retries = retries
 
+	fuseConfig.ReadAheadSize = reconcileReadAhead(fuseConfig.ReadAheadSize, fuseConfig.ChunkSize, fuseConfig.CacheDiskSize)
+
 	return fuseConfig
+}
+
+// StreamDiskShare is how many concurrent streams the disk cache is budgeted
+// for. One stream's share covers its read-ahead plus the history the pool
+// keeps behind its read head; vfs.NewCache derives its back-window from it.
+const StreamDiskShare = 4
+
+// reconcileReadAhead clamps read-ahead against the disk budget it writes into.
+// The shipped defaults contradict each other — 128MB ahead of a 500MB cache
+// means two streams exceed the limit and the pool punches holes continuously —
+// so any pair of values is made to settle rather than thrash.
+func reconcileReadAhead(readAhead, chunkSize, diskLimit int64) int64 {
+	if readAhead <= 0 || diskLimit <= 0 {
+		return readAhead
+	}
+	maxAhead := diskLimit / StreamDiskShare / 2 // other half is history
+	if readAhead <= maxAhead {
+		return readAhead
+	}
+	return max(maxAhead, chunkSize) // must reach at least one chunk past the reader
 }
 
 // parseUmask parses umask strings like "0022"

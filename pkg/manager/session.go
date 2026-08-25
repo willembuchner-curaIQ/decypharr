@@ -15,6 +15,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/manager/link"
 	"github.com/sirrobot01/decypharr/pkg/storage"
+	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
 const (
@@ -462,18 +463,27 @@ func (t *httpTransport) recover(ctx context.Context, err error, attempt int) err
 // offset.
 type usenetTransport struct {
 	size     int64
-	openFile func(ctx context.Context) (usenetFileHandle, error)
+	openFile func(ctx context.Context) (DirectReader, error)
 }
 
-// usenetFileHandle abstracts *usenet.FileHandle for tests.
-type usenetFileHandle interface {
+// DirectReader is a random-access source that keeps its own byte cache and
+// read-ahead. Consumers must not stage it through a cache of their own.
+type DirectReader interface {
 	ReadAtContext(ctx context.Context, p []byte, off int64) (int, error)
 	Prefetch(ctx context.Context, off, length int64)
 	Close() error
 }
 
+// RewindOwner identifies the layer that retains already-delivered bytes.
+type RewindOwner uint8
+
+const (
+	RewindOwnerApplication RewindOwner = iota
+	RewindOwnerDownstream
+)
+
 type usenetBody struct {
-	h    usenetFileHandle
+	h    DirectReader
 	ctx  context.Context
 	pos  int64
 	size int64
@@ -517,7 +527,12 @@ func (t *usenetTransport) recover(ctx context.Context, err error, attempt int) e
 // registers it in the active-streams view. client identifies the consumer
 // (e.g. a User-Agent, "NFS"). Connecting is lazy — use Prime to fast-fail.
 func (m *Manager) OpenStream(ctx context.Context, entry *storage.Entry, filename string, offset int64, client string) (StreamReader, error) {
-	s, source, debrid, err := m.openSession(ctx, entry, filename, offset)
+	return m.OpenStreamWithRewindOwner(ctx, entry, filename, offset, client, RewindOwnerApplication)
+}
+
+// OpenStreamWithRewindOwner opens a stream with an explicit retention owner.
+func (m *Manager) OpenStreamWithRewindOwner(ctx context.Context, entry *storage.Entry, filename string, offset int64, client string, owner RewindOwner) (StreamReader, error) {
+	s, source, debrid, err := m.openSession(ctx, entry, filename, offset, owner)
 	if err != nil {
 		return nil, err
 	}
@@ -527,12 +542,29 @@ func (m *Manager) OpenStream(ctx context.Context, entry *storage.Entry, filename
 	return s, nil
 }
 
+// SupportsDirectRead reports whether a backend can own its read-ahead and
+// rewind storage instead of being staged through the DFS cache.
+func SupportsDirectRead(entry *storage.Entry) bool {
+	return entry != nil && entry.Protocol == config.ProtocolNZB
+}
+
+// OpenDirect returns a per-consumer reader whose application tier owns rewind.
+func (m *Manager) OpenDirect(ctx context.Context, entry *storage.Entry, filename string) (DirectReader, error) {
+	if !SupportsDirectRead(entry) {
+		return nil, nil
+	}
+	if m.usenet == nil {
+		return nil, fmt.Errorf("usenet client not configured")
+	}
+	return m.usenet.OpenFileWithRetention(ctx, entry.InfoHash, filename, usenet.RetentionRewind)
+}
+
 // OpenStreamUntracked opens a session without registering it in the
 // active-streams view. It is for consumers that do their own stream tracking —
 // notably the vfs downloader, where several downloaders share one file and a
 // single registration is kept at the Downloaders level.
 func (m *Manager) OpenStreamUntracked(ctx context.Context, entry *storage.Entry, filename string, offset int64) (StreamReader, error) {
-	s, _, _, err := m.openSession(ctx, entry, filename, offset)
+	s, _, _, err := m.openSession(ctx, entry, filename, offset, RewindOwnerApplication)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +582,7 @@ func (m *Manager) OpenStreamForFile(ctx context.Context, info *FileInfo, offset 
 	return m.OpenStream(ctx, entry, info.Name(), offset, client)
 }
 
-func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filename string, offset int64) (*session, string, string, error) {
+func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filename string, offset int64, owner RewindOwner) (*session, string, string, error) {
 	file, ok := entry.Files[filename]
 	if !ok {
 		return nil, "", "", fmt.Errorf("file %s not found in entry %s", filename, entry.Name)
@@ -570,10 +602,14 @@ func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filenam
 		}
 		source, debrid = "nzb", ""
 		nzoID := entry.InfoHash
+		retention := usenet.RetentionRewind
+		if owner == RewindOwnerDownstream {
+			retention = usenet.RetentionWindow
+		}
 		t = &usenetTransport{
 			size: file.Size,
-			openFile: func(ctx context.Context) (usenetFileHandle, error) {
-				return m.usenet.OpenFile(ctx, nzoID, filename)
+			openFile: func(ctx context.Context) (DirectReader, error) {
+				return m.usenet.OpenFileWithRetention(ctx, nzoID, filename, retention)
 			},
 		}
 	} else {

@@ -18,8 +18,11 @@ import (
 func withTestPool(t *testing.T, budget int64) {
 	t.Helper()
 	old := bufPool
+	oldExtents := extents
 	bufPool = buffer.NewPool(buffer.PoolConfig{Name: "usenet-test", MemoryBudget: budget})
+	extents = newExtentPool(budget)
 	bufPoolOnce.Do(func() {}) // fence the singleton so usenetBufferPool keeps ours
+	extentOnce.Do(func() {})
 	t.Cleanup(func() {
 		_ = bufPool.Close()
 		if old == nil {
@@ -31,6 +34,10 @@ func withTestPool(t *testing.T, budget int64) {
 			})
 		}
 		bufPool = old
+		if oldExtents == nil {
+			oldExtents = newExtentPool(config.Get().Usenet.BufferMemoryBytes())
+		}
+		extents = oldExtents
 	})
 }
 
@@ -112,7 +119,7 @@ func TestPlaybackUnderPoolPressure(t *testing.T) {
 			readers := make([]*StreamingReader, tc.streams)
 			for s := range tc.streams {
 				sr, err := NewStreamingReader(context.Background(), client, all[s],
-					WithMaxConnections(8), WithPrefetchAhead(22), WithMemoryBuffer(true))
+					WithMaxConnections(8), WithPrefetchAhead(22), WithRetention(RetentionWindow))
 				if err != nil {
 					t.Fatal(err)
 				}

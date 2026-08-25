@@ -1,7 +1,7 @@
 package buffer
 
 // block is a fixed-size in-memory cache entry covering a single blockSize
-// region of a ModeMemory buffer. Blocks are aligned: blk.off % blockSize == 0.
+// region of a Buffer. Blocks are aligned: blk.off % blockSize == 0.
 // Which bytes of a block are valid is tracked solely by the Buffer's
 // rangeSet — the block itself is just storage.
 //

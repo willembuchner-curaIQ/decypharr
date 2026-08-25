@@ -20,10 +20,7 @@ const (
 	benchSegs    = 32
 )
 
-// benchModes is the storage A/B every benchmark runs under: "memory" is the
-// default (segments held as resident RAM blocks, the disk file stays a
-// zero-block sparse file), "disk" is the buffer_to_disk write-through path
-// (segments pwritten to segments.bin, reads served by pread/page cache).
+// benchModes compares immutable RAM extents with the sparse rewind tier.
 var benchModes = []struct {
 	name   string
 	memory bool
@@ -105,11 +102,11 @@ func diskAllocatedMB(dir string) float64 {
 	return float64(total) / (1 << 20)
 }
 
-// poolRAMMB reports the usenet buffer pool's current resident block RAM —
-// the process-pinned side of the storage story (the disk mode's RAM lives in
-// the kernel page cache instead and shows up as ~0 here).
+// poolRAMMB reports resident bytes owned by both Usenet storage tiers.
 func poolRAMMB() float64 {
-	return float64(usenetBufferPool().Stats().MemoryInUse) / (1 << 20)
+	bufferBytes := usenetBufferPool().Stats().MemoryInUse
+	extentBytes := usenetExtentPool().stats().MemoryInUse
+	return float64(bufferBytes+extentBytes) / (1 << 20)
 }
 
 // BenchmarkColdStream reads the whole file sequentially through a fresh

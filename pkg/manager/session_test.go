@@ -390,7 +390,7 @@ func TestSessionPrimeFailsFast(t *testing.T) {
 	}
 }
 
-// fakeUsenetHandle is a usenetFileHandle over an in-memory byte slice.
+// fakeUsenetHandle is a DirectReader over an in-memory byte slice.
 // If failAt >= 0, reads at or beyond that offset fail (the handle "loses"
 // the tail) — a reopened handle without failAt serves it.
 type fakeUsenetHandle struct {
@@ -428,7 +428,7 @@ func TestUsenetTransportResumesMidStream(t *testing.T) {
 	var handles []*fakeUsenetHandle
 	tr := &usenetTransport{
 		size: int64(len(data)),
-		openFile: func(context.Context) (usenetFileHandle, error) {
+		openFile: func(context.Context) (DirectReader, error) {
 			failAt := int64(-1)
 			if opens.Add(1) == 1 {
 				failAt = 500 // first handle dies after 500 bytes

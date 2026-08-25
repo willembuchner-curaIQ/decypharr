@@ -51,6 +51,11 @@ const (
 	// cacheWriter.Write when no reader is parked; matches the buffer's
 	// block size.
 	downloadBatchSize = 1 << 20
+	// readAheadPokeInterval is how far a read may advance through cached bytes
+	// before keepAhead re-extends the download frontier. Playback crosses it
+	// several times a second, so the frontier stays well ahead while most warm
+	// reads skip dls.mu entirely.
+	readAheadPokeInterval = 1 << 20
 )
 
 // Downloaders coordinates multiple concurrent downloads to a cache item
@@ -59,7 +64,7 @@ type Downloaders struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	item          *CacheItem
-	manager       *manager.Manager
+	manager       Backend
 	chunkSize     int64
 	readAheadSize int64
 	retries       int
@@ -100,6 +105,10 @@ type Downloaders struct {
 	// it. Fills this gate misses are rescued by the active-waiter ticker.
 	// Recomputed under dls.mu whenever the waiter set changes.
 	minWaiterEnd atomic.Int64
+
+	// lastPoke is the read offset keepAhead last extended the frontier from;
+	// -1 means "poke on the next read".
+	lastPoke atomic.Int64
 
 	// Idle timeout tracking
 	lastActivity atomic.Int64  // Unix nano timestamp of last download activity
@@ -231,7 +240,7 @@ func copyBatched(dst io.Writer, src io.Reader, size int64, buf []byte, flushNow 
 }
 
 // NewDownloaders creates a new download coordinator
-func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, cfg *fuseconfig.FuseConfig) *Downloaders {
+func NewDownloaders(ctx context.Context, mgr Backend, item *CacheItem, cfg *fuseconfig.FuseConfig) *Downloaders {
 	parentCtx := ctx
 	ctx, cancel := context.WithCancel(parentCtx)
 	chunkSize := cfg.ChunkSize
@@ -261,12 +270,41 @@ func NewDownloaders(ctx context.Context, mgr *manager.Manager, item *CacheItem, 
 		streamID: "",
 	}
 	dls.minWaiterEnd.Store(math.MaxInt64)
+	dls.lastPoke.Store(-1)
 	dls.touchActivity() // Initialize activity timestamp
 
 	// Background kicker to handle stalled waiters and idle detection
 	dls.startKicker()
 
 	return dls
+}
+
+// keepAhead extends the download frontier past a read that was served from
+// cache. Warm sequential playback calls this on every read, so it is gated on
+// read position: only a seek or readAheadPokeInterval of progress takes the
+// coordinator lock.
+func (dls *Downloaders) keepAhead(off, length int64) {
+	last := dls.lastPoke.Load()
+	if last >= 0 && off >= last && off-last < readAheadPokeInterval {
+		return
+	}
+	if !dls.lastPoke.CompareAndSwap(last, off) {
+		return
+	}
+
+	dls.ensureStreamTracked()
+	dls.touchActivity()
+
+	dls.mu.Lock()
+	defer dls.mu.Unlock()
+	if dls.closed || dls.stopping {
+		return
+	}
+	if dls.idle {
+		dls.idle = false
+		dls.ensureKickerRunningLocked()
+	}
+	_ = dls.ensureDownloaderLocked(ranges.Range{Pos: off, Size: length}, false)
 }
 
 // Download blocks until the range r is on disk, or until ctx is canceled.
@@ -476,8 +514,52 @@ func (dls *Downloaders) ensureDownloaderLocked(r ranges.Range, priority bool) er
 		return nil
 	}
 
-	// Start new downloader
+	// Reaching here means the read position is served by no existing
+	// downloader — a seek. Retire the ones it left behind before starting the
+	// new one, or their read-ahead keeps pulling into a cache nobody will read
+	// while competing for the same pipe as the range the reader is waiting on.
+	//
+	// A priority read is exempt: it is a probe excursion (ffprobe reaching for
+	// the moov atom near EOF), not a change of playback position, and playback
+	// resumes where it was. Retiring on it would tear down the downloader the
+	// player is about to read from and cost a whole extra session.
+	if !priority {
+		dls.retireAbandonedLocked(r.Pos)
+	}
+
 	return dls.newDownloaderLocked(r, targetEnd, priority)
+}
+
+// retireAbandonedLocked stops downloaders that no longer serve the read
+// position and have no reader parked on them. Caller holds dls.mu.
+//
+// Only with a single open handle: then a downloader that matches no read
+// position really has been left behind. With several handles open the same
+// downloader may be feeding another reader mid-file, and at the instant of a
+// seek the two are indistinguishable — so there we leave them alone and let
+// the idle timeout do the work.
+func (dls *Downloaders) retireAbandonedLocked(pos int64) {
+	if dls.item.opens.Load() > 1 {
+		return
+	}
+	window := dls.downloaderMatchWindowLocked()
+	for _, dl := range dls.dls {
+		start, off := dl.getRange()
+		if pos >= start && pos < off+window {
+			continue // still serves the new position
+		}
+		needed := false
+		for _, w := range dls.waiters {
+			if w.r.Pos < off+window && w.r.End() > start {
+				needed = true
+				break
+			}
+		}
+		if needed {
+			continue
+		}
+		dl.stop()
+	}
 }
 
 // extendAndFindMissingRangeLocked expands a request by read-ahead and returns
@@ -642,16 +724,13 @@ func (dls *Downloaders) kickWaiters() {
 
 	fulfilled := 0
 	remaining := dls.waiters[:0]
-	// One metaMu acquisition for the whole scan; this runs under dls.mu, so
-	// the critical section length is what every reader of this file waits on.
-	dls.item.metaMu.RLock()
 	fileSize := dls.item.info.Size
 	for _, w := range dls.waiters {
 		// Clip range to actual file size
 		r := w.r
 		r.Clip(fileSize)
 
-		if dls.item.info.Rs.Present(r) {
+		if dls.item.HasRange(r) {
 			w.errChan <- nil // Fulfilled!
 			fulfilled++
 		} else if circuitOpen || dls.errorCount >= maxErrorCount {
@@ -662,7 +741,6 @@ func (dls *Downloaders) kickWaiters() {
 			remaining = append(remaining, w)
 		}
 	}
-	dls.item.metaMu.RUnlock()
 	dls.waiters = remaining
 	if fulfilled > 0 {
 		dls.waiterCount.Add(-int32(fulfilled))
@@ -1443,7 +1521,3 @@ func (w *cacheWriter) Write(p []byte) (int, error) {
 	}
 	return n, nil
 }
-
-// flush is a no-op shim kept so streamChunk's existing call site stays
-// legible. The coalescer is gone; nothing buffers.
-func (w *cacheWriter) flush() error { return nil }

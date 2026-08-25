@@ -249,6 +249,7 @@ func TestPurgeCacheRemovesIdleDiskItemsAndSkipsActiveItems(t *testing.T) {
 		cache:    c,
 		key:      "entry/active.mkv",
 		metaPath: activeMeta,
+		buf:      newTestBuffer(t, 1024),
 	}
 	activeItem.opens.Store(1)
 	c.items.Store(activeItem.key, activeItem)

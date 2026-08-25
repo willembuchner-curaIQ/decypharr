@@ -348,6 +348,11 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, cur *Cursor, p []byt
 		sr.fetcher.CancelPendingPrefetch()
 		cur.queuedThrough.Store(-1)
 	}
+	if prevEnd < 0 && startSeg == 0 && endSeg < sr.segCount-1 {
+		sr.fetcher.QueueProbeRange(max(sr.segCount-2, 0), sr.segCount-1)
+	}
+
+	waitRequired := sr.fetcher.PrepareSegments(ctx, startSeg, endSeg)
 
 	// Queue read-ahead hints for the part of the window this cursor hasn't
 	// already hinted (non-blocking). The depth is clamped to what the cache
@@ -363,9 +368,7 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, cur *Cursor, p []byt
 			cur.queuedThrough.Store(int64(prefetchEnd))
 		}
 	}
-
-	// Ensure all required segments are available (may block for downloads)
-	if err := sr.fetcher.EnsureSegments(ctx, startSeg, endSeg); err != nil {
+	if err := waitRequired(); err != nil {
 		sr.stats.ReadErrors.Add(1)
 		return 0, err
 	}
@@ -379,9 +382,7 @@ func (sr *StreamingReader) readAtPlain(ctx context.Context, cur *Cursor, p []byt
 
 	sr.stats.BytesRead.Add(int64(n))
 
-	// Record delivery so the sliding-window sweeper can advance its cutoff.
-	// Skip zero-byte reads (probe, short EOF) to avoid moving the mark
-	// spuriously.
+	// Publish actual delivery so eviction follows the consumer, not prefetch.
 	if n > 0 {
 		cur.markConsumed(off + int64(n))
 	}
@@ -415,13 +416,7 @@ func (sr *StreamingReader) ensureSegmentReady(ctx context.Context, segIdx int) e
 	}
 }
 
-// readFromCache reads data from the cache, handling segment boundaries.
-//
-// Uses ReadRangeInto so each pread fetches only the bytes the caller actually
-// needs from that segment — no scratch buffer, no read amplification.
-// Previously the code read entire segments (~750 KB) even for 4 KB reads,
-// which filled the kernel page cache with mostly-unused data and caused
-// progressive performance degradation on large files.
+// readFromCache reads only the requested slices across segment boundaries.
 func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int64, startSeg, endSeg int) (int, error) {
 	totalRead := 0
 	// filled is the absolute offset this read has delivered through. Segments
@@ -719,18 +714,20 @@ func (rp *Pool) GetReader(
 	if encryption.Enabled {
 		reader, err = NewStreamingReaderWithEncryption(
 			ctx, rp.client, segments, encryption,
-			WithMaxDisk(rp.config.MaxDisk),
 			WithMaxConnections(rp.config.MaxConnections),
 			WithPrefetchAhead(rp.config.PrefetchAhead),
-			WithMemoryBuffer(rp.config.MemoryBuffer),
+			WithDiskPath(rp.config.DiskPath),
+			WithRetention(rp.config.Retention),
+			WithFetchScheduler(rp.config.Scheduler),
 		)
 	} else {
 		reader, err = NewStreamingReader(
 			ctx, rp.client, segments,
-			WithMaxDisk(rp.config.MaxDisk),
 			WithMaxConnections(rp.config.MaxConnections),
 			WithPrefetchAhead(rp.config.PrefetchAhead),
-			WithMemoryBuffer(rp.config.MemoryBuffer),
+			WithDiskPath(rp.config.DiskPath),
+			WithRetention(rp.config.Retention),
+			WithFetchScheduler(rp.config.Scheduler),
 		)
 	}
 	if err != nil {

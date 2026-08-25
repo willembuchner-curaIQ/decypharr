@@ -36,13 +36,24 @@ type FS struct {
 	ctx           context.Context
 	volumes       *xsync.Map[string, *types.Volume]
 	client        *nntp.Client // Connection client for all readers
-	maxConcurrent int          // Max concurrent connections per reader
+	maxConcurrent int          // Scheduler width for standalone readers
 	prefetchSize  int64        // Prefetch size in bytes
+	diskPath      string
+	retention     reader.Retention
+	scheduler     *reader.FetchScheduler
 	logger        zerolog.Logger
 }
 
 // Option configures the filesystem
 type Option func(*FS)
+
+func WithRetention(retention reader.Retention) Option {
+	return func(f *FS) { f.retention = retention }
+}
+
+func WithFetchScheduler(scheduler *reader.FetchScheduler) Option {
+	return func(f *FS) { f.scheduler = scheduler }
+}
 
 // NewFS creates a new filesystem backed by the provided connection nntpClient.
 // prefetchSize is the amount of data to prefetch ahead in bytes (e.g., 16*1024*1024 for 16MB)
@@ -51,12 +62,18 @@ func NewFS(ctx context.Context, client *nntp.Client, maxConcurrent int, prefetch
 		ctx = context.Background()
 	}
 
+	retention := reader.RetentionWindow
+	if config.Get().Usenet.BufferToDisk {
+		retention = reader.RetentionRewind
+	}
 	f := &FS{
 		ctx:           ctx,
 		volumes:       xsync.NewMap[string, *types.Volume](),
 		client:        client,
 		maxConcurrent: maxConcurrent,
 		prefetchSize:  prefetchSize,
+		diskPath:      config.Get().Usenet.DiskBufferPath,
+		retention:     retention,
 		logger:        logger,
 	}
 
@@ -103,6 +120,9 @@ func (f *FS) Open(name string) (fs.File, error) {
 		manager:       f.client,
 		maxConcurrent: f.maxConcurrent,
 		prefetchSize:  f.prefetchSize,
+		diskPath:      f.diskPath,
+		retention:     f.retention,
+		scheduler:     f.scheduler,
 		logger:        f.logger,
 		volume:        vol,
 	}, nil
@@ -209,7 +229,8 @@ func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, 
 	readerConfig.MaxConnections = f.maxConcurrent
 	readerConfig.PrefetchAhead = reader.PrefetchAheadSegments(f.prefetchSize, segments)
 	readerConfig.DiskPath = cfg.Usenet.DiskBufferPath
-	readerConfig.MemoryBuffer = !cfg.Usenet.BufferToDisk
+	readerConfig.Retention = f.retention
+	readerConfig.Scheduler = f.scheduler
 
 	// Create the new streaming reader
 	var streamReader *reader.StreamingReader
@@ -221,22 +242,22 @@ func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, 
 			f.client,
 			segments,
 			encConfig,
-			reader.WithMaxDisk(readerConfig.MaxDisk),
 			reader.WithMaxConnections(readerConfig.MaxConnections),
 			reader.WithPrefetchAhead(readerConfig.PrefetchAhead),
 			reader.WithDiskPath(readerConfig.DiskPath),
-			reader.WithMemoryBuffer(readerConfig.MemoryBuffer),
+			reader.WithRetention(readerConfig.Retention),
+			reader.WithFetchScheduler(readerConfig.Scheduler),
 		)
 	} else {
 		streamReader, err = reader.NewStreamingReader(
 			f.ctx,
 			f.client,
 			segments,
-			reader.WithMaxDisk(readerConfig.MaxDisk),
 			reader.WithMaxConnections(readerConfig.MaxConnections),
 			reader.WithPrefetchAhead(readerConfig.PrefetchAhead),
 			reader.WithDiskPath(readerConfig.DiskPath),
-			reader.WithMemoryBuffer(readerConfig.MemoryBuffer),
+			reader.WithRetention(readerConfig.Retention),
+			reader.WithFetchScheduler(readerConfig.Scheduler),
 		)
 	}
 

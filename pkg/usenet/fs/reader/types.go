@@ -1,11 +1,4 @@
-// Package reader provides a high-performance, error-resilient streaming reader
-// for Usenet segments. It implements io.ReaderAt with automatic caching,
-// prefetching, and transparent re-download on cache misses.
-//
-// Architecture:
-//   - StreamingReader: Top-level reader with encryption support
-//   - SegmentCache: Disk storage with pin/unpin for safe eviction
-//   - SegmentFetcher: NNTP downloads with deduplication and retry
+// Package reader provides seekable, prefetched access to Usenet segments.
 package reader
 
 import (
@@ -59,7 +52,7 @@ const (
 	// StateEmpty indicates the segment has no cached data.
 	StateEmpty SegmentState = iota
 
-	// StateOnDisk indicates the segment data is on disk.
+	// StateOnDisk indicates the segment is ready in its configured storage tier.
 	StateOnDisk
 
 	// StateFetching indicates the segment is currently being downloaded.
@@ -68,15 +61,7 @@ const (
 	// StateFailed indicates the segment download failed permanently.
 	StateFailed
 
-	// StateEvicting indicates the evictor has reserved the segment and is
-	// punching its disk range. It is a transient state held only across the
-	// buffer Discard: the slot was OnDisk, will become Empty once the punch
-	// completes. Crucially, MarkFetching only transitions Empty->Fetching, so
-	// while a segment is Evicting no re-fetch can begin writing into the range
-	// being punched. This closes the race where a reader re-downloaded a
-	// segment in the gap between the evictor's state flip and its deferred
-	// Discard, only for the Discard to punch the freshly-written bytes back
-	// out — leaving the slot OnDisk but unreadable.
+	// StateEvicting reserves a resident extent until its pointer is unpublished.
 	StateEvicting
 )
 
@@ -97,22 +82,31 @@ func (s SegmentState) String() string {
 	}
 }
 
+// Retention selects who is responsible for rewind data.
+type Retention uint8
+
+const (
+	// RetentionWindow keeps only the active delivery window. Use it when a
+	// downstream cache such as rclone VFS full owns rewind persistence.
+	RetentionWindow Retention = iota
+	// RetentionRewind adds a sparse disk tier so consumed data remains locally
+	// readable without another NNTP request.
+	RetentionRewind
+)
+
 // Config holds configuration for StreamingReader.
 type Config struct {
-	// MaxDisk is the maximum disk space to use for segment caching (default: 256MB).
-	MaxDisk int64
-
 	// DiskPath is the base directory for disk cache (default: system temp dir).
 	DiskPath string
 
-	// MemoryBuffer keeps the cached window in RAM blocks; segment data is
-	// never written to the disk file. Default true; config
-	// usenet.buffer_to_disk turns it off. When the window outgrows its RAM
-	// budget the oldest cached segments are dropped and re-fetched on
-	// demand.
-	MemoryBuffer bool
+	// Retention declares whether this reader or its downstream owns rewind.
+	Retention Retention
 
-	// MaxConnections is the maximum concurrent NNTP downloads (default: 8).
+	// Scheduler is shared by all readers using the same NNTP client. When nil,
+	// a private scheduler is created for compatibility with standalone readers.
+	Scheduler *FetchScheduler
+
+	// MaxConnections is the private-scheduler width for standalone readers.
 	MaxConnections int
 
 	// PrefetchAhead is the number of segments to prefetch ahead of reads (default: 8).
@@ -131,13 +125,12 @@ type Config struct {
 // DefaultConfig returns a ReaderConfig with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		MaxDisk:         256 * 1024 * 1024, // 256MB
 		MaxConnections:  8,
 		PrefetchAhead:   8,
 		DownloadTimeout: 60 * time.Second,
 		MaxRetries:      3,
 		RetryDelay:      time.Second,
-		MemoryBuffer:    true,
+		Retention:       RetentionWindow,
 	}
 }
 
@@ -170,13 +163,6 @@ func PrefetchAheadSegments(readAheadBytes int64, segments []SegmentMeta) int {
 // Option is a functional option for configuring StreamingReader.
 type Option func(*Config)
 
-// WithMaxDisk sets the maximum disk space for segment caching.
-func WithMaxDisk(bytes int64) Option {
-	return func(c *Config) {
-		c.MaxDisk = bytes
-	}
-}
-
 // WithDiskPath sets the base directory for disk cache.
 func WithDiskPath(path string) Option {
 	return func(c *Config) {
@@ -184,14 +170,32 @@ func WithDiskPath(path string) Option {
 	}
 }
 
-// WithMemoryBuffer keeps the cached window in RAM instead of on disk.
+// WithMemoryBuffer is the compatibility spelling for WithRetention.
 func WithMemoryBuffer(on bool) Option {
 	return func(c *Config) {
-		c.MemoryBuffer = on
+		if on {
+			c.Retention = RetentionWindow
+		} else {
+			c.Retention = RetentionRewind
+		}
 	}
 }
 
-// WithMaxConnections sets the maximum concurrent NNTP downloads.
+// WithRetention declares whether this reader or its downstream owns rewind.
+func WithRetention(retention Retention) Option {
+	return func(c *Config) {
+		c.Retention = retention
+	}
+}
+
+// WithFetchScheduler shares provider concurrency across multiple readers.
+func WithFetchScheduler(scheduler *FetchScheduler) Option {
+	return func(c *Config) {
+		c.Scheduler = scheduler
+	}
+}
+
+// WithMaxConnections sets the private-scheduler width for standalone readers.
 func WithMaxConnections(n int) Option {
 	return func(c *Config) {
 		c.MaxConnections = n
