@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -150,13 +150,6 @@ func NewCache(ctx context.Context, mgr Backend, config *dfsconfig.FuseConfig) (*
 		backWindow = min(backWindow, share)
 		backWindow = max(backWindow, 32<<20)
 	}
-	pool := buffer.NewPool(buffer.PoolConfig{
-		Name:         "dfs",
-		MemoryBudget: config.BufferMemory,
-		DiskLimit:    maxSize,
-		BackWindow:   backWindow,
-	})
-
 	c := &Cache{
 		config: config,
 		// Per-stream RAM ask: the read-ahead the downloader produces plus as
@@ -169,8 +162,23 @@ func NewCache(ctx context.Context, mgr Backend, config *dfsconfig.FuseConfig) (*
 		ctx:          ctx,
 		cancel:       cancel,
 		threshold:    threshold,
-		pool:         pool,
 	}
+
+	// Account persistent cache files before accepting any reads. Otherwise a
+	// restart begins at zero and can admit a full second cache before cleanup
+	// notices the bytes already on disk.
+	initialScan := c.scanDiskCandidates()
+	c.totalSize.Store(initialScan.totalSize)
+	c.storeDiskStats(initialScan.candidates, nil)
+	c.pool = buffer.NewPool(buffer.PoolConfig{
+		Name:             "dfs",
+		MemoryBudget:     config.BufferMemory,
+		DiskLimit:        maxSize,
+		InitialDiskUsage: initialScan.totalSize,
+		ReclaimDisk:      c.reclaimClosedDisk,
+		BackWindow:       backWindow,
+	})
+	c.evict()
 	go c.evictLoop()
 	go c.speedSampleLoop()
 	return c, nil
@@ -398,11 +406,11 @@ func (c *Cache) evictCandidates(now time.Time, candidates []candidateEntry, tota
 	// Phase 2: If still over threshold, remove oldest entries (only if not in map)
 	if threshold > 0 && totalSize > threshold {
 		// Sort by access time, then modification time (oldest first)
-		sort.Slice(candidates, func(i, j int) bool {
-			if candidates[i].atime.Equal(candidates[j].atime) {
-				return candidates[i].mtime.Before(candidates[j].mtime)
+		slices.SortFunc(candidates, func(a, b candidateEntry) int {
+			if order := a.atime.Compare(b.atime); order != 0 {
+				return order
 			}
-			return candidates[i].atime.Before(candidates[j].atime)
+			return a.mtime.Compare(b.mtime)
 		})
 
 		for _, candidate := range candidates {
@@ -416,6 +424,39 @@ func (c *Cache) evictCandidates(now time.Time, candidates []candidateEntry, tota
 	}
 
 	return totalSize, len(removed), removalErrors, removed
+}
+
+// reclaimClosedDisk is the Pool's synchronous pressure hook. It removes only
+// files no longer represented by an open CacheItem; active buffers reclaim
+// their own safe history through the Pool worker. TryLock avoids a lock cycle
+// with periodic cleanup closing a Buffer whose final flush needs a reservation.
+func (c *Cache) reclaimClosedDisk(needed int64) int64 {
+	if needed <= 0 || !c.cleanupMu.TryLock() {
+		return 0
+	}
+	defer c.cleanupMu.Unlock()
+
+	scan := c.scanDiskCandidates()
+	sizeBefore := scan.totalSize
+	target := max(sizeBefore-needed, int64(1))
+	totalSize, removedCount, removalErrors, removedKeys := c.evictCandidates(
+		utils.Now(),
+		scan.candidates,
+		sizeBefore,
+		target,
+	)
+	scan.errors += removalErrors
+	c.totalSize.Store(totalSize)
+	c.storeDiskStats(scan.candidates, removedKeys)
+
+	freed := max(sizeBefore-totalSize, 0)
+	if freed > 0 {
+		c.logger.Debug().
+			Int64("freed_bytes", freed).
+			Int("removed_items", removedCount).
+			Msg("reclaimed closed DFS cache files for disk admission")
+	}
+	return freed
 }
 
 func (c *Cache) purgeCandidates(candidates []candidateEntry, totalSize int64) (int64, int, int, int, map[string]struct{}) {
@@ -525,10 +566,12 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 		// RAM window in front of a sparse file: reads during playback are
 		// served from memory, and blocks leaving the window are flushed to the
 		// file so the cache still survives a restart (InitialRanges reseeds it).
-		MemorySize:    c.streamMemory,
-		DiskPath:      cachePath,
-		TotalSize:     fileSize,
-		InitialRanges: seed,
+		MemorySize:                c.streamMemory,
+		DiskPath:                  cachePath,
+		TotalSize:                 fileSize,
+		InitialRanges:             seed,
+		InitialRangesPreaccounted: true,
+		PersistentDisk:            true,
 		OnPersistChange: func() {
 			if item != nil {
 				item.markMetadataDirty()
@@ -564,9 +607,6 @@ func (c *Cache) newItem(key, entryName, filename string, fileSize int64) (*Cache
 func (c *Cache) evictLoop() {
 	ticker := time.NewTicker(c.config.CacheCleanupInterval)
 	defer ticker.Stop()
-
-	// Run evict immediately on startup to remove stale items before they can be accessed
-	c.evict()
 
 	for {
 		select {
@@ -765,6 +805,9 @@ func (c *Cache) evict() cleanupRunSummary {
 
 	c.totalSize.Store(totalSize)
 	c.storeDiskStats(scan.candidates, removedKeys)
+	if c.pool != nil {
+		c.pool.ReleaseDisk(max(sizeBefore-totalSize, 0))
+	}
 
 	summary := c.finalizeCleanupSummary(cleanupRunSummary{
 		scan:              scan,
@@ -801,6 +844,9 @@ func (c *Cache) PurgeCache() map[string]any {
 
 	c.totalSize.Store(totalSize)
 	c.storeDiskStats(scan.candidates, removedKeys)
+	if c.pool != nil {
+		c.pool.ReleaseDisk(max(sizeBefore-totalSize, 0))
+	}
 
 	freedBytes := max(sizeBefore-totalSize, 0)
 	status := "healthy"
@@ -915,9 +961,13 @@ func (c *Cache) speedSampleLoop() {
 // GetStats returns cache statistics
 func (c *Cache) GetStats() map[string]any {
 	maxSize := c.config.CacheDiskSize
+	totalSize := c.totalSize.Load()
+	if c.pool != nil {
+		totalSize = c.pool.Stats().DiskInUse
+	}
 	utilization := 0.0
 	if maxSize > 0 {
-		utilization = float64(c.totalSize.Load()) / float64(maxSize)
+		utilization = float64(totalSize) / float64(maxSize)
 	}
 
 	hits := c.cacheHits.Load()
@@ -929,7 +979,7 @@ func (c *Cache) GetStats() map[string]any {
 
 	stats := map[string]any{
 		"type":              "vfs",
-		"total_size":        c.totalSize.Load(),
+		"total_size":        totalSize,
 		"max_size":          c.config.CacheDiskSize,
 		"item_count":        c.diskItems.Load(),
 		"active_item_count": c.itemCount.Load(),

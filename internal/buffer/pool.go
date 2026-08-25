@@ -7,10 +7,11 @@ import (
 
 // Pool enforces shared RAM and sparse-disk budgets across its Buffers.
 type Pool struct {
-	name       string
-	memBudget  atomic.Int64 // RAM ceiling across Buffers; 0 = unlimited
-	diskLimit  atomic.Int64 // on-disk present bytes ceiling; 0 = unlimited
-	backWindow int64        // bytes retained behind a read head before punching
+	name        string
+	memBudget   atomic.Int64 // RAM ceiling across Buffers; 0 = unlimited
+	diskLimit   atomic.Int64 // on-disk present bytes ceiling; 0 = unlimited
+	backWindow  int64        // bytes retained behind a read head before punching
+	reclaimDisk func(int64) int64
 
 	memInUse  atomic.Int64 // sum of resident block RAM across Buffers
 	memDemand atomic.Int64 // sum of MemorySize across Buffers
@@ -18,6 +19,11 @@ type Pool struct {
 
 	mu      sync.RWMutex
 	buffers map[*Buffer]struct{}
+
+	// diskPressureMu serializes disk reservations with pressure reclamation.
+	// A reservation is charged before its write, so physical bytes plus
+	// in-flight writes can never collectively cross diskLimit.
+	diskPressureMu sync.Mutex
 
 	evictSig    chan struct{}
 	memEvictSig chan struct{}
@@ -39,9 +45,18 @@ type PoolConfig struct {
 	MemoryBudget int64
 
 	// DiskLimit caps the sum of on-disk present bytes across all Buffers. When
-	// exceeded, the pool punches holes behind read heads to reclaim disk.
+	// a write would exceed it, the pool reclaims space before admitting it.
 	// 0 = no disk backstop.
 	DiskLimit int64
+
+	// InitialDiskUsage accounts persistent bytes that predate this Pool. Their
+	// Buffers must set InitialRangesPreaccounted when reopened.
+	InitialDiskUsage int64
+
+	// ReclaimDisk synchronously removes persistent bytes not owned by an open
+	// Buffer. It receives the minimum number of bytes needed and returns the
+	// number actually removed. It must not call back into this Pool.
+	ReclaimDisk func(int64) int64
 
 	// BackWindow is how many bytes behind a Buffer's read head the disk
 	// backstop preserves before punching (short seek-backs stay local). Only
@@ -69,12 +84,16 @@ func NewPool(cfg PoolConfig) *Pool {
 	if cfg.DiskLimit < 0 {
 		cfg.DiskLimit = 0
 	}
+	if cfg.InitialDiskUsage < 0 {
+		cfg.InitialDiskUsage = 0
+	}
 	if cfg.BackWindow < 0 {
 		cfg.BackWindow = 0
 	}
 	p := &Pool{
 		name:        cfg.Name,
 		backWindow:  cfg.BackWindow,
+		reclaimDisk: cfg.ReclaimDisk,
 		buffers:     make(map[*Buffer]struct{}),
 		evictSig:    make(chan struct{}, 1),
 		memEvictSig: make(chan struct{}, 1),
@@ -82,13 +101,15 @@ func NewPool(cfg PoolConfig) *Pool {
 	}
 	p.memBudget.Store(cfg.MemoryBudget)
 	p.diskLimit.Store(cfg.DiskLimit)
+	p.diskInUse.Store(cfg.InitialDiskUsage)
 	if cfg.DiskLimit > 0 {
-		p.wg.Add(1)
-		go p.diskEvictLoop()
+		p.wg.Go(p.diskEvictLoop)
 	}
 	if cfg.MemoryBudget > 0 {
-		p.wg.Add(1)
-		go p.memEvictLoop()
+		p.wg.Go(p.memEvictLoop)
+	}
+	if cfg.DiskLimit > 0 && cfg.InitialDiskUsage > cfg.DiskLimit {
+		p.signalDiskEvict()
 	}
 	return p
 }
@@ -215,7 +236,6 @@ func (p *Pool) signalMemEvict() {
 }
 
 func (p *Pool) memEvictLoop() {
-	defer p.wg.Done()
 	for {
 		select {
 		case <-p.stopCh:
@@ -270,8 +290,10 @@ func (p *Pool) dropBytes(n int64) {
 
 // --- Disk accounting + backstop ---------------------------------------------
 
-// addDisk records newly-present on-disk bytes and pokes the backstop if the
-// limit is now exceeded.
+// addDisk records bytes that are already physically present. New writes must
+// use reserveDisk before touching the file; this path is for initial ranges
+// that were not pre-accounted and for restoring accounting after a failed
+// reclaim operation.
 func (p *Pool) addDisk(n int64) {
 	if n <= 0 {
 		return
@@ -282,12 +304,76 @@ func (p *Pool) addDisk(n int64) {
 	}
 }
 
+// reserveDisk reserves physical capacity before a write. Reservations and
+// synchronous pressure reclamation are serialized so concurrent writers
+// cannot all observe the same remaining capacity.
+func (p *Pool) reserveDisk(n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	limit := p.diskLimit.Load()
+	if limit <= 0 {
+		p.diskInUse.Add(n)
+		return nil
+	}
+	if n > limit {
+		return ErrDiskLimit
+	}
+
+	p.diskPressureMu.Lock()
+	defer p.diskPressureMu.Unlock()
+
+	target := limit - n
+	p.reclaimDiskTo(target)
+	if used := p.diskInUse.Load(); used > target && p.reclaimDisk != nil {
+		p.subDisk(p.reclaimDisk(used - target))
+	}
+	if p.diskInUse.Load() > target {
+		return ErrDiskLimit
+	}
+	p.diskInUse.Add(n)
+	return nil
+}
+
+// reclaimForWrite retries pressure reclamation outside a Buffer lock. A
+// writer calls this after a reservation was denied, allowing the worker to
+// reclaim history from that same Buffer before the write is attempted again.
+func (p *Pool) reclaimForWrite(n int64) bool {
+	limit := p.diskLimit.Load()
+	if limit <= 0 {
+		return true
+	}
+	n = min(max(n, 0), limit)
+	target := limit - n
+
+	p.diskPressureMu.Lock()
+	defer p.diskPressureMu.Unlock()
+	p.reclaimDiskTo(target)
+	if used := p.diskInUse.Load(); used > target && p.reclaimDisk != nil {
+		p.subDisk(p.reclaimDisk(used - target))
+	}
+	return p.diskInUse.Load() <= target
+}
+
 // subDisk records on-disk bytes that are no longer present (punched, discarded,
 // or a closed Buffer's residual).
 func (p *Pool) subDisk(n int64) {
-	if n > 0 {
-		p.diskInUse.Add(-n)
+	for n > 0 {
+		used := p.diskInUse.Load()
+		if used <= 0 {
+			return
+		}
+		drop := min(n, used)
+		if p.diskInUse.CompareAndSwap(used, used-drop) {
+			return
+		}
 	}
+}
+
+// ReleaseDisk records persistent bytes removed by the owner after their
+// Buffer was closed.
+func (p *Pool) ReleaseDisk(n int64) {
+	p.subDisk(n)
 }
 
 func (p *Pool) signalDiskEvict() {
@@ -298,13 +384,14 @@ func (p *Pool) signalDiskEvict() {
 }
 
 func (p *Pool) diskEvictLoop() {
-	defer p.wg.Done()
 	for {
 		select {
 		case <-p.stopCh:
 			return
 		case <-p.evictSig:
-			p.reclaimDisk()
+			p.diskPressureMu.Lock()
+			p.reclaimDiskTo(p.diskLimit.Load())
+			p.diskPressureMu.Unlock()
 		}
 	}
 }
@@ -313,12 +400,11 @@ func (p *Pool) diskEvictLoop() {
 // BackWindow) until the pool is back under DiskLimit or there is nothing left
 // to safely reclaim. Each pass snapshots the buffer set so it never holds the
 // pool lock across a punch syscall.
-func (p *Pool) reclaimDisk() {
-	limit := p.diskLimit.Load()
-	if limit <= 0 {
+func (p *Pool) reclaimDiskTo(target int64) {
+	if target < 0 {
 		return
 	}
-	for p.diskInUse.Load() > limit {
+	for p.diskInUse.Load() > target {
 		p.mu.RLock()
 		bufs := make([]*Buffer, 0, len(p.buffers))
 		for b := range p.buffers {
@@ -331,14 +417,14 @@ func (p *Pool) reclaimDisk() {
 		var reclaimed int64
 		for _, b := range bufs {
 			reclaimed += b.punchBehindWindow(p.backWindow)
-			if p.diskInUse.Load() <= limit {
+			if p.diskInUse.Load() <= target {
 				return
 			}
 		}
 		if reclaimed == 0 {
 			// All remaining data is within the buffers' back-windows; nothing
-			// can be reclaimed without disrupting active playback. Accept the
-			// bounded overshoot and stop until the next signal.
+			// can be reclaimed without disrupting active playback. Stop until
+			// a read head advances or another write retries admission.
 			return
 		}
 	}

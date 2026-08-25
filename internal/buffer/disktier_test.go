@@ -3,6 +3,7 @@ package buffer
 import (
 	"bytes"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -29,6 +30,90 @@ func TestImmutableDiskBypassesRAMBlocks(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatal("immutable disk read mismatch")
+	}
+}
+
+func TestDiskLimitSerializesConcurrentWrites(t *testing.T) {
+	const limit = 4 * blockSize
+	p := newTestPool(t, PoolConfig{DiskLimit: limit})
+
+	buffers := make([]*Buffer, 12)
+	for i := range buffers {
+		buffers[i] = newTestBuffer(t, p, Config{
+			DiskPath:      tempDisk(t),
+			TotalSize:     blockSize,
+			ImmutableDisk: true,
+		})
+	}
+
+	results := make(chan error, len(buffers))
+	var wg sync.WaitGroup
+	for _, b := range buffers {
+		wg.Go(func() {
+			_, err := b.WriteAt(make([]byte, blockSize), 0)
+			results <- err
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	succeeded := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrDiskLimit):
+		default:
+			t.Fatalf("unexpected write error: %v", err)
+		}
+	}
+	if succeeded != int(limit/blockSize) {
+		t.Fatalf("successful writes = %d, want %d", succeeded, limit/blockSize)
+	}
+	if got := p.Stats().DiskInUse; got > limit {
+		t.Fatalf("disk usage crossed hard limit: got %d, limit %d", got, limit)
+	}
+}
+
+func TestPersistentDiskAccountingSurvivesCloseAndReopen(t *testing.T) {
+	const persisted = 512 << 10
+	p := newTestPool(t, PoolConfig{
+		DiskLimit:        blockSize,
+		InitialDiskUsage: persisted,
+	})
+	path := tempDisk(t)
+	seed := []Range{{Off: 0, Size: persisted}}
+
+	b := newTestBuffer(t, p, Config{
+		DiskPath:                  path,
+		TotalSize:                 blockSize,
+		InitialRanges:             seed,
+		InitialRangesPreaccounted: true,
+		PersistentDisk:            true,
+	})
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Stats().DiskInUse; got != persisted {
+		t.Fatalf("usage after persistent close = %d, want %d", got, persisted)
+	}
+
+	reopened := newTestBuffer(t, p, Config{
+		DiskPath:                  path,
+		TotalSize:                 blockSize,
+		InitialRanges:             seed,
+		InitialRangesPreaccounted: true,
+		PersistentDisk:            true,
+	})
+	if got := p.Stats().DiskInUse; got != persisted {
+		t.Fatalf("usage after reopen = %d, want %d", got, persisted)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p.ReleaseDisk(persisted)
+	if got := p.Stats().DiskInUse; got != 0 {
+		t.Fatalf("usage after physical removal = %d, want 0", got)
 	}
 }
 

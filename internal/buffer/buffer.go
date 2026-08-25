@@ -23,6 +23,7 @@ var (
 	ErrNotPresent = errors.New("buffer: range not present")
 	ErrClosed     = errors.New("buffer: closed")
 	ErrOutOfRange = errors.New("buffer: offset/length out of range")
+	ErrDiskLimit  = errors.New("buffer: disk limit reached")
 )
 
 // Range is a half-open byte interval [Off, Off+Size).
@@ -62,6 +63,14 @@ type Config struct {
 	// from a prior run. Ignored without a DiskPath.
 	InitialRanges []Range
 
+	// InitialRangesPreaccounted means the Pool's InitialDiskUsage already
+	// includes InitialRanges, so reopening this file must not count them again.
+	InitialRangesPreaccounted bool
+
+	// PersistentDisk keeps on-disk bytes charged to the Pool after Close. The
+	// owner must call Pool.ReleaseDisk only when it actually removes the file.
+	PersistentDisk bool
+
 	// ImmutableDisk writes complete, non-overlapping ranges directly to the
 	// disk tier. It avoids a duplicate userspace RAM window for content that is
 	// published only after WriteAt returns.
@@ -95,12 +104,12 @@ type Buffer struct {
 	// mu guards blocks, bytesInRAM, ranges and onDisk. Readers take RLock and
 	// hold it across a disk-tier pread so an eviction can't move the ground
 	// under them.
-	mu            sync.RWMutex
-	blocks        map[int64]*block
-	bytesInRAM    int64
-	maxBytes      int64
-	immutableDisk bool
-	writeWg       sync.WaitGroup
+	mu             sync.RWMutex
+	blocks         map[int64]*block
+	bytesInRAM     int64
+	maxBytes       int64
+	immutableDisk  bool
+	persistentDisk bool
 
 	ranges *rangeSet // present anywhere
 	onDisk *rangeSet // bytes physically represented in the file
@@ -182,12 +191,17 @@ func newBuffer(p *Pool, cfg Config) (*Buffer, error) {
 	}
 	b.file = file
 	b.immutableDisk = cfg.ImmutableDisk
+	b.persistentDisk = cfg.PersistentDisk
 	for _, r := range cfg.InitialRanges {
 		if r.Size == 0 {
 			continue
 		}
 		b.ranges.insert(r.Off, r.Size)
-		b.insertDisk(r.Off, r.Size)
+		if cfg.InitialRangesPreaccounted {
+			b.onDisk.insert(r.Off, r.Size)
+		} else {
+			b.insertDisk(r.Off, r.Size)
+		}
 	}
 	adviseSequential(file)
 	return b, nil
@@ -205,7 +219,11 @@ func (b *Buffer) WriteAt(p []byte, off int64) (int, error) {
 		return 0, ErrOutOfRange
 	}
 	if b.immutableDisk {
-		return b.writeImmutableAt(p, off)
+		n, err := b.writeImmutableAt(p, off)
+		if n == 0 && errors.Is(err, ErrDiskLimit) && b.pool.reclaimForWrite(int64(len(p))) {
+			return b.writeImmutableAt(p, off)
+		}
+		return n, err
 	}
 
 	end := off + int64(len(p))
@@ -214,7 +232,11 @@ func (b *Buffer) WriteAt(p []byte, off int64) (int, error) {
 		lo := int(cur - blockOff)
 		hi := int(min(end, blockEnd(blockOff)) - blockOff)
 		srcLo := int(cur - off)
-		if err := b.writeRegion(blockOff, lo, hi, p[srcLo:srcLo+(hi-lo)]); err != nil {
+		err := b.writeRegion(blockOff, lo, hi, p[srcLo:srcLo+(hi-lo)])
+		if errors.Is(err, ErrDiskLimit) && b.pool.reclaimForWrite(int64(blockSize)) {
+			err = b.writeRegion(blockOff, lo, hi, p[srcLo:srcLo+(hi-lo)])
+		}
+		if err != nil {
 			return srcLo, err
 		}
 		cur += int64(hi - lo)
@@ -228,21 +250,23 @@ func (b *Buffer) writeImmutableAt(p []byte, off int64) (int, error) {
 		b.mu.Unlock()
 		return 0, ErrClosed
 	}
-	b.writeWg.Add(1)
-	b.mu.Unlock()
-	defer b.writeWg.Done()
-
+	reserved, reserveErr := b.reserveDiskLocked(off, int64(len(p)))
+	if reserveErr != nil {
+		b.mu.Unlock()
+		return 0, fmt.Errorf("buffer: reserve immutable disk write at %d: %w", off, reserveErr)
+	}
 	b.fileMu.RLock()
 	n, err := b.file.WriteAt(p, off)
 	b.fileMu.RUnlock()
 	if n > 0 {
-		b.mu.Lock()
 		b.ranges.insert(off, int64(n))
-		b.insertDisk(off, int64(n))
+		b.commitReservedDiskLocked(off, int64(n), reserved)
 		b.persistChangedLocked()
-		b.mu.Unlock()
 		b.statsDiskWrites.Add(1)
+	} else {
+		b.pool.subDisk(reserved)
 	}
+	b.mu.Unlock()
 	if err != nil {
 		return n, fmt.Errorf("buffer: immutable disk write at %d: %w", off, err)
 	}
@@ -407,7 +431,13 @@ func (b *Buffer) Discard(off, length int64) error {
 func (b *Buffer) discard(off, length int64, requireReclaim bool) int64 {
 	end := off + length
 
-	b.mu.Lock()
+	if requireReclaim {
+		if !b.mu.TryLock() {
+			return 0
+		}
+	} else {
+		b.mu.Lock()
+	}
 	if b.closed.Load() {
 		b.mu.Unlock()
 		return 0
@@ -440,20 +470,22 @@ func (b *Buffer) discard(off, length int64, requireReclaim bool) int64 {
 		return 0
 	}
 	// Snapshot for the undo below; unpublish before punching so a reader sees
-	// ErrNotPresent rather than preading a half-made hole.
+	// ErrNotPresent rather than preading a half-made hole. Keep the physical
+	// bytes accounted until the hole punch succeeds, so a concurrent writer
+	// cannot reserve space that the filesystem never actually released.
 	onDisk := b.onDisk.presentRanges(off, length)
-	removed := b.removeDisk(off, length)
 	b.fileMu.Lock()
-	b.mu.Unlock()
-
-	if removed == 0 {
+	if len(onDisk) == 0 {
 		b.fileMu.Unlock()
+		b.mu.Unlock()
 		return 0
 	}
 	err := punchHole(b.file, off, length)
 	if err == nil {
+		removed := b.removeDisk(off, length)
 		adviseDontNeed(b.file, off, length)
 		b.fileMu.Unlock()
+		b.mu.Unlock()
 		b.statsPunches.Add(1)
 		b.statsReclaimed.Add(removed)
 		return removed
@@ -463,13 +495,11 @@ func (b *Buffer) discard(off, length int64, requireReclaim bool) int64 {
 		b.punchable.Store(false)
 	}
 
-	// The bytes remain allocated. Restore disk accounting; pool-driven reclaim
-	// also restores logical presence, while an explicit Discard stays discarded.
-	b.mu.Lock()
+	// The bytes remain allocated and accounted. Pool-driven reclaim restores
+	// logical presence, while an explicit Discard stays discarded.
 	if !b.closed.Load() {
-		for _, r := range onDisk {
-			b.insertDisk(r.Off, r.Size)
-			if requireReclaim {
+		if requireReclaim {
+			for _, r := range onDisk {
 				b.ranges.insert(r.Off, r.Size)
 			}
 		}
@@ -490,7 +520,9 @@ func (b *Buffer) punchBehindWindow(backWindow int64) int64 {
 	if head <= 0 || ceiling <= 0 {
 		return 0
 	}
-	b.mu.RLock()
+	if !b.mu.TryRLock() {
+		return 0
+	}
 	present := b.persistedRangesLocked(0, ceiling)
 	b.mu.RUnlock()
 
@@ -515,6 +547,30 @@ func (b *Buffer) punchBehindWindow(backWindow int64) int64 {
 func (b *Buffer) insertDisk(off, length int64) {
 	if added := b.onDisk.insert(off, length); added > 0 {
 		b.pool.addDisk(added)
+	}
+}
+
+// reserveDiskLocked reserves the not-yet-present part of a disk write. Caller
+// holds b.mu, which keeps the coverage calculation stable until commit.
+func (b *Buffer) reserveDiskLocked(off, length int64) (int64, error) {
+	reserved := length - b.onDisk.coverage(off, off+length)
+	if err := b.pool.reserveDisk(reserved); err != nil {
+		return 0, err
+	}
+	return reserved, nil
+}
+
+// commitReservedDiskLocked publishes a completed write and releases any
+// reservation left unused by a partial or overlapping write. Caller holds
+// b.mu.
+func (b *Buffer) commitReservedDiskLocked(off, length, reserved int64) {
+	added := b.onDisk.insert(off, length)
+	if added < reserved {
+		b.pool.subDisk(reserved - added)
+	} else if added > reserved {
+		// Defensive fallback for callers that supplied an undersized
+		// reservation; production write paths calculate under the same lock.
+		b.pool.addDisk(added - reserved)
 	}
 }
 
@@ -616,7 +672,7 @@ func (b *Buffer) DropBehind(offset, margin int64) {
 // pulling it back on a seek re-protects the region now being read.
 func (b *Buffer) SetReadHead(off int64) {
 	b.readHead.Store(max(off, 0))
-	if limit := b.pool.diskLimit.Load(); limit > 0 && b.pool.diskInUse.Load() > limit {
+	if limit := b.pool.diskLimit.Load(); limit > 0 && b.pool.diskInUse.Load() >= limit {
 		b.pool.signalDiskEvict()
 	}
 }
@@ -673,7 +729,6 @@ func (b *Buffer) Close() error {
 	if !b.closed.CompareAndSwap(false, true) {
 		return ErrClosed
 	}
-	b.writeWg.Wait()
 
 	// The exclusive lock excludes readers, so no goroutine can be touching a
 	// block's memory as it is unmapped.
@@ -690,7 +745,7 @@ func (b *Buffer) Close() error {
 	}
 	b.pool.dropBytes(b.bytesInRAM)
 	b.bytesInRAM = 0
-	if n := b.onDisk.totalSize(); n > 0 {
+	if n := b.onDisk.totalSize(); n > 0 && !b.persistentDisk {
 		b.pool.subDisk(n)
 	}
 	// Keep the range trackers as an immutable final snapshot. DFS records the
@@ -799,20 +854,28 @@ func (b *Buffer) evictLocked(victim *block) ([]Range, error) {
 // flushBlockLocked writes the dirty portions of blk. Caller holds b.mu.
 func (b *Buffer) flushBlockLocked(blk *block) error {
 	for _, r := range b.dirty.presentRanges(blk.off, blockEnd(blk.off)-blk.off) {
+		reserved, err := b.reserveDiskLocked(r.Off, r.Size)
+		if err != nil {
+			return fmt.Errorf("buffer: reserve disk write at %d: %w", r.Off, err)
+		}
 		lo := r.Off - blk.off
 		b.fileMu.Lock()
-		_, err := b.file.WriteAt(blk.data[lo:lo+r.Size], r.Off)
+		n, writeErr := b.file.WriteAt(blk.data[lo:lo+r.Size], r.Off)
 		b.fileMu.Unlock()
-		if err != nil {
-			return fmt.Errorf("buffer: disk write at %d: %w", r.Off, err)
+		if n > 0 {
+			b.commitReservedDiskLocked(r.Off, int64(n), reserved)
+			b.dirty.remove(r.Off, int64(n))
+			b.persistChangedLocked()
+		} else {
+			b.pool.subDisk(reserved)
+		}
+		if writeErr != nil {
+			return fmt.Errorf("buffer: disk write at %d: %w", r.Off, writeErr)
+		}
+		if int64(n) != r.Size {
+			return fmt.Errorf("buffer: disk write at %d: %w", r.Off, io.ErrShortWrite)
 		}
 		b.statsDiskWrites.Add(1)
-		b.insertDisk(r.Off, r.Size)
-		b.dirty.remove(r.Off, r.Size)
-		b.persistChangedLocked()
-		if limit := b.pool.diskLimit.Load(); limit > 0 && b.pool.diskInUse.Load() > limit {
-			b.pool.signalDiskEvict()
-		}
 	}
 	return nil
 }
