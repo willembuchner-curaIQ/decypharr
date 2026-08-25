@@ -86,6 +86,11 @@ type Manager struct {
 	// re-fires before the previous pass has updated the queue row.
 	processingEntries *xsync.Map[string, struct{}]
 
+	// Suppresses repeated provider submissions for the same torrent after an
+	// Arr import/re-grab loop. The queue itself handles duplicates while an
+	// entry is present; this gate covers the short window after Arr deletes it.
+	torrentSubmissions *torrentSubmissionGate
+
 	// Unified active-download queue for torrent and NZB imports.
 	jobQueue  *JobQueue
 	nzbSyncMu sync.Mutex
@@ -161,6 +166,7 @@ func New() *Manager {
 		debridSpeedTestResults: xsync.NewMap[string, debridTypes.SpeedTestResult](),
 		activeStreams:          xsync.NewMap[string, *ActiveStream](),
 		processingEntries:      xsync.NewMap[string, struct{}](),
+		torrentSubmissions:     newTorrentSubmissionGate(torrentSubmissionDedupWindow),
 	}
 
 	instance.init()

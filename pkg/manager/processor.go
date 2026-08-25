@@ -25,6 +25,18 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 		return fmt.Errorf("arr is required")
 	}
 
+	return m.torrentSubmissions.Do(ctx, torrentSubmissionKey(importReq), func() error {
+		// qBittorrent treats adding an existing hash as an idempotent success.
+		// Check again inside the singleflight call so concurrent requests cannot
+		// both pass the lookup and submit the same hash to a provider.
+		if _, err := m.queue.GetTorrent(importReq.Magnet.InfoHash); err == nil {
+			return nil
+		}
+		return m.addNewTorrent(ctx, importReq)
+	})
+}
+
+func (m *Manager) addNewTorrent(ctx context.Context, importReq *ImportRequest) error {
 	debridTorrent, err := m.SendToDebrid(ctx, importReq)
 	if err != nil {
 		if isTooManyActiveDownloads(err) {
