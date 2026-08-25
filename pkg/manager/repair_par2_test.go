@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 	usenetpkg "github.com/sirrobot01/decypharr/pkg/usenet"
 	"github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 )
@@ -103,6 +105,47 @@ func TestShouldDeepNZB(t *testing.T) {
 	cfg.Repair.DeepNZBInterval = "0"
 	if repair.shouldDeepNZB(time.Time{}, false, true, now) {
 		t.Fatal("zero interval should disable periodic deep audits")
+	}
+}
+
+func TestFilterDueCandidatesHonorsForcedDeepNZBAudit(t *testing.T) {
+	store, err := storage.NewStorage(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	repair := &Repair{manager: &Manager{storage: store}}
+	cfg := config.Get()
+	previous := cfg.Repair
+	t.Cleanup(func() { cfg.Repair = previous })
+	cfg.Repair.RecheckInterval = "168h"
+	cfg.Repair.DeepNZBInterval = "24h"
+	now := time.Now()
+
+	health := []*storage.EntryHealth{
+		{EntryName: "nzb-stale", Protocol: config.ProtocolNZB, Status: storage.HealthHealthy, LastCheckedAt: now, LastPAR2AuditAt: now.Add(-25 * time.Hour)},
+		{EntryName: "nzb-fresh", Protocol: config.ProtocolNZB, Status: storage.HealthHealthy, LastCheckedAt: now, LastPAR2AuditAt: now.Add(-time.Hour)},
+		{EntryName: "torrent", Protocol: config.ProtocolTorrent, Status: storage.HealthHealthy, LastCheckedAt: now, LastPAR2AuditAt: now.Add(-25 * time.Hour)},
+	}
+	candidates := make(map[string]*candidate, len(health))
+	for _, state := range health {
+		if err := store.SaveEntryHealth(state); err != nil {
+			t.Fatal(err)
+		}
+		candidates[state.EntryName] = &candidate{name: state.EntryName}
+	}
+
+	due, skipped := repair.filterDueCandidates(candidates, RepairRunOptions{}, true)
+	if len(due) != 0 || skipped != 3 {
+		t.Fatalf("ordinary due=%v skipped=%d", due, skipped)
+	}
+	due, skipped = repair.filterDueCandidates(candidates, RepairRunOptions{DeepNZB: true}, true)
+	if len(due) != 2 || due["nzb-stale"] == nil || due["nzb-fresh"] == nil || skipped != 1 {
+		t.Fatalf("forced due=%v skipped=%d", due, skipped)
+	}
+	due, skipped = repair.filterDueCandidates(candidates, RepairRunOptions{DeepNZB: true}, false)
+	if len(due) != 0 || skipped != 3 {
+		t.Fatalf("detect-only due=%v skipped=%d", due, skipped)
 	}
 }
 

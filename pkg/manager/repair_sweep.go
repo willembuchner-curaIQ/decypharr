@@ -163,7 +163,7 @@ func (r *Repair) executeSweep(ctx context.Context, run *storage.RepairRun, opts 
 		return
 	}
 
-	due, skipped := r.filterDueCandidates(candidates, opts.IgnoreLastChecked)
+	due, skipped := r.filterDueCandidates(candidates, opts, autoRepair)
 	// The full candidate set is only needed to compute `due`; drop it now so the
 	// EntryItems we filtered out don't pin memory for the whole probe pass.
 	candidates = nil
@@ -1175,8 +1175,8 @@ func (r *Repair) eligibleArrs(filter []string) []*arr.Arr {
 	return out
 }
 
-func (r *Repair) filterDueCandidates(in map[string]*candidate, ignoreLastChecked bool) (map[string]*candidate, int) {
-	if ignoreLastChecked {
+func (r *Repair) filterDueCandidates(in map[string]*candidate, opts RepairRunOptions, autoRepair bool) (map[string]*candidate, int) {
+	if opts.IgnoreLastChecked {
 		return in, 0
 	}
 	recheck := r.recheckInterval()
@@ -1186,6 +1186,10 @@ func (r *Repair) filterDueCandidates(in map[string]*candidate, ignoreLastChecked
 	for name, c := range in {
 		h, _ := r.manager.storage.GetEntryHealth(name)
 		if h != nil && !h.IsDue(now, recheck) {
+			if autoRepair && opts.DeepNZB && (h.Protocol == config.ProtocolNZB || h.Protocol == "") {
+				out[name] = c
+				continue
+			}
 			skipped++
 			continue
 		}

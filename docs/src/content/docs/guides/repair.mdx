@@ -72,7 +72,7 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
 | `workers`                 | Number of concurrent probe workers.                                                      | `5`         |
 | `strategy`                | `per_entry` (stop after first broken file in an entry) or `per_file` (probe all files).  | `per_entry` |
 | `recheck_interval`        | How long a healthy entry's check stays fresh before it becomes a candidate again.        | `168h`      |
-| `deep_nzb_interval`       | Full distinct-article STAT audit cadence for NZBs when auto-repair is enabled. Use `0` to disable. | `720h` |
+| `deep_nzb_interval`       | Minimum age for a full distinct-article STAT audit when an NZB next receives its normal repair check. Use `0` to disable. | `720h` |
 | `arrs`                    | Optional filter when `source=arr`. Empty list means all eligible Arrs.                   | `[]`        |
 | `auto_repair`             | When `true`, brokens are repaired in the same sweep. When `false`, the sweep is detect-only. | `false` |
 | `skip_nzb_repair`         | Skip NZB / Usenet entries during scheduled sweeps.                                      | `false` |

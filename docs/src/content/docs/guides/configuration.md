@@ -400,7 +400,7 @@ move the cache to another filesystem.
 | `workers`                 | Concurrent probe workers                                                   | `5`         |
 | `strategy`                | `per_entry` (stop at first broken file) or `per_file` (probe every file)   | `per_entry` |
 | `recheck_interval`        | How long a healthy entry stays fresh before becoming a candidate again     | `168h`      |
-| `deep_nzb_interval`       | Full NZB STAT audit cadence with auto-repair; `0` disables periodic deep audits | `720h` |
+| `deep_nzb_interval`       | Minimum age for a full NZB STAT audit during a normal repair check; `0` disables periodic deep audits | `720h` |
 | `arrs`                    | Optional Arr filter when `source=arr`. Empty = all eligible                | `[]`        |
 | `auto_repair`             | When `true`, missing NZB ranges use PAR2 first; remaining brokens fall back to Arr replacement | `false` |
 | `skip_nzb_repair`         | Skip NZB / Usenet entries during scheduled repair sweeps                   | `false`     |
