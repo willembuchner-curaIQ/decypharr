@@ -1355,9 +1355,10 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 	}
 
 	writer := &cacheWriter{
-		dl:     dl,
-		item:   dl.dls.item,
-		offset: missingRange.Pos,
+		dl:       dl,
+		item:     dl.dls.item,
+		offset:   missingRange.Pos,
+		ackStart: missingRange.Pos,
 	}
 
 	// Pull the missing bytes from the downloader's long-lived session. The
@@ -1372,6 +1373,13 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 			return 0, dl.ctx.Err()
 		}
 		return 0, err
+	}
+	// Only NZB sources own disposable decoded extents. Avoid putting even a
+	// no-op acknowledgement/mutex on the HTTP/debrid hot path.
+	if dl.dls.item.entry != nil && dl.dls.item.entry.Protocol == config.ProtocolNZB {
+		if acknowledger, ok := stream.(manager.CacheRangeAcknowledger); ok {
+			writer.acknowledge = acknowledger.AcknowledgeCachedRange
+		}
 	}
 	if _, err := stream.Seek(missingRange.Pos, io.SeekStart); err != nil {
 		if dl.ctx.Err() != nil {
@@ -1538,10 +1546,12 @@ func (dl *downloader) retryAttempts() int {
 // Once Write is called, cacheWriter publishes immediately. The buffer beneath
 // it owns block storage, persistence, and disk-write coalescing.
 type cacheWriter struct {
-	dl      *downloader
-	item    *CacheItem
-	offset  int64 // next write offset; advances with Write
-	written int64
+	dl          *downloader
+	item        *CacheItem
+	offset      int64 // next write offset; advances with Write
+	written     int64
+	ackStart    int64
+	acknowledge func(off, length int64)
 	// onProgress is called whenever bytes are consumed from the stream.
 	onProgress func(int)
 }
@@ -1575,6 +1585,11 @@ func (w *cacheWriter) Write(p []byte) (int, error) {
 	w.offset += int64(n)
 	actuallyWritten := int64(n - skipped)
 	w.written += actuallyWritten
+	if w.acknowledge != nil {
+		// The cumulative interval makes segments split across 1 MiB DFS
+		// batches releasable once their final bytes have been published.
+		w.acknowledge(w.ackStart, w.offset-w.ackStart)
+	}
 
 	if actuallyWritten > 0 {
 		w.dl.dls.item.cache.AddDownloadedBytes(actuallyWritten)

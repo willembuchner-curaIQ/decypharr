@@ -49,6 +49,11 @@ type SegmentCache struct {
 
 	// consumedFloor steers extent eviction away from active playback.
 	consumedFloor atomic.Int64
+	// deliveryMode belongs to a persistent downstream cache. idleDelivery is
+	// set once its last handle closes so late speculative fetches are discarded
+	// instead of rebuilding a cache nobody is consuming.
+	deliveryMode bool
+	idleDelivery atomic.Bool
 
 	// Sharded waiters: readers blocking on WaitForSegment park on one of
 	// numShards condition variables to avoid global wakeup storms.
@@ -112,7 +117,7 @@ func NewSegmentCache(
 	diskPath := ""
 	memSize := memoryWindowSize(config, segments)
 	bufCfg.MemorySize = memSize
-	memoryMode := config.Retention == RetentionWindow
+	memoryMode := config.Retention != RetentionRewind
 	if !memoryMode {
 		var err error
 		diskPath = config.DiskPath
@@ -163,6 +168,7 @@ func NewSegmentCache(
 		resident:     make([]atomic.Pointer[residentSegment], segCount),
 		memBudget:    bufCfg.MemorySize,
 		segBytesHint: segBytesHint,
+		deliveryMode: config.Retention == RetentionDelivery,
 		diskPath:     diskPath,
 		ctx:          ctx,
 		cancel:       cancel,
@@ -377,25 +383,37 @@ func (sc *SegmentCache) publishResident(segIdx int, resident *residentSegment) {
 		resident.charge = int64(len(resident.data))
 	}
 
+	// Reserve the global charge before publishing StateOnDisk. Reclaim may
+	// lock this cache, so it must happen before residentMu is held.
+	sc.extentPool.add(resident.charge)
 	sc.residentMu.Lock()
+	if sc.deliveryMode && sc.idleDelivery.Load() {
+		// Recheck under the same lock used by ReleaseIdleDelivery: an in-flight
+		// speculative fetch must not publish immediately after the idle sweep.
+		sc.residentMu.Unlock()
+		sc.extentPool.release(resident.charge)
+		sc.states[segIdx].Store(uint32(StateEmpty))
+		sc.wakeWaiters(segIdx)
+		return
+	}
 	old := sc.resident[segIdx].Swap(resident)
 	sc.residentAt = append(sc.residentAt, segIdx)
 	sc.residentN.Add(resident.charge)
-	sc.residentMu.Unlock()
 	if old != nil {
 		sc.residentN.Add(-old.charge)
-		sc.extentPool.release(old.charge)
 	}
-
 	sc.segLengths[segIdx].Store(int64(len(resident.data)))
 	sc.states[segIdx].Store(uint32(StateOnDisk))
-	sc.extentPool.add(resident.charge)
+	sc.residentMu.Unlock()
+	if old != nil {
+		sc.extentPool.release(old.charge)
+	}
 	sc.trimResidentTo(sc.memBudget)
 	sc.wakeWaiters(segIdx)
 }
 
 func (sc *SegmentCache) trimResidentTo(target int64) int64 {
-	if !sc.memoryMode || target <= 0 || sc.residentN.Load() <= target {
+	if !sc.memoryMode || target < 0 || sc.residentN.Load() <= target {
 		return 0
 	}
 
@@ -534,6 +552,103 @@ func (sc *SegmentCache) UnpinRange(start, end int) {
 	for i := start; i <= end && i < sc.segCount; i++ {
 		sc.pinCounts[i].Add(-1)
 	}
+	if sc.deliveryMode && sc.idleDelivery.Load() {
+		sc.releaseResidentSegments(0, sc.segCount)
+	}
+}
+
+// ActivateDelivery marks a delivery cache as having a downstream consumer.
+// A new handle calls this before it can issue reads or prefetch work.
+func (sc *SegmentCache) ActivateDelivery() {
+	if sc.deliveryMode {
+		sc.idleDelivery.Store(false)
+	}
+}
+
+// ReleaseCachedRange relinquishes complete resident segments after the
+// downstream cache has successfully copied [off, off+length). Partial edge
+// segments remain resident; a later cumulative acknowledgement releases them.
+func (sc *SegmentCache) ReleaseCachedRange(off, length int64) int64 {
+	if !sc.deliveryMode || sc.closed.Load() || length <= 0 || off < 0 || off >= sc.totalSize {
+		return 0
+	}
+	end := off + length
+	if end < off || end > sc.totalSize {
+		end = sc.totalSize
+	}
+
+	first := sc.binarySearchSegment(off)
+	if first < sc.segCount && sc.segOffsets[first] < off {
+		first++ // the acknowledgement starts inside this segment
+	}
+	last := first
+	for last < sc.segCount && sc.segOffsets[last+1] <= end {
+		last++
+	}
+	return sc.releaseResidentSegments(first, last)
+}
+
+// ReleaseIdleDelivery drops every unpinned resident extent and prevents late
+// speculative completions from repopulating the cache. Segment metadata and
+// provider connections remain warm for a cheap reopen.
+func (sc *SegmentCache) ReleaseIdleDelivery() int64 {
+	if !sc.deliveryMode || sc.closed.Load() {
+		return 0
+	}
+	sc.idleDelivery.Store(true)
+	return sc.releaseResidentSegments(0, sc.segCount)
+}
+
+// releaseResidentSegments releases resident segments in [first, last).
+func (sc *SegmentCache) releaseResidentSegments(first, last int) int64 {
+	first = max(first, 0)
+	last = min(last, sc.segCount)
+	if !sc.memoryMode || first >= last {
+		return 0
+	}
+
+	var released int64
+	var releasedSegments int64
+	var wake []int
+	sc.residentMu.Lock()
+	for idx := first; idx < last; idx++ {
+		if sc.pinCounts[idx].Load() > 0 {
+			continue
+		}
+		if !sc.states[idx].CompareAndSwap(uint32(StateOnDisk), uint32(StateEvicting)) {
+			continue
+		}
+		resident := sc.resident[idx].Swap(nil)
+		if resident != nil {
+			released += resident.charge
+			releasedSegments++
+			sc.residentN.Add(-resident.charge)
+		}
+		sc.states[idx].Store(uint32(StateEmpty))
+		wake = append(wake, idx)
+	}
+	if released > 0 {
+		// Acknowledgements are frequent; compact stale positions now so pool
+		// pressure scans stay proportional to the live forward window.
+		kept := sc.residentAt[:0]
+		for _, idx := range sc.residentAt {
+			if sc.resident[idx].Load() != nil {
+				kept = append(kept, idx)
+			}
+		}
+		sc.residentAt = kept
+	}
+	sc.residentMu.Unlock()
+
+	if released > 0 {
+		sc.extentPool.release(released)
+		sc.stats.DeliveryReleases.Add(releasedSegments)
+		sc.stats.DeliveryBytes.Add(released)
+	}
+	for _, idx := range wake {
+		sc.wakeWaiters(idx)
+	}
+	return released
 }
 
 // IsPinned returns true if the segment has a positive pin count.

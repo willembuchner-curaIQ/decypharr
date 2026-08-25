@@ -124,11 +124,15 @@ type Retention uint8
 
 const (
 	// RetentionWindow keeps only the active delivery window. Use it when a
-	// downstream cache such as rclone VFS full owns rewind persistence.
+	// caller wants bounded in-memory rewind without a persistent disk tier.
 	RetentionWindow Retention = iota
 	// RetentionRewind adds a sparse disk tier so consumed data remains locally
 	// readable without another NNTP request.
 	RetentionRewind
+	// RetentionDelivery is a window-mode reader underneath a persistent
+	// downstream cache such as DFS. The downstream acknowledges ranges after
+	// copying them, allowing their duplicate Usenet extents to be released.
+	RetentionDelivery
 )
 
 // Config holds configuration for StreamingReader.
@@ -290,6 +294,10 @@ type ReaderStats struct {
 	CacheHits   atomic.Int64
 	CacheMisses atomic.Int64
 	Evictions   atomic.Int64
+	// DeliveryReleases count resident extents handed off to a downstream
+	// cache, and the backing-array capacity reclaimed with them.
+	DeliveryReleases atomic.Int64
+	DeliveryBytes    atomic.Int64
 
 	// Downloads
 	Downloads       atomic.Int64
@@ -315,6 +323,8 @@ func (s *ReaderStats) Snapshot() map[string]int64 {
 		"cache_hits":         s.CacheHits.Load(),
 		"cache_misses":       s.CacheMisses.Load(),
 		"evictions":          s.Evictions.Load(),
+		"delivery_releases":  s.DeliveryReleases.Load(),
+		"delivery_bytes":     s.DeliveryBytes.Load(),
 		"downloads":          s.Downloads.Load(),
 		"download_bytes":     s.DownloadBytes.Load(),
 		"download_retries":   s.DownloadRetries.Load(),

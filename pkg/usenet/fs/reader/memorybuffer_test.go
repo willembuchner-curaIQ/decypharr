@@ -182,6 +182,82 @@ func TestMemoryWriterAdoptsDecodedExtent(t *testing.T) {
 	}
 }
 
+func TestDeliveryAcknowledgementReleasesCompleteSegments(t *testing.T) {
+	const segSize = int64(64 << 10)
+	stats := &ReaderStats{}
+	cfg := DefaultConfig()
+	cfg.Retention = RetentionDelivery
+	cache, err := NewSegmentCache(context.Background(), mkSegs(4, segSize), cfg, stats, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+
+	for i := range 4 {
+		putSegment(t, cache, i, make([]byte, segSize))
+	}
+	before := cache.residentN.Load()
+	// The acknowledged range starts halfway through segment 0 and ends at
+	// segment 3, so only complete segments 1 and 2 may be released.
+	released := cache.ReleaseCachedRange(segSize/2, 5*segSize/2)
+	if released <= 0 || cache.residentN.Load() != before-released {
+		t.Fatalf("resident bytes before=%d released=%d after=%d", before, released, cache.residentN.Load())
+	}
+	for _, idx := range []int{1, 2} {
+		if state := cache.GetState(idx); state != StateEmpty {
+			t.Fatalf("complete segment %d state=%v, want Empty", idx, state)
+		}
+	}
+	for _, idx := range []int{0, 3} {
+		if state := cache.GetState(idx); state != StateOnDisk {
+			t.Fatalf("boundary segment %d state=%v, want OnDisk", idx, state)
+		}
+	}
+	if stats.DeliveryReleases.Load() != 2 || stats.DeliveryBytes.Load() != released {
+		t.Fatalf("delivery stats: releases=%d bytes=%d, want 2/%d",
+			stats.DeliveryReleases.Load(), stats.DeliveryBytes.Load(), released)
+	}
+}
+
+func TestIdleDeliveryDropsResidentsAndLatePublishes(t *testing.T) {
+	const segSize = int64(64 << 10)
+	cfg := DefaultConfig()
+	cfg.Retention = RetentionDelivery
+	cache, err := NewSegmentCache(context.Background(), mkSegs(3, segSize), cfg, &ReaderStats{}, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+
+	putSegment(t, cache, 0, make([]byte, segSize))
+	cache.PinRange(0, 0)
+	putSegment(t, cache, 1, make([]byte, segSize))
+	cache.ReleaseIdleDelivery()
+	if cache.GetState(1) != StateEmpty {
+		t.Fatalf("unpinned idle segment state=%v, want Empty", cache.GetState(1))
+	}
+	if cache.GetState(0) != StateOnDisk {
+		t.Fatalf("pinned idle segment state=%v, want OnDisk", cache.GetState(0))
+	}
+	cache.UnpinRange(0, 0)
+	if cache.GetState(0) != StateEmpty {
+		t.Fatalf("segment survived final unpin while idle: %v", cache.GetState(0))
+	}
+
+	// A speculative fetch that completes after the last handle closed must
+	// not silently rebuild the idle delivery cache.
+	putSegment(t, cache, 2, make([]byte, segSize))
+	if cache.GetState(2) != StateEmpty || cache.resident[2].Load() != nil {
+		t.Fatal("late speculative publish repopulated an idle delivery cache")
+	}
+
+	cache.ActivateDelivery()
+	putSegment(t, cache, 2, make([]byte, segSize))
+	if cache.GetState(2) != StateOnDisk || cache.resident[2].Load() == nil {
+		t.Fatal("reactivated delivery cache rejected a useful segment")
+	}
+}
+
 func TestRetentionStorageTiers(t *testing.T) {
 	if DefaultConfig().Retention != RetentionWindow {
 		t.Fatal("window retention must be the default")

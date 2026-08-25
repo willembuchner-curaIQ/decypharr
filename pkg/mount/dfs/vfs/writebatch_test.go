@@ -208,6 +208,44 @@ func TestCopyBatchedStopsOnWriteError(t *testing.T) {
 	}
 }
 
+func TestCacheWriterAcknowledgesCumulativePublishedRange(t *testing.T) {
+	item, dls := newBenchItem(t, 4<<20)
+	dl := &downloader{dls: dls}
+	const start = int64(96 << 10)
+	var acknowledged []ranges.Range
+	w := &cacheWriter{
+		dl:       dl,
+		item:     item,
+		offset:   start,
+		ackStart: start,
+		acknowledge: func(off, length int64) {
+			acknowledged = append(acknowledged, ranges.Range{Pos: off, Size: length})
+		},
+	}
+
+	if _, err := w.Write(make([]byte, 32<<10)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(make([]byte, 64<<10)); err != nil {
+		t.Fatal(err)
+	}
+	want := []ranges.Range{
+		{Pos: start, Size: 32 << 10},
+		{Pos: start, Size: 96 << 10},
+	}
+	if len(acknowledged) != len(want) {
+		t.Fatalf("acknowledgements=%v, want %v", acknowledged, want)
+	}
+	for i := range want {
+		if acknowledged[i] != want[i] {
+			t.Fatalf("acknowledgement %d=%v, want %v", i, acknowledged[i], want[i])
+		}
+	}
+	if !item.HasRange(ranges.Range{Pos: start, Size: 96 << 10}) {
+		t.Fatal("acknowledgement ran before DFS published the complete range")
+	}
+}
+
 // TestKickWaitersFrontierGate: a parked waiter whose range is already
 // satisfiable is only woken by cacheWriter.Write once the write frontier
 // crosses minWaiterEnd — writes below it must not kick.

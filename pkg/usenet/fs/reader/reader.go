@@ -122,6 +122,7 @@ func (sr *StreamingReader) OpenCursor() ReadCursor {
 }
 
 func (sr *StreamingReader) newCursor() *Cursor {
+	sr.cache.ActivateDelivery()
 	sr.cursorMu.Lock()
 	defer sr.cursorMu.Unlock()
 	return sr.registerCursorLocked()
@@ -154,6 +155,12 @@ func (c *Cursor) ReadAtContext(ctx context.Context, p []byte, off int64) (int, e
 
 func (c *Cursor) Prefetch(ctx context.Context, off, length int64) {
 	c.sr.Prefetch(ctx, off, length)
+}
+
+// ReleaseCachedRange acknowledges that a persistent downstream cache owns an
+// independent copy of the range. It is intentionally optional on ReadCursor.
+func (c *Cursor) ReleaseCachedRange(off, length int64) {
+	c.sr.cache.ReleaseCachedRange(off, length)
 }
 
 // Close unregisters the cursor so its consume mark stops holding the
@@ -610,6 +617,16 @@ func (sr *StreamingReader) Prefetch(ctx context.Context, off, length int64) {
 
 	startSeg, endSeg := sr.cache.SegmentsForRange(off, length)
 	sr.fetcher.QueuePrefetchRange(startSeg, endSeg)
+}
+
+// ReleaseIdleDelivery sheds duplicate downstream extents while retaining the
+// reader metadata and shared NNTP connection pool for a fast reopen.
+func (sr *StreamingReader) ReleaseIdleDelivery() {
+	if sr.closed.Load() {
+		return
+	}
+	sr.cache.ReleaseIdleDelivery()
+	sr.fetcher.CancelPendingPrefetch()
 }
 
 // Read implements io.Reader using ReadAt with tracked position.

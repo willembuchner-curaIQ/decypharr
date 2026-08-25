@@ -66,6 +66,8 @@ type fsEntry struct {
 	readerCleanup func()                  // Cleanup function for reader
 	readerOnce    sync.Once               // Ensures reader is created exactly once
 	readerErr     error                   // Error from reader creation (if any)
+	retention     Retention
+	lifecycleMu   sync.Mutex // serializes acquire/release/idle teardown
 	refCount      atomic.Int32
 	lastAccessed  atomic.Int64 // Unix timestamp
 }
@@ -86,21 +88,36 @@ func (fe *fsEntry) cleanup() {
 
 // acquire takes a reference unless the entry has been claimed for teardown.
 func (fe *fsEntry) acquire() bool {
-	for {
-		n := fe.refCount.Load()
-		if n < 0 {
-			return false
-		}
-		if fe.refCount.CompareAndSwap(n, n+1) {
-			return true
-		}
+	fe.lifecycleMu.Lock()
+	defer fe.lifecycleMu.Unlock()
+	n := fe.refCount.Load()
+	if n < 0 {
+		return false
 	}
+	fe.refCount.Store(n + 1)
+	return true
 }
 
 // claimForCleanup atomically claims an idle (refCount == 0) entry for
 // teardown, fencing out any future acquire.
 func (fe *fsEntry) claimForCleanup() bool {
+	fe.lifecycleMu.Lock()
+	defer fe.lifecycleMu.Unlock()
 	return fe.refCount.CompareAndSwap(0, fsEntryTombstone)
+}
+
+// release drops one handle reference. Delivery readers shed resident extents
+// when the final downstream handle closes, while keeping metadata warm until
+// the ordinary idle janitor removes the entry.
+func (fe *fsEntry) release() {
+	fe.lifecycleMu.Lock()
+	defer fe.lifecycleMu.Unlock()
+	if fe.refCount.Add(-1) != 0 || fe.retention != RetentionDelivery {
+		return
+	}
+	if releaser, ok := fe.reader.(interface{ ReleaseIdleDelivery() }); ok {
+		releaser.ReleaseIdleDelivery()
+	}
 }
 
 // getOrCreateReader returns the shared reader, creating it lazily on first use.
@@ -257,8 +274,9 @@ type Usenet struct {
 type Retention = reader.Retention
 
 const (
-	RetentionWindow = reader.RetentionWindow
-	RetentionRewind = reader.RetentionRewind
+	RetentionWindow   = reader.RetentionWindow
+	RetentionRewind   = reader.RetentionRewind
+	RetentionDelivery = reader.RetentionDelivery
 )
 
 // fsKey identifies a file independently of its retention tier.
@@ -436,8 +454,9 @@ func (u *Usenet) createEntry(file *storage.NZBFile, prefetchSize int64, retentio
 	}
 
 	return &fsEntry{
-		fs:      usenetFS,
-		volumes: volumes,
+		fs:        usenetFS,
+		volumes:   volumes,
+		retention: retention,
 	}, nil
 }
 
@@ -445,8 +464,11 @@ func (u *Usenet) createEntry(file *storage.NZBFile, prefetchSize int64, retentio
 func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string, retention Retention) (*fsEntry, string, error) {
 	baseKey := fsKey(nzoID, filename)
 	key := baseKey + "::window"
-	if retention == RetentionRewind {
+	switch retention {
+	case RetentionRewind:
 		key = baseKey + "::rewind"
+	case RetentionDelivery:
+		key = baseKey + "::delivery"
 	}
 
 	// Fast path: entry already exists and isn't being torn down. acquire() (a
@@ -479,7 +501,9 @@ func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string, r
 		actual, loaded := u.fs.LoadOrStore(key, newEntry)
 		if !loaded {
 			// We won the race - use our new entry
-			newEntry.refCount.Add(1)
+			if !newEntry.acquire() {
+				return nil, key, fmt.Errorf("new file-system entry was claimed during creation")
+			}
 			newEntry.lastAccessed.Store(utils.NowUnix())
 			return newEntry, key, nil
 		}
@@ -506,8 +530,8 @@ func (u *Usenet) releaseFS(key string) {
 		return
 	}
 
-	entry.refCount.Add(-1)
 	entry.lastAccessed.Store(utils.NowUnix())
+	entry.release()
 }
 
 // cleanupIdleFS removes sessions with refCount=0 that haven't been used recently
@@ -1026,6 +1050,15 @@ func (h *FileHandle) Prefetch(ctx context.Context, off, length int64) {
 		length = h.u.prefetchSize
 	}
 	h.cursor.Prefetch(ctx, off, length)
+}
+
+// ReleaseCachedRange acknowledges that a downstream persistent cache has
+// accepted an independent copy. It remains valid during the narrow interval
+// between a body closing and its session publishing the final write.
+func (h *FileHandle) ReleaseCachedRange(off, length int64) {
+	if releaser, ok := h.cursor.(interface{ ReleaseCachedRange(int64, int64) }); ok {
+		releaser.ReleaseCachedRange(off, length)
+	}
 }
 
 // Close releases the cursor and the entry reference. Idempotent.

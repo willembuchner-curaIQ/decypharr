@@ -52,6 +52,17 @@ type StreamReader interface {
 	Prime() error
 }
 
+// CacheRangeAcknowledger is an optional capability implemented by protocol
+// sessions whose source maintains a disposable delivery cache. DFS calls it
+// only after its own cache has accepted an independent copy of the range.
+type CacheRangeAcknowledger interface {
+	AcknowledgeCachedRange(off, length int64)
+}
+
+type cachedRangeReleaser interface {
+	ReleaseCachedRange(off, length int64)
+}
+
 // transport supplies protocol-specific connect and recovery for a session.
 type transport interface {
 	// open returns a body positioned at pos reading toward EOF.
@@ -76,6 +87,10 @@ type session struct {
 	body       io.ReadCloser
 	bodyCancel context.CancelFunc
 	closed     bool
+	// cacheReleaser follows the most recently opened body. It deliberately
+	// survives a body EOF until the caller has published bytes returned by
+	// that final Read into its downstream cache.
+	cacheReleaser cachedRangeReleaser
 
 	// idle is a persistent timer, created on first arm and Reset thereafter.
 	// idleGen/idleArmGen invalidate stale firings: Read bumps idleGen on
@@ -114,6 +129,20 @@ func newSession(ctx context.Context, t transport, size, offset int64) *session {
 }
 
 func (s *session) Size() int64 { return s.size }
+
+// AcknowledgeCachedRange forwards downstream ownership only for transports
+// that expose the capability. HTTP/debrid sessions are a no-op.
+func (s *session) AcknowledgeCachedRange(off, length int64) {
+	if length <= 0 || off < 0 {
+		return
+	}
+	s.mu.Lock()
+	releaser := s.cacheReleaser
+	s.mu.Unlock()
+	if releaser != nil {
+		releaser.ReleaseCachedRange(off, length)
+	}
+}
 
 func (s *session) Read(p []byte) (int, error) {
 	s.mu.Lock()
@@ -288,6 +317,7 @@ func (s *session) Close() error {
 	}
 	s.closed = true
 	s.closeBodyLocked()
+	s.cacheReleaser = nil
 	if s.idle != nil {
 		s.idle.Stop()
 	}
@@ -309,6 +339,9 @@ func (s *session) connectLocked() error {
 		return err
 	}
 	s.body = body
+	if releaser, ok := body.(cachedRangeReleaser); ok {
+		s.cacheReleaser = releaser
+	}
 	s.bodyCancel = cancel
 	return nil
 }
@@ -506,6 +539,12 @@ func (b *usenetBody) Read(p []byte) (int, error) {
 
 func (b *usenetBody) Close() error { return b.h.Close() }
 
+func (b *usenetBody) ReleaseCachedRange(off, length int64) {
+	if releaser, ok := b.h.(cachedRangeReleaser); ok {
+		releaser.ReleaseCachedRange(off, length)
+	}
+}
+
 func (t *usenetTransport) open(ctx context.Context, pos int64) (io.ReadCloser, error) {
 	h, err := t.openFile(ctx)
 	if err != nil {
@@ -649,7 +688,7 @@ func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filenam
 
 func retentionForOwner(owner RewindOwner) usenet.Retention {
 	if owner == RewindOwnerDownstream {
-		return usenet.RetentionWindow
+		return usenet.RetentionDelivery
 	}
 	return usenet.RetentionRewind
 }
