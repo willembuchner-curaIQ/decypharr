@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"runtime"
 	"sort"
 
-	"github.com/javi11/gopar-turbo/gf2p16"
-	"github.com/javi11/gopar-turbo/rsec16"
+	"github.com/sirrobot01/decypharr/internal/par2gf16"
 )
 
 var (
@@ -133,12 +131,12 @@ type Plan struct {
 	missing           []int
 	available         []DataSource
 	recovery          []RecoverySource
-	matrix            gf2p16.Matrix
+	matrix            par2gf16.Matrix
 	selectionAttempts int
 }
 
 // NewPlan validates source coverage, retries recovery-row combinations when
-// needed, and constructs the matrix consumed by rsec16.FoldInputs.
+// needed, and constructs the matrix consumed by the ranged fold engine.
 func NewPlan(request PlanRequest) (*Plan, error) {
 	if request.DataShards <= 0 || request.DataShards > maxPAR2DataShards {
 		return nil, fmt.Errorf("%w: data shard count %d is outside 1..%d",
@@ -266,10 +264,8 @@ func uniqueRecoverySources(sources []RecoverySource) ([]RecoverySource, error) {
 }
 
 func validateMatrixBudget(missing, dataShards int, maxBytes int64) error {
-	// The final MxN matrix plus a candidate MxM matrix and its inverse are
-	// simultaneously live. Each GF element is two bytes.
-	// NewMatrixFromFunction briefly holds both its builder and immutable copy;
-	// inversion also holds the candidate, its clone, and the identity result.
+	// Reserve two final-sized matrices and three square inversion workspaces.
+	// Each GF element is two bytes.
 	elements := 2*uint64(missing)*uint64(dataShards) + 3*uint64(missing)*uint64(missing)
 	if elements > math.MaxUint64/2 || elements*2 > uint64(maxBytes) {
 		return fmt.Errorf("%w: coefficient matrices need approximately %d bytes (limit %d)",
@@ -288,27 +284,27 @@ func saturatingDouble(v uint64) uint64 {
 	return v * 2
 }
 
-func par2Generators(count int) []gf2p16.T {
-	generators := make([]gf2p16.T, 0, count)
+func par2Generators(count int) []par2gf16.Element {
+	generators := make([]par2gf16.Element, 0, count)
 	for power := 0; len(generators) < count && power < 1<<16; power++ {
 		if power%3 == 0 || power%5 == 0 || power%17 == 0 || power%257 == 0 {
 			continue
 		}
-		generators = append(generators, gf2p16.T(2).Pow(uint32(power)))
+		generators = append(generators, par2gf16.Element(2).Pow(uint32(power)))
 	}
 	return generators
 }
 
-func recoveryCoefficient(generator gf2p16.T, exponent uint16) gf2p16.T {
+func recoveryCoefficient(generator par2gf16.Element, exponent uint16) par2gf16.Element {
 	return generator.Pow(uint32(exponent))
 }
 
 func selectRecoveryRows(
 	candidates []RecoverySource,
 	missing []int,
-	generators []gf2p16.T,
+	generators []par2gf16.Element,
 	maxAttempts int,
-) ([]RecoverySource, gf2p16.Matrix, int, error) {
+) ([]RecoverySource, par2gf16.Matrix, int, error) {
 	needed := len(missing)
 	choice := make([]int, needed)
 	for i := range choice {
@@ -321,7 +317,7 @@ func selectRecoveryRows(
 		for i, candidate := range choice {
 			selected[i] = candidates[candidate]
 		}
-		matrix := gf2p16.NewMatrixFromFunction(needed, needed, func(i, j int) gf2p16.T {
+		matrix := par2gf16.NewMatrix(needed, needed, func(i, j int) par2gf16.Element {
 			return recoveryCoefficient(generators[missing[j]], selected[i].Exponent)
 		})
 		if inverse, err := matrix.Inverse(); err == nil {
@@ -334,7 +330,7 @@ func selectRecoveryRows(
 			for i := range candidates {
 				exponents[i] = candidates[i].Exponent
 			}
-			return nil, gf2p16.Matrix{}, attempts, &SingularSelectionError{
+			return nil, par2gf16.Matrix{}, attempts, &SingularSelectionError{
 				Missing: needed, Candidates: len(candidates), Attempts: attempts,
 				Exponents: exponents, Exhausted: more,
 			}
@@ -358,23 +354,21 @@ func nextCombination(choice []int, candidates int) bool {
 }
 
 func buildReconstructionMatrix(
-	inverse gf2p16.Matrix,
+	inverse par2gf16.Matrix,
 	available []DataSource,
 	selected []RecoverySource,
-	generators []gf2p16.T,
-) gf2p16.Matrix {
+	generators []par2gf16.Element,
+) par2gf16.Matrix {
 	outputs := len(selected)
 	inputs := len(available) + len(selected)
-	return gf2p16.NewMatrixFromFunction(outputs, inputs, func(out, input int) gf2p16.T {
+	return par2gf16.NewMatrix(outputs, inputs, func(out, input int) par2gf16.Element {
 		if input >= len(available) {
 			return inverse.At(out, input-len(available))
 		}
 		generator := generators[available[input].Shard]
-		var coefficient gf2p16.T
+		var coefficient par2gf16.Element
 		for equation, recovery := range selected {
-			coefficient = coefficient.Plus(
-				inverse.At(out, equation).Times(recoveryCoefficient(generator, recovery.Exponent)),
-			)
+			coefficient ^= inverse.At(out, equation).Mul(recoveryCoefficient(generator, recovery.Exponent))
 		}
 		return coefficient
 	})
@@ -417,7 +411,7 @@ func (p *Plan) SelectionAttempts() int {
 }
 
 // Recover reconstructs only ranges and streams them to sink. Internally each
-// interval is processed in bounded stripes through rsec16.FoldInputs.
+// interval is processed in bounded stripes through the reusable fold engine.
 func (p *Plan) Recover(ctx context.Context, ranges []ByteRange, sink RangeSink, options RecoverOptions) error {
 	if p == nil {
 		return fmt.Errorf("%w: nil plan", ErrInvalidPlan)
@@ -450,14 +444,24 @@ func (p *Plan) Recover(ctx context.Context, ranges []ByteRange, sink RangeSink, 
 	}
 	workers := options.NumGoroutines
 	if workers == 0 {
-		workers = rsec16.DefaultNumGoroutines()
-		if workers <= 0 {
-			workers = runtime.GOMAXPROCS(0)
-		}
+		workers = par2gf16.DefaultWorkers()
 	}
 	if workers < 1 {
 		return fmt.Errorf("%w: invalid goroutine count %d", ErrInvalidPlan, workers)
 	}
+
+	capacity := 0
+	for _, requested := range normalized {
+		requestedEnd, _ := requested.end()
+		alignedStart := requested.Offset &^ 1
+		alignedEnd := (requestedEnd + 1) &^ 1
+		capacity = max(capacity, int(min(stripeSize, alignedEnd-alignedStart)))
+	}
+	folder, err := par2gf16.NewFolder(p.matrix, capacity, workers)
+	if err != nil {
+		return err
+	}
+	defer folder.Close()
 
 	for _, requested := range normalized {
 		requestedEnd, _ := requested.end()
@@ -467,14 +471,7 @@ func (p *Plan) Recover(ctx context.Context, ranges []ByteRange, sink RangeSink, 
 			stripeLength64 := min(stripeSize, alignedEnd-stripeStart)
 			stripeEnd := stripeStart + stripeLength64
 			stripeLength := int(stripeEnd - stripeStart)
-			out := make([][]byte, len(p.missing))
-			for i := range out {
-				out[i] = make([]byte, stripeLength)
-			}
-
-			err := rsec16.FoldInputs(
-				p.matrix,
-				len(p.available)+len(p.recovery),
+			err := folder.FoldSize(
 				stripeLength,
 				func(input int, dst []byte) error {
 					if err := ctx.Err(); err != nil {
@@ -493,8 +490,6 @@ func (p *Plan) Recover(ctx context.Context, ranges []ByteRange, sink RangeSink, 
 					}
 					return nil
 				},
-				out,
-				workers,
 			)
 			if err != nil {
 				return err
@@ -507,7 +502,7 @@ func (p *Plan) Recover(ctx context.Context, ranges []ByteRange, sink RangeSink, 
 				continue
 			}
 			for i, shard := range p.missing {
-				data := out[i][emitStart-stripeStart : emitEnd-stripeStart]
+				data := folder.Output(i)[emitStart-stripeStart : emitEnd-stripeStart]
 				if err := sink(ctx, shard, emitStart, data); err != nil {
 					return fmt.Errorf("write recovered shard %d at %d+%d: %w", shard, emitStart, len(data), err)
 				}
