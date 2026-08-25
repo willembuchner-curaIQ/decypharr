@@ -306,6 +306,7 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	}
 	t := &types.Torrent{
 		Id:               strconv.Itoa(data.Id),
+		InfoHash:         data.Hash,
 		Name:             data.Name,
 		Bytes:            data.Size,
 		Progress:         data.Progress * 100,
