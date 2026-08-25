@@ -1,11 +1,13 @@
 package qbit
 
 import (
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strings"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -135,7 +137,7 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 		for _, url := range urlList {
 			if err := q.addMagnet(ctx, url, _arr, debridName, action, cfg.Notifications.CallbackURL, rmTrackerUrls, cfg.SkipMultiSeason); err != nil {
 				q.logger.Debug().Msgf("Error adding magnet: %s", err.Error())
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeTorrentAddError(w, err)
 				return
 			}
 			atleastOne = true
@@ -148,7 +150,7 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 			for _, fileHeader := range files {
 				if err := q.addTorrent(ctx, fileHeader, _arr, debridName, action, cfg.Notifications.CallbackURL, rmTrackerUrls, cfg.SkipMultiSeason); err != nil {
 					q.logger.Debug().Err(err).Str("torrent", fileHeader.Filename).Msgf("Error adding torrent")
-					http.Error(w, err.Error(), http.StatusBadRequest)
+					writeTorrentAddError(w, err)
 					return
 				}
 				atleastOne = true
@@ -162,6 +164,31 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+type torrentAddErrorResponse struct {
+	Error     string `json:"error"`
+	Code      string `json:"code"`
+	Retryable bool   `json:"retryable"`
+	Permanent bool   `json:"permanent"`
+}
+
+func writeTorrentAddError(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	response := torrentAddErrorResponse{
+		Error:     err.Error(),
+		Code:      "provider_error",
+		Retryable: true,
+	}
+
+	if typed, ok := errors.AsType[*customerror.Error](err); ok {
+		status = typed.StatusCode()
+		response.Code = typed.Code
+		response.Retryable = typed.IsRetryable()
+		response.Permanent = typed.IsPermanent()
+	}
+
+	utils.JSONResponse(w, response, status)
 }
 
 func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {

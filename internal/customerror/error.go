@@ -46,6 +46,13 @@ func (e *Error) IsPermanent() bool {
 	return e.permanent
 }
 
+func (e *Error) StatusCode() int {
+	if e.statusCode < http.StatusBadRequest {
+		return http.StatusInternalServerError
+	}
+	return e.statusCode
+}
+
 func (e *Error) IsSilent() bool {
 	if e.err == nil {
 		return false
@@ -61,6 +68,7 @@ func NewError(err error, statusCode int, code string, silent bool, headersWritte
 		err:            err,
 		silent:         silent,
 		statusCode:     statusCode,
+		Code:           code,
 		HeadersWritten: headersWritten,
 	}
 }
