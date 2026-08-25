@@ -156,18 +156,16 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 				break
 			}
 		}
-		a = arr.New(category, username, password, false, downloadUncached, "", "auto")
+		a = arr.New(category, "", "", false, downloadUncached, "", string(arr.SourceAuto))
 	}
-	arrValidated := false // This is a flag to indicate if arr validation was successful
 	if (username == "" || password == "") && cfg.UseAuth {
 		return nil, fmt.Errorf("unauthorized: Host and token are required for authentication(you've enabled authentication)")
 	}
-	if a.Source == "auto" {
-		a.Host = username
-		a.Token = password
-	}
-	if err := a.Validate(); err == nil {
-		arrValidated = true
+
+	arrValidated := false
+	if username != "" && password != "" {
+		candidate := arr.New(category, username, password, a.SkipRepair, a.DownloadUncached, a.SelectedDebrid, string(arr.SourceAuto))
+		arrValidated = candidate.Validate() == nil
 	}
 
 	if !arrValidated && cfg.UseAuth {
@@ -177,9 +175,12 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 		}
 	}
 
-	if username != "" && password != "" {
-		// Then add or update arr in manager
-		q.manager.Arr().AddOrUpdate(a)
+	if arrValidated && a.Source == arr.SourceAuto {
+		updated := *a
+		updated.Host = username
+		updated.Token = password
+		q.manager.Arr().AddOrUpdate(&updated)
+		a = &updated
 	}
 	return a, nil
 }

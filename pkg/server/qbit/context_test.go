@@ -1,9 +1,73 @@
 package qbit
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
+
+func newAuthenticationTestQBit(t *testing.T) *QBit {
+	t.Helper()
+	config.Reset()
+	config.SetConfigPath(t.TempDir())
+	t.Cleanup(config.Reset)
+	config.Get().UseAuth = false
+
+	mgr := manager.New()
+	t.Cleanup(func() {
+		if err := mgr.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+	return &QBit{manager: mgr}
+}
+
+func TestAuthenticateDoesNotOverwriteArrWithClientCredentials(t *testing.T) {
+	q := newAuthenticationTestQBit(t)
+	existing := arr.New("whisparr", "http://whisparr:6969", "arr-api-key", false, nil, "", string(arr.SourceAuto))
+	q.manager.Arr().AddOrUpdate(existing)
+
+	got, err := q.authenticate("whisparr", "homarr-user", "homarr-password")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if got.Host != existing.Host || got.Token != existing.Token {
+		t.Fatalf("authenticated Arr = host %q token %q, want host %q token %q", got.Host, got.Token, existing.Host, existing.Token)
+	}
+	stored := q.manager.Arr().Get("whisparr")
+	if stored.Host != existing.Host || stored.Token != existing.Token {
+		t.Fatalf("stored Arr = host %q token %q, want host %q token %q", stored.Host, stored.Token, existing.Host, existing.Token)
+	}
+}
+
+func TestAuthenticateDiscoversValidatedArrCredentials(t *testing.T) {
+	q := newAuthenticationTestQBit(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/health" || r.Header.Get("X-Api-Key") != "arr-api-key" {
+			http.Error(w, "unexpected Arr validation request", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	got, err := q.authenticate("whisparr", server.URL, "arr-api-key")
+	if err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+	if got.Host != server.URL || got.Token != "arr-api-key" || got.Source != arr.SourceAuto {
+		t.Fatalf("authenticated Arr = %#v", got)
+	}
+	stored := q.manager.Arr().Get("whisparr")
+	if stored == nil || stored.Host != server.URL || stored.Token != "arr-api-key" {
+		t.Fatalf("stored Arr = %#v", stored)
+	}
+}
 
 // TestDecodeAuthHeader covers the fix for the slice-bounds-out-of-range panic
 // at pkg/server/qbit/context.go:60-62. When the base64-decoded payload contains

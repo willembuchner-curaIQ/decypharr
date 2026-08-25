@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	json "github.com/bytedance/sonic"
@@ -27,7 +28,8 @@ func TestHandleLoginAlwaysReturnsSID(t *testing.T) {
 	})
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/api/v2/auth/login", nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/v2/auth/login", strings.NewReader("username=homarr-user&password=homarr-password"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	(&QBit{manager: mgr}).handleLogin(recorder, request)
 
 	if recorder.Code != http.StatusOK {
@@ -37,8 +39,12 @@ func TestHandleLoginAlwaysReturnsSID(t *testing.T) {
 	if len(cookies) != 1 || cookies[0].Name != "SID" || cookies[0].Value == "" {
 		t.Fatalf("login cookies = %#v, want one SID cookie", cookies)
 	}
-	if _, _, err := extractFromSID(cookies[0].Value); err != nil {
+	username, password, err := extractFromSID(cookies[0].Value)
+	if err != nil {
 		t.Fatalf("decode SID: %v", err)
+	}
+	if username != "homarr-user" || password != "homarr-password" {
+		t.Fatalf("SID credentials = %q/%q", username, password)
 	}
 }
 

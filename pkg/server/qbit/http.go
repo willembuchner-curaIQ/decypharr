@@ -17,14 +17,14 @@ func (q *QBit) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	username := r.FormValue("username")
 	password := r.FormValue("password")
-	a, err := q.authenticate(getCategory(ctx), username, password)
+	_, err := q.authenticate(getCategory(ctx), username, password)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 	cookie := &http.Cookie{
 		Name:     "SID",
-		Value:    createSID(a.Host, a.Token),
+		Value:    createSID(username, password),
 		Path:     "/",
 		SameSite: http.SameSiteNoneMode,
 	}
