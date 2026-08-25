@@ -15,7 +15,6 @@ import (
 
 func (q *QBit) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	cfg := config.Get()
 	username := r.FormValue("username")
 	password := r.FormValue("password")
 	a, err := q.authenticate(getCategory(ctx), username, password)
@@ -23,15 +22,13 @@ func (q *QBit) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-	if cfg.UseAuth {
-		cookie := &http.Cookie{
-			Name:     "SID",
-			Value:    createSID(a.Host, a.Token),
-			Path:     "/",
-			SameSite: http.SameSiteNoneMode,
-		}
-		http.SetCookie(w, cookie)
+	cookie := &http.Cookie{
+		Name:     "SID",
+		Value:    createSID(a.Host, a.Token),
+		Path:     "/",
+		SameSite: http.SameSiteNoneMode,
 	}
+	http.SetCookie(w, cookie)
 	_, _ = w.Write([]byte("Ok."))
 }
 

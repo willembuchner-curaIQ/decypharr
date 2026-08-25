@@ -8,8 +8,39 @@ import (
 	"testing"
 
 	json "github.com/bytedance/sonic"
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 )
+
+func TestHandleLoginAlwaysReturnsSID(t *testing.T) {
+	config.Reset()
+	config.SetConfigPath(t.TempDir())
+	t.Cleanup(config.Reset)
+	config.Get().UseAuth = false
+
+	mgr := manager.New()
+	t.Cleanup(func() {
+		if err := mgr.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/v2/auth/login", nil)
+	(&QBit{manager: mgr}).handleLogin(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	cookies := recorder.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != "SID" || cookies[0].Value == "" {
+		t.Fatalf("login cookies = %#v, want one SID cookie", cookies)
+	}
+	if _, _, err := extractFromSID(cookies[0].Value); err != nil {
+		t.Fatalf("decode SID: %v", err)
+	}
+}
 
 func TestWriteTorrentAddErrorPreservesSemantics(t *testing.T) {
 	tests := map[string]struct {
