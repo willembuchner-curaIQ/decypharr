@@ -39,6 +39,27 @@ func BenchmarkFolder(b *testing.B) {
 	}
 }
 
+func BenchmarkFolderCold(b *testing.B) {
+	inputs, matrix := benchmarkData(b, 28)
+	b.SetBytes(int64(benchmarkInputs * benchmarkSliceSize * 28))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		folder, err := NewFolder(matrix, benchmarkSliceSize, runtime.GOMAXPROCS(0))
+		if err != nil {
+			b.Fatal(err)
+		}
+		err = folder.Fold(func(index int, buffer []byte) error {
+			copy(buffer, inputs[index])
+			return nil
+		})
+		folder.Close()
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func benchmarkData(b *testing.B, outputs int) ([][]byte, Matrix) {
 	b.Helper()
 	rng := rand.New(rand.NewSource(42))

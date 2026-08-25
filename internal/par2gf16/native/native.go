@@ -20,12 +20,13 @@ import (
 var ErrInitialization = errors.New("par2gf16: native backend initialization failed")
 
 type Context struct {
-	pointer    *C.goblack_gf16_context
-	sliceSize  int
-	bufferSize int
-	alignment  int
-	stride     int
-	batchSize  int
+	pointer      *C.goblack_gf16_context
+	sliceSize    int
+	bufferSize   int
+	alignment    int
+	stride       int
+	batchSize    int
+	needsPrepare bool
 }
 
 func NewContext(sliceSize int) (*Context, error) {
@@ -37,12 +38,13 @@ func NewContext(sliceSize int) (*Context, error) {
 		return nil, ErrInitialization
 	}
 	context := &Context{
-		pointer:    pointer,
-		sliceSize:  sliceSize,
-		bufferSize: int(C.goblack_gf16_buffer_size(pointer)),
-		alignment:  int(C.goblack_gf16_alignment(pointer)),
-		stride:     int(C.goblack_gf16_stride(pointer)),
-		batchSize:  int(C.goblack_gf16_batch_size(pointer)),
+		pointer:      pointer,
+		sliceSize:    sliceSize,
+		bufferSize:   int(C.goblack_gf16_buffer_size(pointer)),
+		alignment:    int(C.goblack_gf16_alignment(pointer)),
+		stride:       int(C.goblack_gf16_stride(pointer)),
+		batchSize:    int(C.goblack_gf16_batch_size(pointer)),
+		needsPrepare: C.goblack_gf16_needs_prepare(pointer) != 0,
 	}
 	runtime.SetFinalizer(context, (*Context).Close)
 	return context, nil
@@ -62,6 +64,10 @@ func (c *Context) Stride() int {
 
 func (c *Context) BatchSize() int {
 	return c.batchSize
+}
+
+func (c *Context) NeedsPrepare() bool {
+	return c.needsPrepare
 }
 
 func (c *Context) NewBuffers(count int) []byte {

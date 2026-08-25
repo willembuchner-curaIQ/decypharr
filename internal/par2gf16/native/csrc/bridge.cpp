@@ -60,6 +60,10 @@ unsigned goblack_gf16_batch_size(goblack_gf16_context* context) {
     return size > max_sources ? max_sources : size;
 }
 
+int goblack_gf16_needs_prepare(goblack_gf16_context* context) {
+    return context->multiplier->needPrepare();
+}
+
 void goblack_gf16_prepare(goblack_gf16_context* context, void* destination,
                           const void* source, size_t source_size) {
     if (source_size < context->buffer_size) {

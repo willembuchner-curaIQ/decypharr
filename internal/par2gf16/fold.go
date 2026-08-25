@@ -9,6 +9,8 @@ import (
 
 var ErrInvalidFold = errors.New("par2gf16: invalid fold configuration")
 
+// Input fills buffer with the indexed source. It must fill all of buffer and
+// must not retain it after returning.
 type Input func(index int, buffer []byte) error
 
 type Folder struct {

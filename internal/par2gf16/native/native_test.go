@@ -20,6 +20,8 @@ func TestContextBuffersAndIdentityMultiply(t *testing.T) {
 		t.Fatalf("invalid context: method=%q buffer=%d stride=%d batch=%d",
 			context.Method(), context.BufferSize(), context.Stride(), context.BatchSize())
 	}
+	t.Logf("method=%s buffer=%d stride=%d batch=%d needs_prepare=%t",
+		context.Method(), context.BufferSize(), context.Stride(), context.BatchSize(), context.NeedsPrepare())
 
 	raw := make([]byte, sliceSize)
 	if _, err := rand.New(rand.NewSource(17)).Read(raw); err != nil {

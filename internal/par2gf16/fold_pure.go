@@ -83,7 +83,10 @@ func multiplicationTables(matrix Matrix) []*byteMultiplicationTable {
 
 func (b *pureFoldBackend) Fold(size int, next Input) error {
 	b.outputSize = size
-	clear(b.outputs)
+	for row := range b.matrix.rows {
+		start := row * b.sliceSize
+		clear(b.outputs[start : start+size])
+	}
 	b.reads <- pureRead{next: next, buffer: b.inputs[0][:size]}
 	if err := <-b.readResults; err != nil {
 		return err
@@ -118,7 +121,7 @@ func (b *pureFoldBackend) Output(row int) []byte {
 }
 
 func (b *pureFoldBackend) Method() string {
-	return "pure Go byte lookup"
+	return "pure Go lookup"
 }
 
 func (b *pureFoldBackend) Accelerated() bool {
@@ -134,7 +137,6 @@ func (b *pureFoldBackend) Close() {
 func (b *pureFoldBackend) read() {
 	defer b.wait.Done()
 	for read := range b.reads {
-		clear(read.buffer[:cap(read.buffer)])
 		b.readResults <- read.next(read.index, read.buffer)
 	}
 }
@@ -161,13 +163,5 @@ func (b *pureFoldBackend) work() {
 func xorBytes(destination, source []byte) {
 	for index, value := range source {
 		destination[index] ^= value
-	}
-}
-
-func mulAddBytes(destination, source []byte, table *byteMultiplicationTable) {
-	for index := 0; index < len(source); index += 2 {
-		value := table.low[source[index]] ^ table.high[source[index+1]]
-		destination[index] ^= byte(value)
-		destination[index+1] ^= byte(value >> 8)
 	}
 }

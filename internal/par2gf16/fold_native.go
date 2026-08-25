@@ -8,7 +8,10 @@ import (
 	"github.com/sirrobot01/decypharr/internal/par2gf16/native"
 )
 
-const nativeRangeSize = 128 << 10
+const (
+	nativeRangeSize       = 128 << 10
+	nativeInputGroupTarget = 12
+)
 
 type nativeFoldBackend struct {
 	matrix       Matrix
@@ -74,8 +77,19 @@ func newFoldBackend(matrix Matrix, sliceSize, workers int) (foldBackend, error) 
 		}
 	}
 
-	batchSize := min(max(layout.BatchSize(), 1), 64)
-	rangeSize := nativeRangeSize - nativeRangeSize%layout.Stride()
+	inputMultiple := max(layout.BatchSize(), 1)
+	batchSize := nativeInputGroupTarget + inputMultiple/2
+	batchSize -= batchSize % inputMultiple
+	batchSize = max(batchSize, inputMultiple)
+	if !layout.NeedsPrepare() {
+		batchSize *= 2
+	}
+	batchSize = min(batchSize, 64)
+	targetRangeSize := nativeRangeSize
+	if !layout.NeedsPrepare() {
+		targetRangeSize /= 2
+	}
+	rangeSize := targetRangeSize - targetRangeSize%layout.Stride()
 	if rangeSize < layout.Stride() {
 		rangeSize = layout.Stride()
 	}
@@ -96,11 +110,13 @@ func newFoldBackend(matrix Matrix, sliceSize, workers int) (foldBackend, error) 
 		workers:      contexts,
 		coefficients: make([]uint16, len(matrix.values)),
 		accumulators: layout.NewBuffers(matrix.rows),
-		raw:          make([]byte, sliceSize),
 		jobs:         make(chan nativeFoldJob, jobCount),
 		completed:    make(chan struct{}, jobCount),
 		reads:        make(chan nativeRead),
 		readResults:  make(chan nativeReadResult, 1),
+	}
+	if layout.NeedsPrepare() {
+		backend.raw = make([]byte, sliceSize)
 	}
 	for index, value := range matrix.values {
 		backend.coefficients[index] = uint16(value)
@@ -204,12 +220,19 @@ func (b *nativeFoldBackend) read() {
 	for request := range b.reads {
 		result := nativeReadResult{count: request.count}
 		for index := range request.count {
-			clear(b.raw)
+			destination := b.layout.Buffer(request.bank, index)
+			if !b.layout.NeedsPrepare() {
+				if err := request.next(request.start+index, destination[:request.size]); err != nil {
+					result.err = err
+					break
+				}
+				continue
+			}
 			if err := request.next(request.start+index, b.raw[:request.size]); err != nil {
 				result.err = err
 				break
 			}
-			b.layout.Prepare(b.layout.Buffer(request.bank, index), b.raw[:request.size])
+			b.layout.Prepare(destination, b.raw[:request.size])
 		}
 		b.readResults <- result
 	}

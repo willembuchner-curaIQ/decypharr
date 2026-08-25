@@ -52,20 +52,29 @@ func TestFolderPropagatesReadErrorAndCanBeReused(t *testing.T) {
 	}); !errors.Is(err, errRead) {
 		t.Fatalf("Fold error = %v, want %v", err, errRead)
 	}
+	inputs := make([][]byte, matrix.Columns())
+	for index := range inputs {
+		inputs[index] = make([]byte, 2050)
+		for offset := range inputs[index] {
+			inputs[index][offset] = byte(index + offset)
+		}
+	}
 	if err := folder.FoldSize(2050, func(index int, buffer []byte) error {
 		if len(buffer) != 2050 {
 			return fmt.Errorf("input buffer length = %d, want 2050", len(buffer))
 		}
-		for offset := range buffer {
-			buffer[offset] = byte(index + offset)
-		}
+		copy(buffer, inputs[index])
 		return nil
 	}); err != nil {
 		t.Fatalf("reused Fold: %v", err)
 	}
 	for row := range matrix.Rows() {
-		if got := len(folder.Output(row)); got != 2050 {
-			t.Fatalf("output %d length = %d, want 2050", row, got)
+		got := folder.Output(row)
+		if len(got) != 2050 {
+			t.Fatalf("output %d length = %d, want 2050", row, len(got))
+		}
+		if want := referenceFold(matrix.row(row), inputs); !bytes.Equal(got, want) {
+			t.Fatalf("output %d mismatch after partial-size reuse", row)
 		}
 	}
 }

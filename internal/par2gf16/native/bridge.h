@@ -18,6 +18,7 @@ size_t goblack_gf16_buffer_size(goblack_gf16_context* context);
 size_t goblack_gf16_alignment(goblack_gf16_context* context);
 size_t goblack_gf16_stride(goblack_gf16_context* context);
 unsigned goblack_gf16_batch_size(goblack_gf16_context* context);
+int goblack_gf16_needs_prepare(goblack_gf16_context* context);
 
 void goblack_gf16_prepare(goblack_gf16_context* context, void* destination,
                           const void* source, size_t source_size);
