@@ -167,13 +167,14 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 func (q *QBit) handleTorrentsDelete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hashes := getHashes(ctx)
+	deleteFiles := strings.EqualFold(r.FormValue("deleteFiles"), "true")
 
 	if len(hashes) == 0 {
 		http.Error(w, "No hashes provided", http.StatusBadRequest)
 		return
 	}
 	for _, hash := range hashes {
-		err := q.manager.Queue().Delete(hash, nil)
+		err := q.manager.Queue().Delete(hash, deleteFiles, nil)
 		if err != nil && !strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

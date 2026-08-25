@@ -437,7 +437,7 @@ func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := s.manager.Queue().Delete(hash, cleanup); err != nil {
+	if err := s.manager.Queue().Delete(hash, true, cleanup); err != nil {
 		s.logger.Error().Err(err).Str("hash", hash).Msg("Failed to delete entry from queue")
 		http.Error(w, "Failed to delete entry from queue", http.StatusInternalServerError)
 		return

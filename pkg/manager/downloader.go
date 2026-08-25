@@ -102,7 +102,7 @@ func (d *Downloader) process(entry *storage.Entry, mountPath string) error {
 	case config.DownloadActionNone:
 		d.completeEntry(entry)
 		// Remove entry from queue
-		_ = d.manager.queue.Delete(entry.InfoHash, nil)
+		_ = d.manager.queue.Delete(entry.InfoHash, true, nil)
 		return nil
 	default:
 		return d.processSymlink(entry, mountPath)
