@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/javi11/gopar-turbo/rsec16"
 	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/sirrobot01/decypharr/internal/par2test"
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/par2"
 )
@@ -45,11 +45,7 @@ func TestCoordinatorReusesCachedSourceWithoutNNTPBody(t *testing.T) {
 	const sliceSize = 64
 	target := testBytes(sliceSize, 31)
 	healthy := testBytes(sliceSize, 117)
-	coder, err := rsec16.NewCoderPAR2Vandermonde(2, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parity := coder.GenerateParity([][]byte{target, healthy})[0]
+	parity := par2test.Recovery([][]byte{target, healthy}, 0)
 	store, _ := coordinatorFixture(t, [][]byte{target, healthy}, [][]byte{parity})
 	var calls atomic.Int64
 	coordinator, err := NewCoordinator(store, nil, Policy{Enabled: true, MaxDownloadBytes: 1}, WithFetchFunc(func(context.Context, string) ([]byte, *nntp.YencMetadata, error) {
@@ -78,11 +74,7 @@ func TestCoordinatorSerializesDifferentRangesWithinOneNZB(t *testing.T) {
 	const sliceSize = 64
 	target := testBytes(sliceSize, 41)
 	healthy := testBytes(sliceSize, 131)
-	coder, err := rsec16.NewCoderPAR2Vandermonde(2, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parity := coder.GenerateParity([][]byte{target, healthy})[0]
+	parity := par2test.Recovery([][]byte{target, healthy}, 0)
 	store, _ := coordinatorFixture(t, [][]byte{target, healthy}, [][]byte{parity})
 	var active, maximum atomic.Int64
 	coordinator, err := NewCoordinator(store, nil, Policy{Enabled: true, MaxDownloadBytes: 1 << 20}, WithFetchFunc(func(context.Context, string) ([]byte, *nntp.YencMetadata, error) {
@@ -118,11 +110,7 @@ func testCoordinatorRange(t *testing.T, dataStart int64) {
 	const sliceSize = 64
 	target := testBytes(sliceSize, 3)
 	healthy := testBytes(sliceSize, 101)
-	coder, err := rsec16.NewCoderPAR2Vandermonde(2, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parity := coder.GenerateParity([][]byte{target, healthy})[0]
+	parity := par2test.Recovery([][]byte{target, healthy}, 0)
 	store, set := coordinatorFixture(t, [][]byte{target, healthy}, [][]byte{parity})
 
 	var calls atomic.Int64
@@ -170,11 +158,7 @@ func TestCoordinatorAtomicallyRejectsOverBudgetPlan(t *testing.T) {
 	const sliceSize = 64
 	target := testBytes(sliceSize, 9)
 	healthy := testBytes(sliceSize, 77)
-	coder, err := rsec16.NewCoderPAR2Vandermonde(2, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parity := coder.GenerateParity([][]byte{target, healthy})[0]
+	parity := par2test.Recovery([][]byte{target, healthy}, 0)
 	store, _ := coordinatorFixture(t, [][]byte{target, healthy}, [][]byte{parity})
 	var calls atomic.Int64
 	coordinator, err := NewCoordinator(store, nil, Policy{Enabled: true, MaxDownloadBytes: 99}, WithFetchFunc(func(context.Context, string) ([]byte, *nntp.YencMetadata, error) {
@@ -304,11 +288,7 @@ func TestCoordinatorDynamicallyAddsCorruptSourceShard(t *testing.T) {
 	const sliceSize = 64
 	target := testBytes(sliceSize, 11)
 	corrupt := testBytes(sliceSize, 199)
-	coder, err := rsec16.NewCoderPAR2Vandermonde(2, 2, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parity := coder.GenerateParity([][]byte{target, corrupt})
+	parity := par2test.RecoverySet([][]byte{target, corrupt}, 2)
 	store, _ := coordinatorFixture(t, [][]byte{target, corrupt}, parity)
 	var calls atomic.Int64
 	coordinator, err := NewCoordinator(store, nil, Policy{Enabled: true, MaxDownloadBytes: 1 << 20}, WithFetchFunc(func(context.Context, string) ([]byte, *nntp.YencMetadata, error) {
@@ -336,11 +316,7 @@ func TestCoordinatorRepairsFinalPartialSliceWithZeroPaddedSources(t *testing.T) 
 		slices.Clone(targetFile[:64]), append(slices.Clone(targetFile[64:]), make([]byte, 58)...),
 		slices.Clone(healthyFile[:64]), append(slices.Clone(healthyFile[64:]), make([]byte, 61)...),
 	}
-	coder, err := rsec16.NewCoderPAR2Vandermonde(len(shards), 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parity := coder.GenerateParity(shards)[0]
+	parity := par2test.Recovery(shards, 0)
 	store, err := Open(t.TempDir() + "/par2.db")
 	if err != nil {
 		t.Fatal(err)
@@ -520,11 +496,7 @@ func TestCoordinatorDeleteNZBInvalidatesDirtyManifest(t *testing.T) {
 func TestCoordinatorDeleteWaitsForInflightRepairAndRemovesItsWrites(t *testing.T) {
 	const sliceSize = 64
 	target, healthy := testBytes(sliceSize, 17), testBytes(sliceSize, 89)
-	coder, err := rsec16.NewCoderPAR2Vandermonde(2, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parity := coder.GenerateParity([][]byte{target, healthy})[0]
+	parity := par2test.Recovery([][]byte{target, healthy}, 0)
 	store, _ := coordinatorFixture(t, [][]byte{target, healthy}, [][]byte{parity})
 	fetchStarted := make(chan struct{})
 	releaseFetch := make(chan struct{})
@@ -720,11 +692,7 @@ func newColdCoordinatorFixture(t *testing.T) *coldCoordinatorFixture {
 	const sliceSize = 64
 	target := testBytes(sliceSize, 23)
 	healthy := testBytes(sliceSize, 151)
-	coder, err := rsec16.NewCoderPAR2Vandermonde(2, 1, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parity := coder.GenerateParity([][]byte{target, healthy})[0]
+	parity := par2test.Recovery([][]byte{target, healthy}, 0)
 	setID := SetID{8, 7, 6, 5}
 	targetID := coordinatorFileID(target, "target.bin")
 	healthyID := coordinatorFileID(healthy, "healthy.bin")

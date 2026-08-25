@@ -3,6 +3,7 @@ package par2gf16
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math/rand"
 	"testing"
 )
@@ -52,12 +53,38 @@ func TestFolderPropagatesReadErrorAndCanBeReused(t *testing.T) {
 		t.Fatalf("Fold error = %v, want %v", err, errRead)
 	}
 	if err := folder.FoldSize(2050, func(index int, buffer []byte) error {
+		if len(buffer) != 2050 {
+			return fmt.Errorf("input buffer length = %d, want 2050", len(buffer))
+		}
 		for offset := range buffer {
 			buffer[offset] = byte(index + offset)
 		}
 		return nil
 	}); err != nil {
 		t.Fatalf("reused Fold: %v", err)
+	}
+	for row := range matrix.Rows() {
+		if got := len(folder.Output(row)); got != 2050 {
+			t.Fatalf("output %d length = %d, want 2050", row, got)
+		}
+	}
+}
+
+func TestFolderFoldSizeValidation(t *testing.T) {
+	matrix := NewMatrix(1, 1, func(int, int) Element { return 1 })
+	folder, err := NewFolder(matrix, 64, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer folder.Close()
+
+	for _, size := range []int{-2, 0, 1, 63, 66} {
+		if err := folder.FoldSize(size, func(int, []byte) error { return nil }); err == nil {
+			t.Fatalf("FoldSize(%d) succeeded", size)
+		}
+	}
+	if err := folder.FoldSize(2, nil); err == nil {
+		t.Fatal("FoldSize accepted a nil input callback")
 	}
 }
 

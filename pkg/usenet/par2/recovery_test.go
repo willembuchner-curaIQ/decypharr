@@ -4,14 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"slices"
 	"testing"
 
-	"github.com/javi11/gopar-turbo/rsec16"
+	"github.com/sirrobot01/decypharr/internal/par2test"
 )
 
-func TestRecoverSelectedRangesAgainstLibraryParity(t *testing.T) {
+func TestRecoverSelectedRangesAgainstPolynomialParity(t *testing.T) {
 	const (
 		dataShards = 6
 		sliceSize  = 256
@@ -24,11 +25,7 @@ func TestRecoverSelectedRangesAgainstLibraryParity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	coder, err := rsec16.NewCoderPAR2Vandermonde(dataShards, 10, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parity := coder.GenerateParity(data)
+	parity := par2test.RecoverySet(data, 10)
 
 	missing := []int{1, 4}
 	missingSet := map[int]bool{1: true, 4: true}
@@ -113,6 +110,78 @@ func TestRecoverSelectedRangesAgainstLibraryParity(t *testing.T) {
 		}
 		if call.length == sliceSize {
 			t.Fatalf("reader fetched the full slice: %+v", call)
+		}
+	}
+}
+
+func TestRecoverRandomizedAgainstPolynomialParity(t *testing.T) {
+	rng := rand.New(rand.NewSource(0x5eed))
+	for iteration := range 40 {
+		dataShards := 2 + rng.Intn(11)
+		sliceSize := 2 * (1 + rng.Intn(257))
+		data := make([][]byte, dataShards)
+		for shard := range data {
+			data[shard] = make([]byte, sliceSize)
+			if _, err := rng.Read(data[shard]); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		missingCount := 1 + rng.Intn(min(dataShards, 4))
+		shards := rng.Perm(dataShards)
+		missing := append([]int(nil), shards[:missingCount]...)
+		missingSet := make(map[int]struct{}, missingCount)
+		for _, shard := range missing {
+			missingSet[shard] = struct{}{}
+		}
+		available := make([]DataSource, 0, dataShards-missingCount)
+		for shard := range dataShards {
+			if _, absent := missingSet[shard]; absent {
+				continue
+			}
+			available = append(available, DataSource{Shard: shard, Read: trackingReader("data", data[shard], nil)})
+		}
+
+		exponentOrder := rng.Perm(missingCount + 3)
+		recovery := make([]RecoverySource, len(exponentOrder))
+		for index, exponent := range exponentOrder {
+			parity := par2test.Recovery(data, uint16(exponent))
+			recovery[index] = RecoverySource{
+				Exponent: uint16(exponent),
+				Read:     trackingReader("recovery", parity, nil),
+			}
+		}
+		plan, err := NewPlan(PlanRequest{
+			DataShards: dataShards,
+			SliceSize:  int64(sliceSize),
+			Missing:    missing,
+			Data:       available,
+			Recovery:   recovery,
+		})
+		if err != nil {
+			t.Fatalf("iteration %d NewPlan: %v", iteration, err)
+		}
+
+		recovered := make(map[int][]byte, missingCount)
+		for _, shard := range missing {
+			recovered[shard] = make([]byte, sliceSize)
+		}
+		err = plan.Recover(
+			context.Background(),
+			[]ByteRange{{Length: int64(sliceSize)}},
+			func(_ context.Context, shard int, offset int64, value []byte) error {
+				copy(recovered[shard][offset:], value)
+				return nil
+			},
+			RecoverOptions{StripeSize: int64(2 + rng.Intn(63)), NumGoroutines: 1 + rng.Intn(4)},
+		)
+		if err != nil {
+			t.Fatalf("iteration %d Recover: %v", iteration, err)
+		}
+		for _, shard := range missing {
+			if !slices.Equal(recovered[shard], data[shard]) {
+				t.Fatalf("iteration %d shard %d mismatch", iteration, shard)
+			}
 		}
 	}
 }
@@ -209,6 +278,52 @@ func TestRecoverValidatesRangesAndPropagatesReaderErrors(t *testing.T) {
 	}
 }
 
+func FuzzNormalizeRanges(f *testing.F) {
+	for _, seed := range []struct {
+		offset int64
+		length int64
+	}{
+		{0, 0},
+		{0, 1024},
+		{3, 19},
+		{1023, 1},
+		{math.MaxInt64, 1},
+		{-1, 2},
+	} {
+		f.Add(seed.offset, seed.length)
+	}
+	f.Fuzz(func(t *testing.T, offset, length int64) {
+		const sliceSize = int64(1024)
+		ranges, err := normalizeRanges([]ByteRange{
+			{Offset: offset, Length: length},
+			{Offset: 11, Length: 29},
+			{Offset: 17, Length: 41},
+		}, sliceSize)
+		validEnd, valid := (ByteRange{Offset: offset, Length: length}).end()
+		if !valid || validEnd > sliceSize {
+			if !errors.Is(err, ErrInvalidRange) {
+				t.Fatalf("normalizeRanges error = %v, want ErrInvalidRange", err)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index, interval := range ranges {
+			end, ok := interval.end()
+			if !ok || interval.Length <= 0 || end > sliceSize {
+				t.Fatalf("invalid normalized interval: %+v", interval)
+			}
+			if index > 0 {
+				previousEnd, _ := ranges[index-1].end()
+				if interval.Offset <= previousEnd {
+					t.Fatalf("unmerged intervals: %+v", ranges)
+				}
+			}
+		}
+	})
+}
+
 type readerCall struct {
 	name   string
 	off    int64
@@ -221,7 +336,9 @@ func trackingReader(name string, data []byte, calls *[]readerCall) RangeReader {
 			return fmt.Errorf("%s read out of range: %d+%d", name, off, len(dst))
 		}
 		copy(dst, data[off:off+int64(len(dst))])
-		*calls = append(*calls, readerCall{name: name, off: off, length: len(dst)})
+		if calls != nil {
+			*calls = append(*calls, readerCall{name: name, off: off, length: len(dst)})
+		}
 		return nil
 	}
 }

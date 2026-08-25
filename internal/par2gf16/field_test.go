@@ -59,6 +59,33 @@ func TestInverseOfZeroPanics(t *testing.T) {
 	Element(0).Inv()
 }
 
+func FuzzElementArithmetic(f *testing.F) {
+	for _, seed := range []struct {
+		left, right uint16
+		power       uint32
+	}{
+		{0, 0, 0},
+		{1, 1, 1},
+		{2, 0xffff, 65535},
+		{0x100b, 0x8000, 1<<31 + 7},
+	} {
+		f.Add(seed.left, seed.right, seed.power)
+	}
+	f.Fuzz(func(t *testing.T, left, right uint16, power uint32) {
+		x := Element(left)
+		y := Element(right)
+		if got, want := x.Mul(y), referenceProduct(x, y); got != want {
+			t.Fatalf("%04x * %04x = %04x, want %04x", x, y, got, want)
+		}
+		if got, want := x.Pow(power), referencePower(x, power); got != want {
+			t.Fatalf("%04x^%d = %04x, want %04x", x, power, got, want)
+		}
+		if x != 0 && x.Mul(x.Inv()) != 1 {
+			t.Fatalf("%04x has an invalid inverse", x)
+		}
+	})
+}
+
 func referenceProduct(x, y Element) Element {
 	product := uint32(0)
 	a := uint32(x)
