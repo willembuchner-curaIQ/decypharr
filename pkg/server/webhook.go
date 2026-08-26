@@ -15,11 +15,6 @@ import (
 // "media-id-scoped repair job". When no media id is supplied the webhook
 // falls back to a full manual sweep.
 func (s *Server) handleTautulli(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	var payload struct {
 		Topic   string `json:"topic"`
 		Arr     string `json:"arr,omitempty"`

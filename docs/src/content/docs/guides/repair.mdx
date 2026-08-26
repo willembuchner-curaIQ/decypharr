@@ -192,6 +192,26 @@ curl -X POST http://localhost:8282/api/repair/recheck/media \
   -d '{"arr":"Sonarr","media_id":"123","fix":true}'
 ```
 
+### Tautulli webhook
+
+Tautulli can trigger the same targeted recheck through `POST /webhooks/tautulli`. When authentication is enabled, the webhook must send the same API token as other API clients:
+
+```http
+Authorization: Bearer YOUR_API_TOKEN
+Content-Type: application/json
+```
+
+Example payload:
+
+```json
+{
+  "topic": "tautulli",
+  "arr": "Sonarr",
+  "tvdb_id": "123",
+  "fix": true
+}
+```
+
 ## Browse page
 
 Each entry row carries a health badge whose colour reflects the current status (healthy / broken / repairing / unknown / stale / unsupported). Hovering shows the last-checked time, broken-file count, and top failure reason. The row's action menu has **Recheck health**, and clicking the badge opens a side panel listing every broken file with its reason and Arr link.
