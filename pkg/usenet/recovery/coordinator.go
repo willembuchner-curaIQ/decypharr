@@ -13,6 +13,7 @@ import (
 
 	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
+	"github.com/sirrobot01/decypharr/pkg/usenet/par2"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -64,25 +65,48 @@ func WithFetchFunc(fetch FetchFunc) CoordinatorOption {
 	}
 }
 
-// CoordinatorStats is a monotonic process-lifetime snapshot. Download bytes
-// are NZB posted bytes reserved before BODY, not decoded payload bytes.
+// RepairFailureStats assigns every completed failed repair attempt to one
+// primary reason.
+type RepairFailureStats struct {
+	Canceled               uint64 `json:"canceled"`
+	DeadlineExceeded       uint64 `json:"deadline_exceeded"`
+	DownloadBudgetExceeded uint64 `json:"download_budget_exceeded"`
+	StorageBudgetExceeded  uint64 `json:"storage_budget_exceeded"`
+	UnboundedTraffic       uint64 `json:"unbounded_traffic"`
+	NoRecoverySet          uint64 `json:"no_recovery_set"`
+	LayoutUnavailable      uint64 `json:"layout_unavailable"`
+	AmbiguousMapping       uint64 `json:"ambiguous_mapping"`
+	ArticleNotFound        uint64 `json:"article_not_found"`
+	ProviderUnavailable    uint64 `json:"provider_unavailable"`
+	ProviderRejected       uint64 `json:"provider_rejected"`
+	CorruptData            uint64 `json:"corrupt_data"`
+	Unsupported            uint64 `json:"unsupported"`
+	Other                  uint64 `json:"other"`
+}
+
+// CoordinatorStats is a monotonic process-lifetime snapshot. Modeled download
+// bytes are NZB posted bytes reserved before BODY, not decoded payload bytes.
 type CoordinatorStats struct {
-	Repairs              uint64
-	RepairFailures       uint64
-	PatchHits            uint64
-	Observations         uint64
-	ManifestFlushes      uint64
-	BODYCalls            uint64
-	ModeledDownloadBytes uint64
-	RecoveryPayloadBytes uint64
-	PatchBytes           uint64
-	LocalSourceBytes     uint64
-	Store                Stats
+	RepairAttempts       uint64             `json:"repair_attempts"`
+	RepairSuccesses      uint64             `json:"repair_successes"`
+	RepairFailures       uint64             `json:"repair_failures"`
+	FailureReasons       RepairFailureStats `json:"failure_reasons"`
+	PatchHits            uint64             `json:"patch_hits"`
+	Observations         uint64             `json:"observations"`
+	ManifestFlushes      uint64             `json:"manifest_flushes"`
+	BODYCalls            uint64             `json:"body_calls"`
+	ModeledDownloadBytes uint64             `json:"modeled_download_bytes"`
+	RecoveryPayloadBytes uint64             `json:"recovery_payload_bytes"`
+	PatchBytes           uint64             `json:"patch_bytes"`
+	LocalSourceBytes     uint64             `json:"local_source_bytes"`
+	Store                Stats              `json:"store"`
 }
 
 type coordinatorCounters struct {
-	repairs              atomic.Uint64
+	repairAttempts       atomic.Uint64
+	repairSuccesses      atomic.Uint64
 	repairFailures       atomic.Uint64
+	failureReasons       repairFailureCounters
 	patchHits            atomic.Uint64
 	observations         atomic.Uint64
 	manifestFlushes      atomic.Uint64
@@ -91,6 +115,141 @@ type coordinatorCounters struct {
 	recoveryPayloadBytes atomic.Uint64
 	patchBytes           atomic.Uint64
 	localSourceBytes     atomic.Uint64
+}
+
+type repairFailureCounters struct {
+	canceled               atomic.Uint64
+	deadlineExceeded       atomic.Uint64
+	downloadBudgetExceeded atomic.Uint64
+	storageBudgetExceeded  atomic.Uint64
+	unboundedTraffic       atomic.Uint64
+	noRecoverySet          atomic.Uint64
+	layoutUnavailable      atomic.Uint64
+	ambiguousMapping       atomic.Uint64
+	articleNotFound        atomic.Uint64
+	providerUnavailable    atomic.Uint64
+	providerRejected       atomic.Uint64
+	corruptData            atomic.Uint64
+	unsupported            atomic.Uint64
+	other                  atomic.Uint64
+}
+
+type repairFailureReason uint8
+
+const (
+	repairFailureOther repairFailureReason = iota
+	repairFailureCanceled
+	repairFailureDeadlineExceeded
+	repairFailureDownloadBudgetExceeded
+	repairFailureStorageBudgetExceeded
+	repairFailureUnboundedTraffic
+	repairFailureNoRecoverySet
+	repairFailureLayoutUnavailable
+	repairFailureAmbiguousMapping
+	repairFailureArticleNotFound
+	repairFailureProviderUnavailable
+	repairFailureProviderRejected
+	repairFailureCorruptData
+	repairFailureUnsupported
+)
+
+func classifyRepairFailure(err error) repairFailureReason {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return repairFailureCanceled
+	case errors.Is(err, context.DeadlineExceeded):
+		return repairFailureDeadlineExceeded
+	case errors.Is(err, ErrBudgetExceeded):
+		return repairFailureDownloadBudgetExceeded
+	case errors.Is(err, ErrStorageBudget):
+		return repairFailureStorageBudgetExceeded
+	case errors.Is(err, ErrUnboundedTraffic):
+		return repairFailureUnboundedTraffic
+	case errors.Is(err, ErrNoRecoverySet), errors.Is(err, par2.ErrNotEnoughRecovery), errors.Is(err, par2.ErrSingularSelection):
+		return repairFailureNoRecoverySet
+	case errors.Is(err, ErrLayoutUnavailable):
+		return repairFailureLayoutUnavailable
+	case errors.Is(err, ErrAmbiguousMapping):
+		return repairFailureAmbiguousMapping
+	case errors.Is(err, ErrCorrupt), errors.Is(err, ErrChecksumMismatch),
+		errors.Is(err, par2.ErrInvalidMagic), errors.Is(err, par2.ErrInvalidLength),
+		errors.Is(err, par2.ErrPacketTooLarge), errors.Is(err, par2.ErrPacketHash),
+		errors.Is(err, par2.ErrTruncated), errors.Is(err, par2.ErrInvalidPacket):
+		return repairFailureCorruptData
+	case errors.Is(err, ErrLegacyManifestUnsupported), errors.Is(err, ErrUnsupported), errors.Is(err, ErrInvalid),
+		errors.Is(err, par2.ErrInvalidPlan), errors.Is(err, par2.ErrInvalidRange), errors.Is(err, par2.ErrUnsafePath):
+		return repairFailureUnsupported
+	}
+
+	if nntpErr, ok := errors.AsType[*nntp.Error](err); ok {
+		switch nntpErr.Type {
+		case nntp.ErrorTypeArticleNotFound:
+			return repairFailureArticleNotFound
+		case nntp.ErrorTypeConnection, nntp.ErrorTypeTimeout, nntp.ErrorTypeServerBusy, nntp.ErrorTypeNoAvailableConnection:
+			return repairFailureProviderUnavailable
+		case nntp.ErrorTypeAuthentication, nntp.ErrorTypePermissionDenied, nntp.ErrorTypeGroupNotFound:
+			return repairFailureProviderRejected
+		case nntp.ErrorTypeYencDecode:
+			return repairFailureCorruptData
+		default:
+			return repairFailureOther
+		}
+	}
+	return repairFailureOther
+}
+
+func (c *coordinatorCounters) recordRepairResult(err error) {
+	if err == nil {
+		c.repairSuccesses.Add(1)
+		return
+	}
+	c.repairFailures.Add(1)
+	c.failureReasons.add(classifyRepairFailure(err))
+}
+
+func (c *repairFailureCounters) add(reason repairFailureReason) {
+	switch reason {
+	case repairFailureCanceled:
+		c.canceled.Add(1)
+	case repairFailureDeadlineExceeded:
+		c.deadlineExceeded.Add(1)
+	case repairFailureDownloadBudgetExceeded:
+		c.downloadBudgetExceeded.Add(1)
+	case repairFailureStorageBudgetExceeded:
+		c.storageBudgetExceeded.Add(1)
+	case repairFailureUnboundedTraffic:
+		c.unboundedTraffic.Add(1)
+	case repairFailureNoRecoverySet:
+		c.noRecoverySet.Add(1)
+	case repairFailureLayoutUnavailable:
+		c.layoutUnavailable.Add(1)
+	case repairFailureAmbiguousMapping:
+		c.ambiguousMapping.Add(1)
+	case repairFailureArticleNotFound:
+		c.articleNotFound.Add(1)
+	case repairFailureProviderUnavailable:
+		c.providerUnavailable.Add(1)
+	case repairFailureProviderRejected:
+		c.providerRejected.Add(1)
+	case repairFailureCorruptData:
+		c.corruptData.Add(1)
+	case repairFailureUnsupported:
+		c.unsupported.Add(1)
+	default:
+		c.other.Add(1)
+	}
+}
+
+func (c *repairFailureCounters) stats() RepairFailureStats {
+	return RepairFailureStats{
+		Canceled: c.canceled.Load(), DeadlineExceeded: c.deadlineExceeded.Load(),
+		DownloadBudgetExceeded: c.downloadBudgetExceeded.Load(), StorageBudgetExceeded: c.storageBudgetExceeded.Load(),
+		UnboundedTraffic: c.unboundedTraffic.Load(), NoRecoverySet: c.noRecoverySet.Load(),
+		LayoutUnavailable: c.layoutUnavailable.Load(), AmbiguousMapping: c.ambiguousMapping.Load(),
+		ArticleNotFound: c.articleNotFound.Load(), ProviderUnavailable: c.providerUnavailable.Load(),
+		ProviderRejected: c.providerRejected.Load(), CorruptData: c.corruptData.Load(),
+		Unsupported: c.unsupported.Load(), Other: c.other.Load(),
+	}
 }
 
 type manifestState struct {
@@ -339,11 +498,9 @@ func (c *Coordinator) recoverArticleWithSource(ctx context.Context, nzbID string
 			reserved: make(map[string]bool), parsedRaw: make(map[RawFileKey]bool), aliases: make(map[FileID][]RawFileKey),
 			local: source, fetch: c.fetch,
 		}
-		c.counters.repairs.Add(1)
+		c.counters.repairAttempts.Add(1)
 		data, recoverErr := op.recoverArticle(segment)
-		if recoverErr != nil {
-			c.counters.repairFailures.Add(1)
-		}
+		c.counters.recordRepairResult(recoverErr)
 		return data, recoverErr
 	})
 	if err != nil {
@@ -411,11 +568,9 @@ func (c *Coordinator) RecoverArticles(ctx context.Context, nzbID string, segment
 			numWorkers: options.NumGoroutines,
 		}
 		operationLock.Lock()
-		c.counters.repairs.Add(1)
+		c.counters.repairAttempts.Add(1)
 		data, recoverErr := op.recoverArticle(segment)
-		if recoverErr != nil {
-			c.counters.repairFailures.Add(1)
-		}
+		c.counters.recordRepairResult(recoverErr)
 		operationLock.Unlock()
 		result.Articles = append(result.Articles, RecoveredArticle{Bytes: len(data), Err: recoverErr})
 	}
@@ -494,7 +649,8 @@ func (c *Coordinator) Stats() CoordinatorStats {
 		return CoordinatorStats{}
 	}
 	return CoordinatorStats{
-		Repairs: c.counters.repairs.Load(), RepairFailures: c.counters.repairFailures.Load(),
+		RepairAttempts: c.counters.repairAttempts.Load(), RepairSuccesses: c.counters.repairSuccesses.Load(),
+		RepairFailures: c.counters.repairFailures.Load(), FailureReasons: c.counters.failureReasons.stats(),
 		PatchHits: c.counters.patchHits.Load(), Observations: c.counters.observations.Load(),
 		ManifestFlushes: c.counters.manifestFlushes.Load(), BODYCalls: c.counters.bodyCalls.Load(),
 		ModeledDownloadBytes: c.counters.modeledDownloadBytes.Load(),

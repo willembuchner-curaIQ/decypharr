@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,52 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/par2"
 )
+
+func TestCoordinatorStatsJSONUsesStableSnakeCaseFields(t *testing.T) {
+	encoded, err := json.Marshal(CoordinatorStats{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	assertJSONKeys(t, payload, []string{
+		"body_calls", "failure_reasons", "local_source_bytes", "manifest_flushes",
+		"modeled_download_bytes", "observations", "patch_bytes", "patch_hits",
+		"recovery_payload_bytes", "repair_attempts", "repair_failures", "repair_successes", "store",
+	})
+
+	var reasons map[string]json.RawMessage
+	if err := json.Unmarshal(payload["failure_reasons"], &reasons); err != nil {
+		t.Fatal(err)
+	}
+	assertJSONKeys(t, reasons, []string{
+		"ambiguous_mapping", "article_not_found", "canceled", "corrupt_data",
+		"deadline_exceeded", "download_budget_exceeded", "layout_unavailable", "no_recovery_set",
+		"other", "provider_rejected", "provider_unavailable", "storage_budget_exceeded",
+		"unbounded_traffic", "unsupported",
+	})
+
+	var store map[string]json.RawMessage
+	if err := json.Unmarshal(payload["store"], &store); err != nil {
+		t.Fatal(err)
+	}
+	assertJSONKeys(t, store, []string{
+		"cache_hits", "cache_misses", "closed", "compactions", "deletes", "disk_bytes",
+		"entries", "manifests", "memory_bytes", "parsed_sets", "patches", "reads",
+		"recovery_slices", "writes",
+	})
+}
+
+func assertJSONKeys(t *testing.T, payload map[string]json.RawMessage, want []string) {
+	t.Helper()
+	got := slices.Sorted(maps.Keys(payload))
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("JSON keys=%v, want %v", got, want)
+	}
+}
 
 type memoryArticleRangeSource struct {
 	rawFileKey uint32
@@ -39,6 +87,46 @@ func (s memoryArticleRangeSource) ReadArticleRange(rawFileKey uint32, messageID 
 func TestCoordinatorRecoversArticleRangeAndReusesPatch(t *testing.T) {
 	testCoordinatorRange(t, 0)
 	testCoordinatorRange(t, 11) // archive member prefix/cropping path
+}
+
+func TestCoordinatorStatsTrackRepairOutcomes(t *testing.T) {
+	const sliceSize = 64
+	target := testBytes(sliceSize, 31)
+	healthy := testBytes(sliceSize, 117)
+	parity := par2test.Recovery([][]byte{target, healthy}, 0)
+	store, _ := coordinatorFixture(t, [][]byte{target, healthy}, [][]byte{parity})
+	coordinator, err := NewCoordinator(store, nil, Policy{Enabled: true, MaxDownloadBytes: 100}, WithFetchFunc(func(context.Context, string) ([]byte, *nntp.YencMetadata, error) {
+		return slices.Clone(healthy), &nntp.YencMetadata{Name: "healthy.bin", Size: sliceSize, PartSize: sliceSize}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := coordinator.RecoverArticle(t.Context(), "fixture", reader.SegmentMeta{RawFileKey: 1, RawLength: 8}); err != nil {
+		t.Fatalf("successful repair: %v", err)
+	}
+	coordinator.policy.MaxDownloadBytes = 99
+	if _, err := coordinator.RecoverArticle(t.Context(), "fixture", reader.SegmentMeta{RawFileKey: 1, RawOffset: 32, RawLength: 8}); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("budgeted repair error=%v, want ErrBudgetExceeded", err)
+	}
+
+	stats := coordinator.Stats()
+	if stats.RepairAttempts != 2 || stats.RepairSuccesses != 1 || stats.RepairFailures != 1 {
+		t.Fatalf("repair outcome stats=%+v", stats)
+	}
+	if stats.FailureReasons.DownloadBudgetExceeded != 1 {
+		t.Fatalf("repair failure reasons=%+v", stats.FailureReasons)
+	}
+}
+
+func TestClassifyRepairFailurePrefersPolicyFailureInJoinedError(t *testing.T) {
+	err := errors.Join(
+		&nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430, Message: "No Such Article"},
+		&BudgetExceededError{Limit: 100, Used: 60, Requested: 50},
+	)
+	if got := classifyRepairFailure(err); got != repairFailureDownloadBudgetExceeded {
+		t.Fatalf("failure reason=%d, want download budget", got)
+	}
 }
 
 func TestCoordinatorReusesCachedSourceWithoutNNTPBody(t *testing.T) {

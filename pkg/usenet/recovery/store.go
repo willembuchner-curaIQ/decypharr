@@ -44,20 +44,20 @@ type Store struct {
 // Stats is a cheap snapshot of recovery record counts, disk/memory footprint,
 // and append-store operational counters.
 type Stats struct {
-	Closed         bool
-	Entries        int
-	DiskBytes      int64
-	MemoryBytes    int64
-	Manifests      int
-	ParsedSets     int
-	RecoverySlices int
-	Patches        int
-	Writes         int64
-	Reads          int64
-	CacheHits      int64
-	CacheMisses    int64
-	Deletes        int64
-	Compactions    int64
+	Closed         bool  `json:"closed"`
+	Entries        int   `json:"entries"`
+	DiskBytes      int64 `json:"disk_bytes"`
+	MemoryBytes    int64 `json:"memory_bytes"`
+	Manifests      int   `json:"manifests"`
+	ParsedSets     int   `json:"parsed_sets"`
+	RecoverySlices int   `json:"recovery_slices"`
+	Patches        int   `json:"patches"`
+	Writes         int64 `json:"writes"`
+	Reads          int64 `json:"reads"`
+	CacheHits      int64 `json:"cache_hits"`
+	CacheMisses    int64 `json:"cache_misses"`
+	Deletes        int64 `json:"deletes"`
+	Compactions    int64 `json:"compactions"`
 }
 
 // Open opens or creates the recovery database at path. The database is
