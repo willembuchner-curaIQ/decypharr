@@ -159,6 +159,22 @@ func (u *Usenet) HydrateLegacyNZB(ctx context.Context, nzoID, sourceName string,
 	return err
 }
 
+// NeedsPAR2Hydration reports whether an NZB predates recovery provenance.
+func (u *Usenet) NeedsPAR2Hydration(nzoID string) (bool, error) {
+	if u == nil || u.nzbStorage == nil {
+		return false, errors.New("usenet NZB storage is unavailable")
+	}
+	if strings.TrimSpace(nzoID) == "" {
+		return false, errors.New("NZB id is empty")
+	}
+
+	nzb, err := u.nzbStorage.GetNZB(nzoID)
+	if err != nil {
+		return false, fmt.Errorf("load NZB metadata: %w", err)
+	}
+	return hasMissingRecoveryOrigins(nzb), nil
+}
+
 func (u *Usenet) hydrateLegacyNZB(ctx context.Context, nzoID, sourceName string, content []byte) (resultErr error) {
 	if err := validateNZB(content); err != nil {
 		return fmt.Errorf("invalid reacquired NZB: %w", err)
@@ -367,10 +383,19 @@ func deriveDirectMediaOrigins(legacy *storage.NZB, manifest *recovery.Manifest) 
 }
 
 func hasCompleteRecoveryOrigins(nzb *storage.NZB) bool {
+	found, missing := recoveryOriginCoverage(nzb)
+	return found && !missing
+}
+
+func hasMissingRecoveryOrigins(nzb *storage.NZB) bool {
+	_, missing := recoveryOriginCoverage(nzb)
+	return missing
+}
+
+func recoveryOriginCoverage(nzb *storage.NZB) (found, missing bool) {
 	if nzb == nil {
-		return false
+		return false, false
 	}
-	found := false
 	for i := range nzb.Files {
 		file := &nzb.Files[i]
 		if file.IsDeleted || file.FileType == storage.NZBFileTypePar2 || file.FileType == storage.NZBFileTypeIgnore {
@@ -379,11 +404,11 @@ func hasCompleteRecoveryOrigins(nzb *storage.NZB) bool {
 		for _, segment := range file.Segments {
 			found = true
 			if segment.RawFileKey == 0 || segment.RawOffset < 0 || segment.RawLength <= 0 {
-				return false
+				return true, true
 			}
 		}
 	}
-	return found
+	return found, false
 }
 
 func validateLegacyLogicalTopology(expected, current *storage.NZB) error {

@@ -61,6 +61,21 @@ func NewFixer(manager *Manager) *Fixer {
 	}
 }
 
+// ReinsertEntry retries a torrent through the configured debrid providers.
+func (m *Manager) ReinsertEntry(ctx context.Context, entry *storage.Entry) error {
+	if m.fixer == nil {
+		return fmt.Errorf("fixer not initialized")
+	}
+	result, err := m.fixer.FixTorrent(ctx, entry, false)
+	if err != nil {
+		return err
+	}
+	if !result.Success {
+		return errors.New("failed to re-insert torrent")
+	}
+	return nil
+}
+
 // FixTorrent attempts to fix a broken torrent by re-inserting across debrids
 // Strategy:
 // 1. Try to re-insert on current active debrid, except if skipCurrent is true

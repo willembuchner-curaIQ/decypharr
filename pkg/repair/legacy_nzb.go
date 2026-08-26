@@ -1,9 +1,10 @@
-package manager
+package repair
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 	usenetpkg "github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
@@ -22,64 +24,6 @@ var (
 	errLegacyNZBHydration = errors.New("legacy NZB hydration failed")
 	errLegacyNZBCooldown  = errors.New("legacy NZB hydration is in cooldown")
 )
-
-// legacyNZBProbeSource is deliberately attached to a file probe rather than
-// rediscovered after the entry has been marked broken. This lets the probe
-// recover the old NZB before health is finalized and before the Arr fallback
-// deletes any media rows.
-type legacyNZBProbeSource struct {
-	arrName string
-	content arr.ContentFile
-}
-
-// legacyNZBHydrationError distinguishes metadata reacquisition/hydration from
-// a PAR2 audit failure. A hydration failure must retain the sampled
-// usenet_segment_missing result so the existing Arr replacement fallback is
-// still reached.
-type legacyNZBHydrationError struct {
-	err error
-}
-
-func (e *legacyNZBHydrationError) Error() string {
-	if e == nil || e.err == nil {
-		return errLegacyNZBHydration.Error()
-	}
-	return fmt.Sprintf("%v: %v", errLegacyNZBHydration, e.err)
-}
-
-func (e *legacyNZBHydrationError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.err
-}
-
-func (e *legacyNZBHydrationError) Is(target error) bool {
-	return target == errLegacyNZBHydration
-}
-
-type legacyNZBCooldownError struct {
-	until time.Time
-	cause error
-}
-
-func (e *legacyNZBCooldownError) Error() string {
-	if e == nil {
-		return errLegacyNZBCooldown.Error()
-	}
-	return fmt.Sprintf("%v until %s", errLegacyNZBCooldown, e.until.UTC().Format(time.RFC3339))
-}
-
-func (e *legacyNZBCooldownError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
-	return e.cause
-}
-
-func (e *legacyNZBCooldownError) Is(target error) bool {
-	return target == errLegacyNZBCooldown
-}
 
 type legacyNZBFailure struct {
 	until time.Time
@@ -144,16 +88,14 @@ func (s *legacyNZBRecoveryState) cachedFailure(key string) error {
 	now := s.clock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for candidate, failure := range s.failures {
-		if !now.Before(failure.until) {
-			delete(s.failures, candidate)
-		}
-	}
+	maps.DeleteFunc(s.failures, func(_ string, failure legacyNZBFailure) bool {
+		return !now.Before(failure.until)
+	})
 	failure, ok := s.failures[key]
 	if !ok {
 		return nil
 	}
-	return &legacyNZBCooldownError{until: failure.until, cause: failure.err}
+	return fmt.Errorf("%w until %s: %w", errLegacyNZBCooldown, failure.until.UTC().Format(time.RFC3339), failure.err)
 }
 
 func (s *legacyNZBRecoveryState) rememberFailure(key string, err error) {
@@ -183,35 +125,15 @@ func cacheLegacyNZBFailure(err error) bool {
 	// Arr exposes response status on metadata-download errors. A timeout,
 	// throttling response, or upstream 5xx is operational even when it has no
 	// wrapped net.Error for the shared retry classifier to inspect.
-	var metadataErr *arr.NZBMetadataError
-	if errors.As(err, &metadataErr) {
+	if metadataErr, ok := errors.AsType[*arr.NZBMetadataError](err); ok {
 		return metadataErr.Status != http.StatusRequestTimeout &&
 			metadataErr.Status != http.StatusTooManyRequests &&
 			(metadataErr.Status < 500 || metadataErr.Status > 599)
 	}
-	if hasTransientHTTPStatus(err.Error()) {
-		return false
-	}
 	return true
 }
 
-func hasTransientHTTPStatus(message string) bool {
-	message = strings.ToLower(message)
-	for status := 408; status <= 599; status++ {
-		if status != http.StatusRequestTimeout && status != http.StatusTooManyRequests && status < 500 {
-			continue
-		}
-		code := fmt.Sprintf("%d", status)
-		if strings.Contains(message, "status "+code) ||
-			strings.Contains(message, ": "+code+" ") ||
-			strings.HasSuffix(message, ": "+code) {
-			return true
-		}
-	}
-	return false
-}
-
-func (r *Repair) legacyNZBState() *legacyNZBRecoveryState {
+func (r *Service) legacyNZBState() *legacyNZBRecoveryState {
 	r.legacyNZBMu.Lock()
 	defer r.legacyNZBMu.Unlock()
 	if r.legacyNZB == nil {
@@ -224,9 +146,9 @@ func legacyNZBCooldownKey(arrName, nzbID string) string {
 	return strings.TrimSpace(arrName) + "\x00" + strings.TrimSpace(nzbID)
 }
 
-func (r *Repair) hydrateLegacyNZB(ctx context.Context, nzbID string, source legacyNZBProbeSource) error {
-	if r == nil || r.manager == nil || r.manager.usenet == nil {
-		return &legacyNZBHydrationError{err: errors.New("usenet client is unavailable")}
+func (r *Service) hydrateLegacyNZB(ctx context.Context, nzbID string, source nzbHydrationSource) error {
+	if r == nil || r.usenet == nil {
+		return fmt.Errorf("%w: usenet client is unavailable", errLegacyNZBHydration)
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -236,31 +158,34 @@ func (r *Repair) hydrateLegacyNZB(ctx context.Context, nzbID string, source lega
 		return hydrateLegacyNZBFromSources(
 			ctx,
 			nzbID,
-			r.manager.usenet.LoadLegacyNZBSource,
+			r.usenet.LoadLegacyNZBSource,
 			func(ctx context.Context) ([]byte, error) {
-				if r.manager.arr == nil || strings.TrimSpace(source.arrName) == "" {
+				if r.arrs == nil || strings.TrimSpace(source.arrName) == "" {
 					return nil, errors.New("no Arr source is associated with this NZB file")
 				}
-				a := r.manager.arr.Get(source.arrName)
+				a := r.arrs.Get(source.arrName)
 				if a == nil {
 					return nil, fmt.Errorf("Arr %q is unavailable", source.arrName)
 				}
-				mediaID := legacyNZBMediaID(a.Type, source.content)
-				if mediaID <= 0 {
-					return nil, fmt.Errorf("Arr %q has no media ID for this NZB file", source.arrName)
+				if a.Host == "" || a.Token == "" || a.SkipRepair {
+					return nil, fmt.Errorf("Arr %q is not eligible for repair", source.arrName)
 				}
-				return a.ReacquireNZB(ctx, mediaID)
+				content, err := a.ReacquireNZBByDownloadID(ctx, nzbID)
+				if err == nil || source.mediaID <= 0 || !errors.Is(err, arr.ErrNZBReacquireNoMatch) {
+					return content, err
+				}
+				return a.ReacquireNZB(ctx, source.mediaID)
 			},
-			r.manager.usenet.HydrateLegacyNZB,
+			r.usenet.HydrateLegacyNZB,
 		)
 	})
 	if err != nil {
-		return &legacyNZBHydrationError{err: err}
+		return fmt.Errorf("%w: %w", errLegacyNZBHydration, err)
 	}
 	return nil
 }
 
-func legacyNZBMediaID(kind arr.Type, content arr.ContentFile) int {
+func arrMediaID(kind arr.Type, content arr.ContentFile) int {
 	switch kind {
 	case arr.Sonarr:
 		return content.EpisodeId
@@ -269,6 +194,35 @@ func legacyNZBMediaID(kind arr.Type, content arr.ContentFile) int {
 	default:
 		return 0
 	}
+}
+
+func (r *Service) nzbHydrationSource(candidate *candidate, entry *storage.Entry, fileName string) nzbHydrationSource {
+	var source nzbHydrationSource
+	if candidate != nil {
+		source.arrName = candidate.arrName
+	}
+	if source.arrName == "" && entry != nil {
+		source.arrName = entry.Category
+	}
+	if r == nil || r.arrs == nil || candidate == nil {
+		return source
+	}
+	a := r.arrs.Get(source.arrName)
+	if a == nil {
+		return source
+	}
+	if content, ok := candidate.contentMap[fileName]; ok {
+		source.mediaID = arrMediaID(a.Type, content)
+	}
+	if source.mediaID > 0 {
+		return source
+	}
+	for _, content := range candidate.contentMap {
+		if source.mediaID = arrMediaID(a.Type, content); source.mediaID > 0 {
+			break
+		}
+	}
+	return source
 }
 
 type legacyNZBLoadFunc func(string) (sourceName string, content []byte, err error)

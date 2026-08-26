@@ -1,4 +1,4 @@
-package manager
+package repair
 
 import (
 	"context"
@@ -40,18 +40,15 @@ func TestNZBRepairCacheCoalescesConcurrentRepairs(t *testing.T) {
 	const callers = 32
 	cache := newNZBRepairCache()
 	var calls atomic.Int64
-	ready := sync.WaitGroup{}
-	done := sync.WaitGroup{}
+	var ready, done sync.WaitGroup
 	ready.Add(callers)
-	done.Add(callers)
 	begin := make(chan struct{})
 	release := make(chan struct{})
 	started := make(chan struct{})
 	outcomes := make([]*nzbRepairOutcome, callers)
 
 	for i := range callers {
-		go func() {
-			defer done.Done()
+		done.Go(func() {
 			ready.Done()
 			<-begin
 			outcomes[i] = cache.do("nzb", func() (usenetpkg.NZBRepairReport, error) {
@@ -61,7 +58,7 @@ func TestNZBRepairCacheCoalescesConcurrentRepairs(t *testing.T) {
 				<-release
 				return usenetpkg.NZBRepairReport{Articles: 4}, nil
 			})
-		}()
+		})
 	}
 	ready.Wait()
 	close(begin)
@@ -83,7 +80,7 @@ func TestShouldDeepNZB(t *testing.T) {
 	cfg := config.Get()
 	previous := cfg.Repair.DeepNZBInterval
 	t.Cleanup(func() { cfg.Repair.DeepNZBInterval = previous })
-	repair := &Repair{}
+	repair := &Service{}
 	now := time.Now()
 
 	cfg.Repair.DeepNZBInterval = "720h"
@@ -114,7 +111,7 @@ func TestFilterDueCandidatesHonorsForcedDeepNZBAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	repair := &Repair{manager: &Manager{storage: store}}
+	repair := &Service{storage: store}
 	cfg := config.Get()
 	previous := cfg.Repair
 	t.Cleanup(func() { cfg.Repair = previous })
@@ -135,15 +132,15 @@ func TestFilterDueCandidatesHonorsForcedDeepNZBAudit(t *testing.T) {
 		candidates[state.EntryName] = &candidate{name: state.EntryName}
 	}
 
-	due, skipped := repair.filterDueCandidates(candidates, RepairRunOptions{}, true)
+	due, skipped := repair.filterDueCandidates(candidates, RunOptions{}, true)
 	if len(due) != 0 || skipped != 3 {
 		t.Fatalf("ordinary due=%v skipped=%d", due, skipped)
 	}
-	due, skipped = repair.filterDueCandidates(candidates, RepairRunOptions{DeepNZB: true}, true)
+	due, skipped = repair.filterDueCandidates(candidates, RunOptions{DeepNZB: true}, true)
 	if len(due) != 2 || due["nzb-stale"] == nil || due["nzb-fresh"] == nil || skipped != 1 {
 		t.Fatalf("forced due=%v skipped=%d", due, skipped)
 	}
-	due, skipped = repair.filterDueCandidates(candidates, RepairRunOptions{DeepNZB: true}, false)
+	due, skipped = repair.filterDueCandidates(candidates, RunOptions{DeepNZB: true}, false)
 	if len(due) != 0 || skipped != 3 {
 		t.Fatalf("detect-only due=%v skipped=%d", due, skipped)
 	}

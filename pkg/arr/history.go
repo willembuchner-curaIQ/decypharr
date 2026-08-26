@@ -3,6 +3,7 @@ package arr
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/http"
 	gourl "net/url"
 	"strconv"
@@ -293,20 +294,53 @@ func (a *Arr) FindGrabHistoryCtx(ctx context.Context, mediaDBID int) (*HistoryRe
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("history lookup failed: %s", resp.Status)
+		return nil, &NZBMetadataError{Stage: "history lookup", Status: resp.StatusCode}
 	}
 	if len(data.Records) == 0 {
 		return nil, nil
 	}
 	record := data.Records[0]
-	if record.Data != nil {
-		owned := make(map[string]string, len(record.Data))
-		for key, value := range record.Data {
-			owned[key] = value
-		}
-		record.Data = owned
-	}
+	record.Data = maps.Clone(record.Data)
 	return &record, nil
+}
+
+// FindGrabHistoryByDownloadIDCtx finds the grab that created a download-client item.
+func (a *Arr) FindGrabHistoryByDownloadIDCtx(ctx context.Context, downloadID string) (*HistoryRecord, error) {
+	if a == nil {
+		return nil, fmt.Errorf("arr not configured")
+	}
+	downloadID = strings.TrimSpace(downloadID)
+	if downloadID == "" {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	query := gourl.Values{}
+	query.Set("page", "1")
+	query.Set("pageSize", "50")
+	query.Set("sortKey", "date")
+	query.Set("sortDirection", "descending")
+	query.Set("eventType", "1")
+	query.Set("downloadId", downloadID)
+
+	var data HistorySchema
+	resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &data)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &NZBMetadataError{Stage: "history lookup", Status: resp.StatusCode}
+	}
+	for _, record := range data.Records {
+		if !strings.EqualFold(strings.TrimSpace(record.DownloadID), downloadID) {
+			continue
+		}
+		record.Data = maps.Clone(record.Data)
+		return &record, nil
+	}
+	return nil, nil
 }
 
 // FindGrabHistoryID preserves the original ID-only API for existing callers.

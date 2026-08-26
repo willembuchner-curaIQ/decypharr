@@ -114,18 +114,21 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 ### Sources
 
 - **`arr`** — walks Sonarr / Radarr media, resolves each item to an entry through the symlink target, and probes that entry. Broken files are enriched with Arr identifiers so repair can call `DeleteFiles` + `SearchMissing` directly.
-- **`managed`** — walks managed entries directly. Used when you don't have an Arr in front, or for entries imported outside the Arr flow. A legacy NZB can use a surviving local source file; without one or associated Arr metadata it has no automatic metadata re-acquire path and stays `broken` for you to handle manually.
+- **`managed`** — walks managed entries directly. Legacy NZBs first use a surviving local source; when that is gone, the entry's Arr category and NZB download ID are used to find the original grab history. Entries with neither source can still be health-checked, but cannot be prepared for PAR2 repair automatically.
 
 ## Workflow
 
 1. The cron tick (or a manual **Run Now**) opens a new run.
 2. Candidates are selected per the rules above.
 3. For each candidate, the entry is marked `repairing` and probed by a worker.
-4. NZB probes normally sample article availability. A sampled hole, a due `deep_nzb_interval`, or a manual **Deep NZB audit** triggers an exhaustive STAT pass over distinct content articles.
-5. If an older NZB has no recovery manifest, Decypharr tries its local NZB source, then asks its Arr for the exact grabbed release's NZB metadata. Strict message-ID validation must succeed before raw origins are attached to the existing NZB ID.
-6. Confirmed missing ranges are reconstructed with PAR2 under one NZB-wide traffic budget. Healthy articles are never BODY-downloaded by the audit, and repaired ranges are stored as narrow local patches.
-7. If metadata reacquisition or PAR2 cannot cover the missing range, Arr delete + search remains the fallback. Connection and provider errors remain `unknown` and never trigger replacement.
-8. The entry's health and the run's PAR2 scanned/missing/repaired/failed/traffic counters are persisted live.
+4. Before checking article availability, every NZB is inspected for stored recovery provenance. A legacy NZB with missing provenance is hydrated once for the whole NZB, even during a detect-only run and even when its sampled articles are healthy.
+5. Hydration uses the surviving local NZB first. Otherwise, Decypharr looks up the exact Arr grab by download ID, reacquires its NZB metadata, and validates the original message IDs before attaching raw origins and PAR2 data to the existing NZB ID.
+6. After preparation, NZB files receive the normal availability sample. With `auto_repair` enabled, a sampled hole, a due `deep_nzb_interval`, or a manual **Deep NZB audit** starts the exhaustive distinct-article STAT pass.
+7. Confirmed missing ranges are reconstructed with PAR2 under one NZB-wide traffic budget. Healthy articles are never BODY-downloaded by the audit, and repaired ranges are stored as narrow local patches.
+8. If metadata reacquisition or PAR2 cannot cover the missing range, Arr delete + search remains the fallback. Connection and provider errors remain `unknown` and never trigger replacement.
+9. The entry's health and the run's PAR2 scanned/missing/repaired/failed/traffic counters are persisted live.
+
+Legacy hydration is preparation rather than an automatic repair action, so `auto_repair: false` does not disable it. Preparing healthy legacy entries during their scheduled check ensures that later on-demand PAR2 recovery has the manifest and raw segment mapping it needs before playback encounters a missing article.
 
 Foreground playback and scheduled repair use the same patch store. A scheduled patch removes the first-play repair pause; a patch created mid-stream is reused by later scheduled audits. Background STAT and BODY work shares the configured `nntp_connection_percent` pool and is globally limited so active streams retain capacity.
 

@@ -9,6 +9,7 @@ import (
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/hearsay"
+	"github.com/sirrobot01/decypharr/pkg/repair"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet"
 )
@@ -19,7 +20,7 @@ func (m *Manager) SetMountManager(mountMgr MountManager) {
 
 // Repair returns the repair service. It is created during init() so callers
 // can rely on a non-nil value once the manager has been constructed.
-func (m *Manager) Repair() *Repair {
+func (m *Manager) Repair() *repair.Service {
 	return m.repair
 }
 

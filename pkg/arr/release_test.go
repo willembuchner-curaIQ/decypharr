@@ -1,7 +1,6 @@
 package arr
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -51,7 +50,7 @@ func TestReacquireNZBMatchesStrongIdentifiersForSonarrAndRadarr(t *testing.T) {
 			defer arrServer.Close()
 
 			a := &Arr{Host: arrServer.URL, Token: "arr-secret", Type: test.arrType}
-			data, err := a.ReacquireNZB(context.Background(), 55)
+			data, err := a.ReacquireNZB(t.Context(), 55)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -107,9 +106,51 @@ func TestReacquireNZBMissingHistoryReturnsStableNoMatch(t *testing.T) {
 	}))
 	defer server.Close()
 	a := &Arr{Host: server.URL, Token: "secret", Type: Sonarr}
-	_, err := a.ReacquireNZB(context.Background(), 1)
+	_, err := a.ReacquireNZB(t.Context(), 1)
 	if !errors.Is(err, ErrReacquireNoMatch) {
 		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestReacquireNZBByDownloadIDResolvesManagedCandidate(t *testing.T) {
+	tests := []struct {
+		name       string
+		arrType    Type
+		historyKey string
+		queryKey   string
+	}{
+		{name: "sonarr", arrType: Sonarr, historyKey: "episodeId", queryKey: "episodeId"},
+		{name: "radarr", arrType: Radarr, historyKey: "movieId", queryKey: "movieId"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v3/history":
+					if got := r.URL.Query().Get("downloadId"); got != "nzo-123" {
+						t.Errorf("downloadId = %q", got)
+					}
+					fmt.Fprintf(w, `{"records":[{"downloadId":"nzo-123",%q:55,"sourceTitle":"Release","data":{"guid":"guid-55"}}]}`, test.historyKey)
+				case "/api/v3/release":
+					if got := r.URL.Query().Get(test.queryKey); got != "55" {
+						t.Errorf("%s = %q", test.queryKey, got)
+					}
+					fmt.Fprintf(w, `[{"guid":"guid-55","downloadProtocol":"usenet","downloadUrl":%q}]`, server.URL+"/metadata")
+				case "/metadata":
+					fmt.Fprint(w, testNZB)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			a := &Arr{Host: server.URL, Token: "secret", Type: test.arrType}
+			data, err := a.ReacquireNZBByDownloadID(t.Context(), "nzo-123")
+			if err != nil || string(data) != testNZB {
+				t.Fatalf("NZB = %q, err = %v", data, err)
+			}
+		})
 	}
 }
 
@@ -130,7 +171,7 @@ func TestDownloadNZBMetadataStripsKeyAndRefererOnCrossOriginRedirect(t *testing.
 	defer arrServer.Close()
 
 	a := &Arr{Host: arrServer.URL, Token: "arr-secret", Type: Sonarr}
-	data, err := a.downloadNZBMetadata(context.Background(), "/proxy?arr_internal=private")
+	data, err := a.downloadNZBMetadata(t.Context(), "/proxy?arr_internal=private")
 	if err != nil || string(data) != testNZB {
 		t.Fatalf("data=%q err=%v", data, err)
 	}
@@ -150,7 +191,7 @@ func TestDownloadNZBMetadataEnforcesHardBoundAndValidatesRoot(t *testing.T) {
 		}))
 		defer server.Close()
 		a := &Arr{Host: server.URL, Token: "secret"}
-		_, err := a.downloadNZBMetadata(context.Background(), server.URL+"/oversized")
+		_, err := a.downloadNZBMetadata(t.Context(), server.URL+"/oversized")
 		if !errors.Is(err, ErrNZBMetadataTooLarge) {
 			t.Fatalf("error=%v", err)
 		}
@@ -162,7 +203,7 @@ func TestDownloadNZBMetadataEnforcesHardBoundAndValidatesRoot(t *testing.T) {
 		}))
 		defer server.Close()
 		a := &Arr{Host: server.URL, Token: "secret"}
-		_, err := a.downloadNZBMetadata(context.Background(), server.URL+"/not-nzb")
+		_, err := a.downloadNZBMetadata(t.Context(), server.URL+"/not-nzb")
 		if !errors.Is(err, ErrInvalidNZBMetadata) {
 			t.Fatalf("error=%v", err)
 		}
@@ -175,7 +216,7 @@ func TestDownloadNZBMetadataErrorsNeverRenderSecretURL(t *testing.T) {
 	}))
 	defer server.Close()
 	a := &Arr{Host: server.URL, Token: "arr-super-secret"}
-	_, err := a.downloadNZBMetadata(context.Background(), server.URL+"/get?indexer_api_key=do-not-log")
+	_, err := a.downloadNZBMetadata(t.Context(), server.URL+"/get?indexer_api_key=do-not-log")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -195,7 +236,7 @@ func TestSearchCurrentReleasesDecodesNestedReleaseShape(t *testing.T) {
 	}))
 	defer server.Close()
 	a := &Arr{Host: server.URL, Token: "secret", Type: Sonarr}
-	releases, err := a.SearchCurrentReleases(context.Background(), 8)
+	releases, err := a.SearchCurrentReleases(t.Context(), 8)
 	if err != nil || len(releases) != 1 {
 		t.Fatalf("releases=%+v err=%v", releases, err)
 	}

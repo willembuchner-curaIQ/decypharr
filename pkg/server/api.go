@@ -17,6 +17,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/repair"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/version"
 	"github.com/sourcegraph/conc/iter"
@@ -705,7 +706,7 @@ func (s *Server) handleUpdateRepairConfig(w http.ResponseWriter, r *http.Request
 func (s *Server) handleRepairStatus(w http.ResponseWriter, r *http.Request) {
 	svc := s.manager.Repair()
 	if svc == nil {
-		utils.JSONResponse(w, manager.RepairStatus{}, http.StatusOK)
+		utils.JSONResponse(w, repair.Status{}, http.StatusOK)
 		return
 	}
 	utils.JSONResponse(w, svc.Status(), http.StatusOK)
@@ -739,11 +740,9 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	autoRepair := req.AutoRepair
 	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("auto_repair"))) {
 	case "1", "true", "yes", "on":
-		v := true
-		autoRepair = &v
+		autoRepair = new(true)
 	case "0", "false", "no", "off":
-		v := false
-		autoRepair = &v
+		autoRepair = new(false)
 	}
 	deepNZB := req.DeepNZB
 	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("deep_nzb"))) {
@@ -762,11 +761,9 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	verifyContent := req.VerifyContent
 	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("verify_content"))) {
 	case "1", "true", "yes", "on":
-		v := true
-		verifyContent = &v
+		verifyContent = new(true)
 	case "0", "false", "no", "off":
-		v := false
-		verifyContent = &v
+		verifyContent = new(false)
 	}
 	protocolScope := strings.ToLower(strings.TrimSpace(req.Protocol))
 	if queryProtocol := strings.TrimSpace(r.URL.Query().Get("protocol")); queryProtocol != "" {
@@ -787,7 +784,7 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Repair service not available", http.StatusServiceUnavailable)
 		return
 	}
-	id, err := svc.RunNow(manager.RepairRunOptions{
+	id, err := svc.RunNow(repair.RunOptions{
 		IgnoreLastChecked: ignoreLastChecked,
 		AutoRepair:        autoRepair,
 		DeepNZB:           deepNZB,

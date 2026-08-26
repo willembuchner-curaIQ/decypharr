@@ -161,7 +161,7 @@ func (a *Arr) SearchCurrentReleases(ctx context.Context, mediaDBID int) ([]Relea
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("release search failed: %s", resp.Status)
+		return nil, &NZBMetadataError{Stage: "release search", Status: resp.StatusCode}
 	}
 	return releases, nil
 }
@@ -180,6 +180,39 @@ func (a *Arr) ReacquireNZB(ctx context.Context, mediaDBID int) ([]byte, error) {
 	if history == nil {
 		return nil, &ReleaseMatchError{Stage: "history"}
 	}
+	return a.reacquireNZB(ctx, mediaDBID, history)
+}
+
+// ReacquireNZBByDownloadID reacquires metadata using the ID issued to Arr's
+// download client. It supports managed repair candidates that have no media map.
+func (a *Arr) ReacquireNZBByDownloadID(ctx context.Context, downloadID string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	history, err := a.FindGrabHistoryByDownloadIDCtx(ctx, downloadID)
+	if err != nil {
+		return nil, err
+	}
+	if history == nil {
+		return nil, &ReleaseMatchError{Stage: "download history"}
+	}
+
+	var mediaDBID int
+	switch a.Type {
+	case Sonarr:
+		mediaDBID = history.EpisodeID
+	case Radarr:
+		mediaDBID = history.MovieID
+	default:
+		return nil, fmt.Errorf("NZB reacquisition is unsupported for arr type %q", a.Type)
+	}
+	if mediaDBID <= 0 {
+		return nil, &ReleaseMatchError{Stage: "history media"}
+	}
+	return a.reacquireNZB(ctx, mediaDBID, history)
+}
+
+func (a *Arr) reacquireNZB(ctx context.Context, mediaDBID int, history *HistoryRecord) ([]byte, error) {
 	releases, err := a.SearchCurrentReleases(ctx, mediaDBID)
 	if err != nil {
 		return nil, err

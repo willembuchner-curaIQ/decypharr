@@ -23,6 +23,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/hearsay"
 	"github.com/sirrobot01/decypharr/pkg/manager/link"
 	"github.com/sirrobot01/decypharr/pkg/notifications"
+	"github.com/sirrobot01/decypharr/pkg/repair"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet"
 	"github.com/sirrobot01/decypharr/pkg/version"
@@ -33,7 +34,7 @@ import (
 type Manager struct {
 	storage      *storage.Storage
 	migrator     *Migrator
-	repair       *Repair
+	repair       *repair.Service
 	clients      *xsync.Map[string, debrid.Client]
 	arr          *arr.Storage
 	logger       zerolog.Logger
@@ -101,6 +102,8 @@ type Manager struct {
 	// Hearsay network participation; nil when disabled.
 	hearsay *hearsay.Service
 }
+
+var _ repair.Backend = (*Manager)(nil)
 
 // New creates a new Manager instance
 func New() *Manager {
@@ -255,8 +258,15 @@ func (m *Manager) init() {
 		m.hearsay = hs
 	}
 
-	// Initialize repair service. It registers with the scheduler in StartWorker.
-	m.repair = NewRepair(m)
+	m.repair = repair.New(repair.Dependencies{
+		Scheduler:     m.scheduler,
+		Backend:       m,
+		Storage:       m.storage,
+		Arrs:          m.arr,
+		Usenet:        m.usenet,
+		Notifications: m.Notifications,
+		Hearsay:       m.hearsay,
+	})
 
 	// Initialize the unified active-download queue after all processors exist.
 	m.initJobQueue()
@@ -475,6 +485,9 @@ func (m *Manager) Stop() error {
 			m.logger.Warn().Err(err).Msg("Failed to stop mount manager")
 		}
 	}
+	if m.repair != nil {
+		m.repair.Stop()
+	}
 
 	// Stop schedulers
 	if m.scheduler != nil {
@@ -502,10 +515,6 @@ func (m *Manager) Stop() error {
 	}
 
 	m.hearsay.Close()
-
-	if m.repair != nil {
-		m.repair.Stop()
-	}
 
 	// Close storage
 	if m.storage != nil {

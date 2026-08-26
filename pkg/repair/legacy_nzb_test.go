@@ -1,4 +1,4 @@
-package manager
+package repair
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 	usenetpkg "github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
@@ -19,7 +20,7 @@ func TestHydrateLegacyNZBFromSourcesPrefersLocalSource(t *testing.T) {
 	hydrated := atomic.Bool{}
 
 	err := hydrateLegacyNZBFromSources(
-		context.Background(),
+		t.Context(),
 		"nzb-id",
 		func(nzbID string) (string, []byte, error) {
 			if nzbID != "nzb-id" {
@@ -55,7 +56,7 @@ func TestHydrateLegacyNZBFromSourcesFallsBackToArr(t *testing.T) {
 	reacquired := atomic.Bool{}
 
 	err := hydrateLegacyNZBFromSources(
-		context.Background(),
+		t.Context(),
 		"nzb-id",
 		func(string) (string, []byte, error) {
 			return "", nil, usenetpkg.ErrLegacyNZBSourceUnavailable
@@ -83,7 +84,7 @@ func TestHydrateLegacyNZBFromSourcesPreservesUnexpectedLocalError(t *testing.T) 
 	loadErr := errors.New("local read failed")
 	reacquired := atomic.Bool{}
 	err := hydrateLegacyNZBFromSources(
-		context.Background(),
+		t.Context(),
 		"nzb-id",
 		func(string) (string, []byte, error) { return "", nil, loadErr },
 		func(context.Context) ([]byte, error) {
@@ -140,7 +141,7 @@ func TestLegacyNZBRecoveryStateDoesNotCacheOperationalFailures(t *testing.T) {
 		{name: "deadline", err: context.DeadlineExceeded},
 		{name: "upstream 500", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusBadGateway}},
 		{name: "throttled", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusTooManyRequests}},
-		{name: "release search 503", err: errors.New("release search failed: 503 Service Unavailable")},
+		{name: "release search 503", err: &arr.NZBMetadataError{Stage: "release search", Status: http.StatusServiceUnavailable}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -167,29 +168,27 @@ func TestLegacyNZBRecoveryStateCoalescesConcurrentAttempts(t *testing.T) {
 	var calls atomic.Int64
 	start := make(chan struct{})
 	release := make(chan struct{})
-	ready := sync.WaitGroup{}
-	done := sync.WaitGroup{}
+	started := make(chan struct{})
+	var ready, done sync.WaitGroup
 	ready.Add(callers)
-	done.Add(callers)
 	errs := make([]error, callers)
 
 	for i := range callers {
-		go func() {
-			defer done.Done()
+		done.Go(func() {
 			ready.Done()
 			<-start
 			errs[i] = state.do("arr\x00nzb", func() error {
-				calls.Add(1)
+				if calls.Add(1) == 1 {
+					close(started)
+				}
 				<-release
 				return errors.New("permanent failure")
 			})
-		}()
+		})
 	}
 	ready.Wait()
 	close(start)
-	for calls.Load() == 0 {
-		time.Sleep(time.Millisecond)
-	}
+	<-started
 	close(release)
 	done.Wait()
 
@@ -203,16 +202,49 @@ func TestLegacyNZBRecoveryStateCoalescesConcurrentAttempts(t *testing.T) {
 	}
 }
 
-func TestLegacyNZBMediaID(t *testing.T) {
+func TestArrMediaID(t *testing.T) {
 	content := arr.ContentFile{Id: 41, EpisodeId: 82}
-	if got := legacyNZBMediaID(arr.Sonarr, content); got != 82 {
+	if got := arrMediaID(arr.Sonarr, content); got != 82 {
 		t.Fatalf("Sonarr media ID = %d, want 82", got)
 	}
-	if got := legacyNZBMediaID(arr.Radarr, content); got != 41 {
+	if got := arrMediaID(arr.Radarr, content); got != 41 {
 		t.Fatalf("Radarr media ID = %d, want 41", got)
 	}
-	if got := legacyNZBMediaID(arr.Lidarr, content); got != 0 {
+	if got := arrMediaID(arr.Lidarr, content); got != 0 {
 		t.Fatalf("unsupported Arr media ID = %d, want 0", got)
+	}
+}
+
+func TestNZBHydrationSourceUsesManagedEntryCategory(t *testing.T) {
+	service := &Service{}
+	source := service.nzbHydrationSource(
+		&candidate{},
+		&storage.Entry{Category: "Sonarr"},
+		"movie.mkv",
+	)
+	if source.arrName != "Sonarr" {
+		t.Fatalf("Arr name = %q, want Sonarr", source.arrName)
+	}
+}
+
+func TestNZBHydrationSourceFallsBackToCandidateMedia(t *testing.T) {
+	arrs := arr.NewStorage()
+	arrs.AddOrUpdate(&arr.Arr{
+		Name: "Sonarr", Host: "http://sonarr.invalid", Token: "secret", Type: arr.Sonarr,
+	})
+	service := &Service{arrs: arrs}
+	source := service.nzbHydrationSource(
+		&candidate{
+			arrName: "Sonarr",
+			contentMap: map[string]arr.ContentFile{
+				"movie.mkv": {EpisodeId: 82},
+			},
+		},
+		&storage.Entry{Category: "Sonarr"},
+		"extras.mkv",
+	)
+	if source.mediaID != 82 {
+		t.Fatalf("media ID = %d, want 82", source.mediaID)
 	}
 }
 

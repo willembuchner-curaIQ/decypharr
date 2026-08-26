@@ -1,7 +1,6 @@
 package usenet
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,6 +13,62 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 )
+
+func TestNeedsPAR2HydrationUsesStoredRecoveryOrigins(t *testing.T) {
+	tests := []struct {
+		name  string
+		nzb   *storage.NZB
+		needs bool
+	}{
+		{
+			name: "legacy",
+			nzb: &storage.NZB{ID: "legacy", Files: []storage.NZBFile{{
+				Name: "movie.mkv", FileType: storage.NZBFileTypeMedia,
+				Segments: []storage.NZBSegment{{MessageID: "legacy@example", Bytes: 8}},
+			}}},
+			needs: true,
+		},
+		{
+			name: "modern",
+			nzb: &storage.NZB{ID: "modern", Files: []storage.NZBFile{{
+				Name: "movie.mkv", FileType: storage.NZBFileTypeMedia,
+				Segments: []storage.NZBSegment{{MessageID: "modern@example", Bytes: 8, RawFileKey: 1, RawLength: 8}},
+			}}},
+		},
+		{
+			name: "partially hydrated",
+			nzb: &storage.NZB{ID: "partial", Files: []storage.NZBFile{{
+				Name: "movie.mkv", FileType: storage.NZBFileTypeMedia,
+				Segments: []storage.NZBSegment{
+					{MessageID: "modern@example", Bytes: 8, RawFileKey: 1, RawLength: 8},
+					{MessageID: "legacy@example", Bytes: 8},
+				},
+			}}},
+			needs: true,
+		},
+		{
+			name: "parity only",
+			nzb: &storage.NZB{ID: "parity", Files: []storage.NZBFile{{
+				Name: "repair.par2", FileType: storage.NZBFileTypePar2,
+				Segments: []storage.NZBSegment{{MessageID: "parity@example"}},
+			}}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := &NZBStorage{metaDir: t.TempDir(), logger: zerolog.Nop()}
+			if err := store.AddNZB(test.nzb); err != nil {
+				t.Fatal(err)
+			}
+			u := &Usenet{nzbStorage: store}
+			needs, err := u.NeedsPAR2Hydration(test.nzb.ID)
+			if err != nil || needs != test.needs {
+				t.Fatalf("needs = %t, err = %v; want %t", needs, err, test.needs)
+			}
+		})
+	}
+}
 
 func TestValidateLegacyArticleIdentity(t *testing.T) {
 	legacy := &storage.NZB{Files: []storage.NZBFile{{
@@ -220,7 +275,7 @@ func TestHydrateLegacyNZBMapsExactReleaseWithoutRetainingXML(t *testing.T) {
   <file subject="&quot;movie.mkv&quot; yEnc (1/2)"><groups><group>alt.binaries.test</group></groups><segments><segment bytes="12" number="1">first@nntpd</segment><segment bytes="12" number="2">missing@nntpd</segment></segments></file>
   <file subject="&quot;movie.vol00+01.par2&quot; yEnc (1/1)"><groups><group>alt.binaries.test</group></groups><segments><segment bytes="100" number="1">parity@nntpd</segment></segments></file>
 </nzb>`)
-	if err := u.HydrateLegacyNZB(context.Background(), legacy.ID, "Release.nzb", content); err != nil {
+	if err := u.HydrateLegacyNZB(t.Context(), legacy.ID, "Release.nzb", content); err != nil {
 		t.Fatal(err)
 	}
 
@@ -300,7 +355,7 @@ func TestHydrateLegacyNZBUsesStoredFullRangesWhenDirectMediaIsFullyMissing(t *te
   <file subject="&quot;movie.mkv&quot; yEnc (1/1)"><groups><group>alt.binaries.test</group></groups><segments><segment bytes="12" number="1">missing@nntpd</segment></segments></file>
   <file subject="&quot;movie.vol00+01.par2&quot; yEnc (1/1)"><groups><group>alt.binaries.test</group></groups><segments><segment bytes="100" number="1">parity@nntpd</segment></segments></file>
 </nzb>`)
-	if err := u.HydrateLegacyNZB(context.Background(), legacy.ID, "Release.nzb", content); err != nil {
+	if err := u.HydrateLegacyNZB(t.Context(), legacy.ID, "Release.nzb", content); err != nil {
 		t.Fatal(err)
 	}
 	upgraded, err := nzbStorage.GetNZB(legacy.ID)
