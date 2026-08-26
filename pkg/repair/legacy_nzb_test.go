@@ -7,9 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	usenetpkg "github.com/sirrobot01/decypharr/pkg/usenet"
+	"github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 )
 
 func TestHydrateLegacyNZBFromSourcesPrefersLocalSource(t *testing.T) {
@@ -101,29 +103,54 @@ func TestHydrateLegacyNZBFromSourcesPreservesUnexpectedLocalError(t *testing.T) 
 
 func TestLegacyNZBHydrationFailureClassification(t *testing.T) {
 	tests := []struct {
-		name      string
-		err       error
-		permanent bool
+		name       string
+		err        error
+		permanent  bool
+		arrBackoff bool
 	}{
 		{name: "cancelled", err: context.Canceled},
 		{name: "deadline", err: context.DeadlineExceeded},
 		{name: "unknown operational error", err: errors.New("local storage unavailable")},
-		{name: "upstream 502", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusBadGateway}},
-		{name: "throttled", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusTooManyRequests}},
-		{name: "release search 503", err: &arr.NZBMetadataError{Stage: "release search", Status: http.StatusServiceUnavailable}},
+		{name: "upstream 502", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusBadGateway}, arrBackoff: true},
+		{name: "throttled", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusTooManyRequests}, arrBackoff: true},
+		{name: "release search 503", err: &arr.NZBMetadataError{Stage: "release search", Status: http.StatusServiceUnavailable}, arrBackoff: true},
 		{name: "no match", err: &arr.ReleaseMatchError{Stage: "identifier"}, permanent: true},
 		{name: "ambiguous", err: &arr.ReleaseMatchError{Stage: "identifier", Candidates: 2, Ambiguous: true}, permanent: true},
 		{name: "metadata 404", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusNotFound}, permanent: true},
 		{name: "metadata too large", err: &arr.NZBMetadataError{Stage: "response", Kind: arr.ErrNZBMetadataTooLarge}, permanent: true},
 		{name: "invalid metadata", err: &arr.NZBMetadataError{Stage: "validation", Kind: arr.ErrInvalidNZBMetadata}, permanent: true},
 		{name: "no arr source", err: errLegacyNZBNoArrSource, permanent: true},
+		{name: "ineligible arr source", err: errLegacyNZBArrIneligible, permanent: true},
 		{name: "no par2", err: usenetpkg.ErrLegacyNZBNoPAR2, permanent: true},
 		{name: "identity mismatch", err: usenetpkg.ErrLegacyNZBIdentityMismatch, permanent: true},
+		{name: "download budget", err: recovery.ErrBudgetExceeded, permanent: true},
+		{name: "storage budget", err: recovery.ErrStorageBudget, permanent: true},
+		{name: "layout unavailable", err: recovery.ErrLayoutUnavailable, permanent: true},
+		{name: "no recovery set", err: recovery.ErrNoRecoverySet, permanent: true},
+		{name: "article missing", err: &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430}, permanent: true},
+		{
+			name: "joined article and budget failure",
+			err: errors.Join(
+				&nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430},
+				recovery.ErrBudgetExceeded,
+			),
+			permanent: true,
+		},
+		{
+			name: "transient provider branch wins over layout fallback",
+			err: errors.Join(
+				&nntp.Error{Type: nntp.ErrorTypeConnection, Message: "connection unavailable"},
+				recovery.ErrLayoutUnavailable,
+			),
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if got := legacyNZBHydrationFailurePermanent(test.err); got != test.permanent {
 				t.Fatalf("permanent = %t, want %t", got, test.permanent)
+			}
+			if got := legacyNZBHydrationFailureUsesArrBackoff(test.err); got != test.arrBackoff {
+				t.Fatalf("Arr backoff = %t, want %t", got, test.arrBackoff)
 			}
 		})
 	}

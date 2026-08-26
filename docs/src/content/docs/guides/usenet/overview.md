@@ -221,16 +221,19 @@ For an NZB imported before raw-origin tracking, a paced startup worker first
 looks for the original local NZB metadata. If it is gone and the item came
 through Sonarr or Radarr, Decypharr uses the grab history to find the same
 current release and reacquires only its NZB XML. It processes one NZB at a time,
-backs off per Arr after transient failures, and pauses completely while a repair
-or recheck is running. Every stored content message ID must match uniquely
+backs off per Arr after transient Arr metadata failures, backs off only the
+affected item after other operational failures, and pauses completely while a
+repair or recheck is running. Every stored content message ID must match uniquely
 before Decypharr attaches the PAR2 manifest to the existing NZB ID; parser or
 release drift aborts without changing the catalog. This does not download the
 complete post. Only bounded yEnc/archive metadata probes and the normal minimum
 PAR2 repair plan can use NNTP BODY traffic. A repair probe that encounters a
 damaged legacy item while hydration is pending leaves it `unknown`; it does not
-delete or re-search the item. If the release is definitively unavailable, has
-no PAR2, or cannot be matched exactly, a subsequently confirmed failure can use
-the existing Arr replacement workflow.
+delete or re-search the item. Deterministic PAR2 budget, layout, mapping,
+corruption, and insufficient-recovery failures make hydration unavailable
+instead of scheduling an identical retry. If the release is definitively
+unavailable, has no PAR2, or cannot be matched exactly, a subsequently confirmed
+failure can use the existing Arr replacement workflow.
 
 During import, Decypharr must observe enough valid yEnc metadata to establish
 the exact byte layout of every protected source file it may repair. If no part

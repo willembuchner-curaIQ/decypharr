@@ -23,15 +23,17 @@ const (
 // again after a restart. It intentionally stores no release title, URL, or NZB
 // contents.
 type LegacyNZBHydration struct {
-	NZBID         string                  `json:"nzb_id"`
-	ArrName       string                  `json:"arr_name,omitempty"`
-	MediaID       int                     `json:"media_id,omitzero"`
-	State         LegacyNZBHydrationState `json:"state"`
-	Attempts      int                     `json:"attempts,omitzero"`
-	RetryAt       time.Time               `json:"retry_at,omitzero"`
-	LastAttemptAt time.Time               `json:"last_attempt_at,omitzero"`
-	UpdatedAt     time.Time               `json:"updated_at"`
-	LastError     string                  `json:"last_error,omitempty"`
+	NZBID           string                  `json:"nzb_id"`
+	ArrName         string                  `json:"arr_name,omitempty"`
+	MediaID         int                     `json:"media_id,omitzero"`
+	State           LegacyNZBHydrationState `json:"state"`
+	Attempts        int                     `json:"attempts,omitzero"`
+	ArrBackoff      bool                    `json:"arr_backoff,omitzero"`
+	BackoffFailures int                     `json:"backoff_failures,omitzero"`
+	RetryAt         time.Time               `json:"retry_at,omitzero"`
+	LastAttemptAt   time.Time               `json:"last_attempt_at,omitzero"`
+	UpdatedAt       time.Time               `json:"updated_at"`
+	LastError       string                  `json:"last_error,omitempty"`
 }
 
 func (s *Storage) SaveLegacyNZBHydration(record *LegacyNZBHydration) error {

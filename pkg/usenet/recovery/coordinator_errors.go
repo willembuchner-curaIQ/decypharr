@@ -16,8 +16,9 @@ var (
 	ErrStorageBudget     = errors.New("PAR2 recovery storage budget exceeded")
 )
 
-// BudgetExceededError is returned before an NNTP BODY request whose complete
-// posted article size would cross the per-repair traffic cap.
+// BudgetExceededError is returned before NNTP BODY traffic when the next
+// atomic reservation would cross the per-repair cap. Requested may describe
+// one article or an aggregate multi-article plan.
 type BudgetExceededError struct {
 	Limit     int64
 	Used      int64
@@ -25,7 +26,7 @@ type BudgetExceededError struct {
 }
 
 func (e *BudgetExceededError) Error() string {
-	return fmt.Sprintf("%v: limit %d bytes, already reserved %d, next article %d", ErrBudgetExceeded, e.Limit, e.Used, e.Requested)
+	return fmt.Sprintf("%v: limit %d bytes, already reserved %d bytes, next reservation %d bytes", ErrBudgetExceeded, e.Limit, e.Used, e.Requested)
 }
 
 func (e *BudgetExceededError) Is(target error) bool { return target == ErrBudgetExceeded }

@@ -129,6 +129,14 @@ func TestClassifyRepairFailurePrefersPolicyFailureInJoinedError(t *testing.T) {
 	}
 }
 
+func TestBudgetExceededErrorDescribesAggregateReservation(t *testing.T) {
+	err := &BudgetExceededError{Limit: 100, Used: 60, Requested: 50}
+	want := "PAR2 recovery download budget exceeded: limit 100 bytes, already reserved 60 bytes, next reservation 50 bytes"
+	if got := err.Error(); got != want {
+		t.Fatalf("budget error=%q, want %q", got, want)
+	}
+}
+
 func TestCoordinatorReusesCachedSourceWithoutNNTPBody(t *testing.T) {
 	const sliceSize = 64
 	target := testBytes(sliceSize, 31)

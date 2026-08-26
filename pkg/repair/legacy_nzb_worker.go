@@ -56,17 +56,19 @@ type legacyNZBHydrationWorkerDeps struct {
 }
 
 type legacyNZBHydrationJob struct {
-	nzbID         string
-	source        nzbHydrationSource
-	state         legacyNZBHydrationJobState
-	attempts      int
-	retryAt       time.Time
-	lastAttemptAt time.Time
-	priority      bool
-	inFlight      bool
-	version       uint64
-	lastError     string
-	entryNames    map[string]struct{}
+	nzbID           string
+	source          nzbHydrationSource
+	state           legacyNZBHydrationJobState
+	attempts        int
+	arrBackoff      bool
+	backoffFailures int
+	retryAt         time.Time
+	lastAttemptAt   time.Time
+	priority        bool
+	inFlight        bool
+	version         uint64
+	lastError       string
+	entryNames      map[string]struct{}
 }
 
 type legacyNZBArrBackoff struct {
@@ -294,6 +296,8 @@ func (w *legacyNZBHydrationWorker) restoreRecord(record *storage.LegacyNZBHydrat
 		}
 		job.source, _ = mergeLegacyNZBSource(job.source, source)
 		job.attempts = max(job.attempts, record.Attempts)
+		job.arrBackoff = record.ArrBackoff
+		job.backoffFailures = max(job.backoffFailures, record.BackoffFailures)
 		job.retryAt = record.RetryAt
 		if record.LastAttemptAt.After(job.lastAttemptAt) {
 			job.lastAttemptAt = record.LastAttemptAt
@@ -304,7 +308,9 @@ func (w *legacyNZBHydrationWorker) restoreRecord(record *storage.LegacyNZBHydrat
 			job.state = legacyNZBHydrationJobUnavailable
 		case storage.LegacyNZBHydrationRetrying:
 			job.state = legacyNZBHydrationJobRetrying
-			w.restoreArrBackoffLocked(job)
+			if job.arrBackoff {
+				w.restoreArrBackoffLocked(job)
+			}
 		default:
 			delete(w.jobs, record.NZBID)
 			deleteRecord = true
@@ -401,6 +407,8 @@ func (w *legacyNZBHydrationWorker) enqueue(nzbID string, source nzbHydrationSour
 			if improved {
 				job.state = legacyNZBHydrationJobPending
 				job.attempts = 0
+				job.arrBackoff = false
+				job.backoffFailures = 0
 				job.retryAt = time.Time{}
 				job.lastError = ""
 				deleteRecord = true
@@ -549,13 +557,17 @@ func (w *legacyNZBHydrationWorker) finishAttempt(attempt legacyNZBHydrationAttem
 			readyEntries = append(readyEntries, entryName)
 		}
 		delete(w.jobs, attempt.nzbID)
-		delete(w.arrBackoffs, legacyNZBArrKey(attempt.source.arrName))
+		if job.arrBackoff {
+			delete(w.arrBackoffs, legacyNZBArrKey(attempt.source.arrName))
+		}
 		w.hydrated++
 		deleteRecord = true
 	case job.version != attempt.version:
 		job.state = legacyNZBHydrationJobPending
 		job.retryAt = w.nextAttemptAt
 		job.priority = true
+		job.arrBackoff = false
+		job.backoffFailures = 0
 		deleteRecord = true
 	case legacyNZBHydrationFailurePermanent(err):
 		permanent = true
@@ -564,20 +576,29 @@ func (w *legacyNZBHydrationWorker) finishAttempt(attempt legacyNZBHydrationAttem
 		job.lastAttemptAt = now
 		job.retryAt = time.Time{}
 		job.lastError = legacyNZBErrorString(err)
-		delete(w.arrBackoffs, legacyNZBArrKey(job.source.arrName))
+		job.arrBackoff = false
+		job.backoffFailures = 0
 		record = legacyNZBHydrationRecord(job, storage.LegacyNZBHydrationUnavailable)
 	default:
 		job.state = legacyNZBHydrationJobRetrying
 		job.attempts++
 		job.lastAttemptAt = now
 		job.lastError = legacyNZBErrorString(err)
-		key := legacyNZBArrKey(job.source.arrName)
-		backoff := w.arrBackoffs[key]
-		backoff.failures++
-		retry = legacyNZBBackoff(w.baseBackoff, w.maxBackoff, backoff.failures)
-		backoff.retryAt = now.Add(retry)
-		w.arrBackoffs[key] = backoff
-		job.retryAt = backoff.retryAt
+		job.arrBackoff = legacyNZBHydrationFailureUsesArrBackoff(err)
+		if job.arrBackoff {
+			key := legacyNZBArrKey(job.source.arrName)
+			backoff := w.arrBackoffs[key]
+			backoff.failures++
+			retry = legacyNZBBackoff(w.baseBackoff, w.maxBackoff, backoff.failures)
+			backoff.retryAt = now.Add(retry)
+			w.arrBackoffs[key] = backoff
+			job.backoffFailures = backoff.failures
+			job.retryAt = backoff.retryAt
+		} else {
+			job.backoffFailures = 0
+			retry = legacyNZBBackoff(w.baseBackoff, w.maxBackoff, job.attempts)
+			job.retryAt = now.Add(retry)
+		}
 		record = legacyNZBHydrationRecord(job, storage.LegacyNZBHydrationRetrying)
 	}
 	w.signalLocked()
@@ -610,14 +631,16 @@ func (w *legacyNZBHydrationWorker) finishAttempt(attempt legacyNZBHydrationAttem
 
 func legacyNZBHydrationRecord(job *legacyNZBHydrationJob, state storage.LegacyNZBHydrationState) *storage.LegacyNZBHydration {
 	return &storage.LegacyNZBHydration{
-		NZBID:         job.nzbID,
-		ArrName:       job.source.arrName,
-		MediaID:       job.source.mediaID,
-		State:         state,
-		Attempts:      job.attempts,
-		RetryAt:       job.retryAt,
-		LastAttemptAt: job.lastAttemptAt,
-		LastError:     job.lastError,
+		NZBID:           job.nzbID,
+		ArrName:         job.source.arrName,
+		MediaID:         job.source.mediaID,
+		State:           state,
+		Attempts:        job.attempts,
+		ArrBackoff:      job.arrBackoff,
+		BackoffFailures: job.backoffFailures,
+		RetryAt:         job.retryAt,
+		LastAttemptAt:   job.lastAttemptAt,
+		LastError:       job.lastError,
 	}
 }
 
@@ -659,7 +682,11 @@ func (w *legacyNZBHydrationWorker) restoreArrBackoffLocked(job *legacyNZBHydrati
 	if job.retryAt.After(current.retryAt) {
 		current.retryAt = job.retryAt
 	}
-	current.failures = max(current.failures, job.attempts)
+	failures := job.backoffFailures
+	if failures <= 0 {
+		failures = job.attempts
+	}
+	current.failures = max(current.failures, failures)
 	w.arrBackoffs[key] = current
 }
 

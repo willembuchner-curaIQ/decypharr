@@ -2,12 +2,28 @@ package reader
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/nntp"
 )
+
+func TestArticleRecoveryErrorPreservesBothCauses(t *testing.T) {
+	articleErr := &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430, Message: "No Such Article"}
+	recoveryErr := errors.New("recovery budget exceeded")
+	err := articleRecoveryError(articleErr, recoveryErr)
+	if !nntp.IsArticleNotFoundError(err) {
+		t.Fatalf("combined error lost article failure: %v", err)
+	}
+	if !errors.Is(err, recoveryErr) {
+		t.Fatalf("combined error lost recovery failure: %v", err)
+	}
+	if got, want := err.Error(), articleErr.Error()+" (PAR2 recovery: "+recoveryErr.Error()+")"; got != want {
+		t.Fatalf("combined error=%q, want %q", got, want)
+	}
+}
 
 // newTestFetcher builds a cache+fetcher pair with no NNTP client. Its private
 // scheduler has no workers, so hints stay queued without using the nil client.

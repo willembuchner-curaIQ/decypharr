@@ -357,7 +357,7 @@ func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx, restarts i
 				}
 			}
 			sf.stats.RepairErrors.Add(1)
-			err = fmt.Errorf("%w (PAR2 recovery: %v)", err, repairErr)
+			err = articleRecoveryError(err, repairErr)
 		}
 		sf.stats.DownloadErrors.Add(1)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -370,6 +370,13 @@ func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx, restarts i
 
 	sf.stats.Downloads.Add(1)
 	return nil
+}
+
+// articleRecoveryError keeps both failures in the unwrap tree. Callers need
+// the original provider outcome for availability decisions and the recovery
+// outcome for policy/provenance classification.
+func articleRecoveryError(articleErr, recoveryErr error) error {
+	return fmt.Errorf("%w (PAR2 recovery: %w)", articleErr, recoveryErr)
 }
 
 func (sf *SegmentFetcher) markPrefetchQueued(segIdx int) bool {

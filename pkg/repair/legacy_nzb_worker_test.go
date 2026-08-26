@@ -187,6 +187,15 @@ func TestLegacyNZBHydrationWorkerPersistsTransientBackoff(t *testing.T) {
 	if record == nil || record.State != storage.LegacyNZBHydrationRetrying || record.Attempts != 1 {
 		t.Fatalf("persisted record = %+v", record)
 	}
+	if record.ArrBackoff || record.BackoffFailures != 0 {
+		t.Fatalf("item-local failure persisted Arr backoff: %+v", record)
+	}
+	worker.mu.Lock()
+	arrBackoffs := len(worker.arrBackoffs)
+	worker.mu.Unlock()
+	if arrBackoffs != 0 {
+		t.Fatalf("item-local failure created %d Arr backoffs", arrBackoffs)
+	}
 	wantRetryAt := now.Add(5 * time.Minute)
 	if !record.RetryAt.Equal(wantRetryAt) {
 		t.Fatalf("retry at = %s, want %s", record.RetryAt, wantRetryAt)
@@ -199,6 +208,60 @@ func TestLegacyNZBHydrationWorkerPersistsTransientBackoff(t *testing.T) {
 	if record == nil || record.MediaID != 42 || record.State != storage.LegacyNZBHydrationRetrying || !record.RetryAt.Equal(wantRetryAt) {
 		t.Fatalf("enriched retry record = %+v", record)
 	}
+}
+
+func TestLegacyNZBHydrationWorkerArrFailureBacksOffSiblingJobs(t *testing.T) {
+	state := newMemoryLegacyNZBHydrationStore()
+	worker := newTestLegacyNZBHydrationWorker(nil, state, func(context.Context, string, nzbHydrationSource) error { return nil })
+	worker.baseBackoff = 5 * time.Minute
+	worker.maxBackoff = 20 * time.Minute
+	worker.itemInterval = 0
+	worker.enqueue("a", nzbHydrationSource{arrName: "Sonarr"}, false)
+	worker.enqueue("b", nzbHydrationSource{arrName: "Sonarr"}, false)
+
+	now := time.Date(2026, 8, 26, 7, 0, 0, 0, time.UTC)
+	attempt, attemptCtx, cleanup, _ := worker.takeNext(t.Context(), now)
+	if attempt == nil || attempt.nzbID != "a" {
+		t.Fatalf("first attempt = %+v, want a", attempt)
+	}
+	cause := context.Cause(attemptCtx)
+	cleanup()
+	worker.finishAttempt(*attempt, &arr.NZBMetadataError{Stage: "request", Status: 502}, cause, now)
+
+	record := state.get("a")
+	if record == nil || !record.ArrBackoff || record.BackoffFailures != 1 {
+		t.Fatalf("persisted Arr backoff = %+v", record)
+	}
+	wantRetryAt := now.Add(5 * time.Minute)
+	if next, _, _, waitUntil := worker.takeNext(t.Context(), now.Add(4*time.Minute)); next != nil || !waitUntil.Equal(wantRetryAt) {
+		t.Fatalf("sibling bypassed Arr backoff: next=%+v wait_until=%s", next, waitUntil)
+	}
+}
+
+func TestLegacyNZBHydrationWorkerItemFailureDoesNotBackOffSiblingJobs(t *testing.T) {
+	worker := newTestLegacyNZBHydrationWorker(nil, newMemoryLegacyNZBHydrationStore(), func(context.Context, string, nzbHydrationSource) error { return nil })
+	worker.baseBackoff = 5 * time.Minute
+	worker.maxBackoff = 20 * time.Minute
+	worker.itemInterval = 0
+	worker.enqueue("a", nzbHydrationSource{arrName: "Sonarr"}, false)
+	worker.enqueue("b", nzbHydrationSource{arrName: "Sonarr"}, false)
+
+	now := time.Date(2026, 8, 26, 7, 0, 0, 0, time.UTC)
+	attempt, attemptCtx, cleanup, _ := worker.takeNext(t.Context(), now)
+	if attempt == nil || attempt.nzbID != "a" {
+		t.Fatalf("first attempt = %+v, want a", attempt)
+	}
+	cause := context.Cause(attemptCtx)
+	cleanup()
+	worker.finishAttempt(*attempt, errors.New("temporary local failure"), cause, now)
+
+	next, nextCtx, nextCleanup, _ := worker.takeNext(t.Context(), now)
+	if next == nil || next.nzbID != "b" {
+		t.Fatalf("next attempt = %+v, want unaffected sibling b", next)
+	}
+	nextCause := context.Cause(nextCtx)
+	nextCleanup()
+	worker.finishAttempt(*next, nil, nextCause, now)
 }
 
 func TestLegacyNZBHydrationWorkerPersistsUnavailableAndRevivesWithBetterSource(t *testing.T) {

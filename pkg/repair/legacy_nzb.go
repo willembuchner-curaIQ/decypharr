@@ -14,15 +14,19 @@ import (
 )
 
 var (
-	errLegacyNZBHydration   = errors.New("legacy NZB hydration failed")
-	errLegacyNZBNoArrSource = errors.New("legacy NZB has no associated Arr source")
+	errLegacyNZBHydration     = errors.New("legacy NZB hydration failed")
+	errLegacyNZBNoArrSource   = errors.New("legacy NZB has no associated Arr source")
+	errLegacyNZBArrIneligible = errors.New("legacy NZB Arr source is not eligible for repair")
 )
 
 func legacyNZBHydrationFailurePermanent(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if customerror.IsRetriableError(err) {
+	// Hydration errors may join the original provider failure, a PAR2 failure,
+	// and a provenance fallback failure. Any genuinely transient branch wins
+	// over deterministic siblings such as the fallback layout error.
+	if legacyNZBErrorTreeAny(err, customerror.IsRetriableError) {
 		return false
 	}
 	// Arr exposes response status on metadata-download errors. A timeout,
@@ -37,11 +41,49 @@ func legacyNZBHydrationFailurePermanent(err error) bool {
 		return errors.Is(metadataErr, arr.ErrNZBMetadataTooLarge) ||
 			errors.Is(metadataErr, arr.ErrInvalidNZBMetadata)
 	}
+	if _, definitive := par2RepairFailureReason(err); definitive {
+		return true
+	}
 	return errors.Is(err, arr.ErrNZBReacquireNoMatch) ||
 		errors.Is(err, arr.ErrNZBReacquireAmbiguous) ||
 		errors.Is(err, errLegacyNZBNoArrSource) ||
+		errors.Is(err, errLegacyNZBArrIneligible) ||
 		errors.Is(err, usenetpkg.ErrLegacyNZBIdentityMismatch) ||
 		errors.Is(err, usenetpkg.ErrLegacyNZBNoPAR2)
+}
+
+func legacyNZBHydrationFailureUsesArrBackoff(err error) bool {
+	metadataErr, ok := errors.AsType[*arr.NZBMetadataError](err)
+	if !ok {
+		return false
+	}
+	if metadataErr.Status != 0 {
+		return metadataErr.Status == http.StatusRequestTimeout ||
+			metadataErr.Status == http.StatusTooManyRequests ||
+			metadataErr.Status >= 500 && metadataErr.Status <= 599
+	}
+	return !errors.Is(metadataErr, arr.ErrNZBMetadataTooLarge) &&
+		!errors.Is(metadataErr, arr.ErrInvalidNZBMetadata)
+}
+
+func legacyNZBErrorTreeAny(err error, predicate func(error) bool) bool {
+	if err == nil || predicate == nil {
+		return false
+	}
+	if predicate(err) {
+		return true
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, child := range wrapped.Unwrap() {
+			if legacyNZBErrorTreeAny(child, predicate) {
+				return true
+			}
+		}
+	case interface{ Unwrap() error }:
+		return legacyNZBErrorTreeAny(wrapped.Unwrap(), predicate)
+	}
+	return false
 }
 
 func (r *Service) hydrateLegacyNZB(ctx context.Context, nzbID string, source nzbHydrationSource) error {
@@ -68,7 +110,7 @@ func (r *Service) hydrateLegacyNZB(ctx context.Context, nzbID string, source nzb
 				return nil, fmt.Errorf("arr %q is unavailable", source.arrName)
 			}
 			if a.Host == "" || a.Token == "" || a.SkipRepair {
-				return nil, fmt.Errorf("arr %q is not eligible for repair", source.arrName)
+				return nil, fmt.Errorf("%w: %q", errLegacyNZBArrIneligible, source.arrName)
 			}
 			content, err := a.ReacquireNZBByDownloadID(ctx, nzbID)
 			if err == nil || source.mediaID <= 0 || !errors.Is(err, arr.ErrNZBReacquireNoMatch) {

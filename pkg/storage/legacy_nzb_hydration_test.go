@@ -13,13 +13,15 @@ func TestLegacyNZBHydrationStatePersistsAcrossRestart(t *testing.T) {
 	}
 	retryAt := time.Date(2026, 8, 26, 8, 0, 0, 0, time.UTC)
 	record := &LegacyNZBHydration{
-		NZBID:     "legacy-id",
-		ArrName:   "Sonarr",
-		MediaID:   42,
-		State:     LegacyNZBHydrationRetrying,
-		Attempts:  3,
-		RetryAt:   retryAt,
-		LastError: "connection reset by peer",
+		NZBID:           "legacy-id",
+		ArrName:         "Sonarr",
+		MediaID:         42,
+		State:           LegacyNZBHydrationRetrying,
+		Attempts:        3,
+		ArrBackoff:      true,
+		BackoffFailures: 2,
+		RetryAt:         retryAt,
+		LastError:       "connection reset by peer",
 	}
 	if err := store.SaveLegacyNZBHydration(record); err != nil {
 		t.Fatal(err)
@@ -45,7 +47,8 @@ func TestLegacyNZBHydrationStatePersistsAcrossRestart(t *testing.T) {
 	}
 	got := records[0]
 	if got.NZBID != record.NZBID || got.ArrName != record.ArrName || got.MediaID != record.MediaID ||
-		got.State != record.State || got.Attempts != record.Attempts || !got.RetryAt.Equal(retryAt) || got.LastError != record.LastError {
+		got.State != record.State || got.Attempts != record.Attempts || got.ArrBackoff != record.ArrBackoff ||
+		got.BackoffFailures != record.BackoffFailures || !got.RetryAt.Equal(retryAt) || got.LastError != record.LastError {
 		t.Fatalf("persisted record = %+v, want %+v", got, record)
 	}
 	if err := store.DeleteLegacyNZBHydration(record.NZBID); err != nil {
