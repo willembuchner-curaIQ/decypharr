@@ -121,14 +121,16 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 1. The cron tick (or a manual **Run Now**) opens a new run.
 2. Candidates are selected per the rules above.
 3. For each candidate, the entry is marked `repairing` and probed by a worker.
-4. Before checking article availability, every NZB is inspected for stored recovery provenance. A legacy NZB with missing provenance is hydrated once for the whole NZB, even during a detect-only run and even when its sampled articles are healthy.
-5. Hydration uses the surviving local NZB first. Otherwise, Decypharr looks up the exact Arr grab by download ID, reacquires its NZB metadata, and validates the original message IDs before attaching raw origins and PAR2 data to the existing NZB ID.
-6. After preparation, NZB files receive the normal availability sample. With `auto_repair` enabled, a sampled hole, a due `deep_nzb_interval`, or a manual **Deep NZB audit** starts the exhaustive distinct-article STAT pass.
-7. Confirmed missing ranges are reconstructed with PAR2 under one NZB-wide traffic budget. Healthy articles are never BODY-downloaded by the audit, and repaired ranges are stored as narrow local patches.
-8. If metadata reacquisition or PAR2 cannot cover the missing range, Arr delete + search remains the fallback. Connection and provider errors remain `unknown` and never trigger replacement.
-9. The entry's health and the run's PAR2 scanned/missing/repaired/failed/traffic counters are persisted live.
+4. At service startup, a background migration waits briefly and then scans stored NZBs at a paced rate for missing recovery provenance.
+5. The migration hydrates one NZB at a time, with at least one minute between items. It uses the surviving local NZB first; otherwise, Decypharr looks up the exact Arr grab by download ID, reacquires its NZB metadata, and validates the original message IDs before attaching raw origins and PAR2 data to the existing NZB ID.
+6. Arr metadata calls make one patient HTTP attempt. Transient failures use persisted, per-Arr exponential backoff from five minutes up to one hour, so a restart cannot recreate a request storm. Releases that cannot be matched safely are recorded as unavailable instead of being searched repeatedly.
+7. Starting any repair or recheck pauses the migration and cancels its in-flight request. Foreground probes never reacquire legacy NZBs inline. A sampled missing/corrupt file or requested deep audit that still needs hydration remains `unknown` with reason `legacy_hydration_pending`; it cannot trigger Arr deletion or re-search.
+8. Once prepared, NZB files receive the normal availability sample. With `auto_repair` enabled, a sampled hole, a due `deep_nzb_interval`, or a manual **Deep NZB audit** starts the exhaustive distinct-article STAT pass.
+9. Confirmed missing ranges are reconstructed with PAR2 under one NZB-wide traffic budget. Healthy articles are never BODY-downloaded by the audit, and repaired ranges are stored as narrow local patches.
+10. If hydration is definitively unavailable or PAR2 cannot cover a confirmed missing range, Arr delete + search remains the fallback. Connection and provider errors remain `unknown` and never trigger replacement.
+11. The entry's health and the run's PAR2 scanned/missing/repaired/failed/traffic counters are persisted live.
 
-Legacy hydration is preparation rather than an automatic repair action, so `auto_repair: false` does not disable it. Preparing healthy legacy entries during their scheduled check ensures that later on-demand PAR2 recovery has the manifest and raw segment mapping it needs before playback encounters a missing article.
+Legacy hydration is preparation rather than an automatic repair action, so `auto_repair: false` does not disable it. It also continues when the recurring sweep is disabled; set `skip_nzb_repair: true` to suppress both NZB sweep work and the background migration. Migration counts and the current item are available in `legacy_nzb_hydration` from `GET /api/repair/status`.
 
 Foreground playback and scheduled repair use the same patch store. A scheduled patch removes the first-play repair pause; a patch created mid-stream is reused by later scheduled audits. Background STAT and BODY work shares the configured `nntp_connection_percent` pool and is globally limited so active streams retain capacity.
 
@@ -137,7 +139,7 @@ A failure to persist a single entry's health update is logged but never aborts t
 ## Stop and disable
 
 - **Stop** cancels the active run. In-flight probes return at the next checkpoint, the run is marked `cancelled`, and entries that hadn't yet finished probing revert to their previous status.
-- **Disable** (`enabled=false`) cancels any in-flight run and unregisters the cron job. Per-entry health data is **kept**, so Browse badges stay meaningful and single-entry rechecks remain available.
+- **Disable** (`enabled=false`) cancels any in-flight run and unregisters the cron job. Per-entry health data is **kept**, so Browse badges stay meaningful and single-entry rechecks remain available. The paced legacy-NZB preparation worker remains independent of the recurring sweep unless `skip_nzb_repair` is enabled.
 
 ## Singleton invariants
 

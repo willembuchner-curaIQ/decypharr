@@ -156,7 +156,7 @@ func (a *Arr) SearchCurrentReleases(ctx context.Context, mediaDBID int) ([]Relea
 		return nil, fmt.Errorf("release search is unsupported for arr type %q", a.Type)
 	}
 	var releases []ReleaseSearchRecord
-	resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/release?"+query.Encode(), nil, &releases)
+	resp, err := a.requestNZBReacquisitionCtx(ctx, http.MethodGet, "api/v3/release?"+query.Encode(), nil, &releases)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +173,7 @@ func (a *Arr) ReacquireNZB(ctx context.Context, mediaDBID int) ([]byte, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	history, err := a.FindGrabHistoryCtx(ctx, mediaDBID)
+	history, err := a.findGrabHistoryCtx(ctx, mediaDBID, true)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +189,7 @@ func (a *Arr) ReacquireNZBByDownloadID(ctx context.Context, downloadID string) (
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	history, err := a.FindGrabHistoryByDownloadIDCtx(ctx, downloadID)
+	history, err := a.findGrabHistoryByDownloadIDCtx(ctx, downloadID, true)
 	if err != nil {
 		return nil, err
 	}

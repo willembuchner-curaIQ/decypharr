@@ -29,17 +29,18 @@ type ClientOption func(*Client)
 
 // Client represents an HTTP client with additional capabilities
 type Client struct {
-	client          *retryablehttp.Client
-	httpClient      *http.Client // underlying http client
-	rateLimiter     ratelimit.Limiter
-	headers         map[string]string
-	headersMu       sync.RWMutex
-	maxRetries      int
-	timeout         time.Duration
-	skipTLSVerify   bool
-	retryableStatus map[int]struct{}
-	logger          zerolog.Logger
-	proxy           string
+	client                *retryablehttp.Client
+	httpClient            *http.Client // underlying http client
+	rateLimiter           ratelimit.Limiter
+	headers               map[string]string
+	headersMu             sync.RWMutex
+	maxRetries            int
+	timeout               time.Duration
+	responseHeaderTimeout time.Duration
+	skipTLSVerify         bool
+	retryableStatus       map[int]struct{}
+	logger                zerolog.Logger
+	proxy                 string
 }
 
 // WithMaxRetries sets the maximum number of retry attempts
@@ -53,6 +54,16 @@ func WithMaxRetries(maxRetries int) ClientOption {
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {
 		c.timeout = timeout
+	}
+}
+
+// WithResponseHeaderTimeout bounds how long a request may wait for response
+// headers after it has been written. It is separate from the whole-request
+// timeout so expensive endpoints can opt into a larger server-processing
+// budget without changing every client.
+func WithResponseHeaderTimeout(timeout time.Duration) ClientOption {
+	return func(c *Client) {
+		c.responseHeaderTimeout = timeout
 	}
 }
 
@@ -216,10 +227,11 @@ func New(options ...ClientOption) *Client {
 			http.StatusServiceUnavailable:  {},
 			http.StatusGatewayTimeout:      {},
 		},
-		logger:  logger.New("request"),
-		timeout: 60 * time.Second,
-		proxy:   "",
-		headers: make(map[string]string),
+		logger:                logger.New("request"),
+		timeout:               60 * time.Second,
+		responseHeaderTimeout: 30 * time.Second,
+		proxy:                 "",
+		headers:               make(map[string]string),
 	}
 
 	// Create default http client
@@ -247,7 +259,7 @@ func New(options ...ClientOption) *Client {
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
 			IdleConnTimeout:       30 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
+			ResponseHeaderTimeout: client.responseHeaderTimeout,
 			ExpectContinueTimeout: 1 * time.Second,
 			ForceAttemptHTTP2:     true,
 		}

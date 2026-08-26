@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	json "github.com/bytedance/sonic"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -30,20 +31,24 @@ const (
 	SourceManual Source = "manual"
 )
 
-var (
-	sharedOnce   sync.Once
-	sharedClient *request.Client
-)
+var sharedClient = sync.OnceValue(func() *request.Client {
+	return request.New(
+		request.WithTimeout(0),
+		request.WithMaxRetries(5),
+	)
+})
 
-func getSharedClient() *request.Client {
-	sharedOnce.Do(func() {
-		sharedClient = request.New(
-			request.WithTimeout(0),
-			request.WithMaxRetries(5),
-		)
-	})
-	return sharedClient
-}
+// NZB reacquisition calls Sonarr/Radarr's interactive release-search endpoint,
+// which may legitimately take longer than an ordinary API call. The migration
+// worker owns retries and backoff, so this client makes one patient attempt
+// instead of multiplying load with six immediate attempts.
+var nzbReacquisitionClient = sync.OnceValue(func() *request.Client {
+	return request.New(
+		request.WithTimeout(3*time.Minute),
+		request.WithResponseHeaderTimeout(2*time.Minute),
+		request.WithMaxRetries(0),
+	)
+})
 
 const (
 	Sonarr  Type = "sonarr"
@@ -82,6 +87,16 @@ func New(name, host, token string, skipRepair bool, downloadUncached *bool, sele
 // cancels the in-flight HTTP call — this is what lets the repair pipeline
 // abort long Sonarr enumerations when a user presses Stop.
 func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload any, res any) (*http.Response, error) {
+	return a.requestCtx(ctx, getSharedClient(), method, endpoint, payload, res)
+}
+
+func getSharedClient() *request.Client { return sharedClient() }
+
+func (a *Arr) requestNZBReacquisitionCtx(ctx context.Context, method, endpoint string, payload any, res any) (*http.Response, error) {
+	return a.requestCtx(ctx, nzbReacquisitionClient(), method, endpoint, payload, res)
+}
+
+func (a *Arr) requestCtx(ctx context.Context, client *request.Client, method, endpoint string, payload any, res any) (*http.Response, error) {
 	if a.Token == "" || a.Host == "" {
 		return nil, fmt.Errorf("arr not configured")
 	}
@@ -110,7 +125,7 @@ func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload a
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Api-Key", a.Token)
 
-	resp, err := getSharedClient().Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

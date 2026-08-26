@@ -7,10 +7,29 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
 const testNZB = `<?xml version="1.0" encoding="UTF-8"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"></nzb>`
+
+func TestSearchCurrentReleasesLeavesRetryToBackgroundWorker(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	a := &Arr{Host: server.URL, Token: "secret", Type: Sonarr}
+	_, err := a.SearchCurrentReleases(t.Context(), 42)
+	if err == nil {
+		t.Fatal("release search unexpectedly succeeded")
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("request attempts = %d, want 1", got)
+	}
+}
 
 func TestReacquireNZBMatchesStrongIdentifiersForSonarrAndRadarr(t *testing.T) {
 	for _, test := range []struct {

@@ -406,7 +406,7 @@ move the cache to another filesystem.
 | `deep_nzb_interval`       | Minimum age for a full NZB STAT audit during a normal repair check; `0` disables periodic deep audits | `720h` |
 | `arrs`                    | Optional Arr filter when `source=arr`. Empty = all eligible                | `[]`        |
 | `auto_repair`             | When `true`, missing NZB ranges use PAR2 first; remaining brokens fall back to Arr replacement | `false` |
-| `skip_nzb_repair`         | Skip NZB / Usenet entries during scheduled repair sweeps                   | `false`     |
+| `skip_nzb_repair`         | Skip NZB / Usenet entries during sweeps and disable background legacy-NZB hydration | `false`     |
 | `nntp_connection_percent` | Share of NNTP connections probes may use, to avoid starving downloads      | `20`        |
 
 See the [Health Checker & Repair guide](/guides/repair/) for the full model, API, and Browse-page integration.

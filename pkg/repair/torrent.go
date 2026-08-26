@@ -158,11 +158,16 @@ func rollupStatus(results []fileResult) storage.HealthStatus {
 		return storage.HealthUnknown
 	}
 	healthy := false
+	deferred := false
 	for _, result := range results {
 		if result.broken {
 			return storage.HealthBroken
 		}
 		healthy = healthy || result.healthy
+		deferred = deferred || result.deferred
+	}
+	if deferred {
+		return storage.HealthUnknown
 	}
 	if healthy {
 		return storage.HealthHealthy

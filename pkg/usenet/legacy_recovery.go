@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sirrobot01/decypharr/internal/nntp"
@@ -173,6 +174,36 @@ func (u *Usenet) NeedsPAR2Hydration(nzoID string) (bool, error) {
 		return false, fmt.Errorf("load NZB metadata: %w", err)
 	}
 	return hasMissingRecoveryOrigins(nzb), nil
+}
+
+// LegacyNZBIDs returns a stable snapshot of stored NZB identifiers for the
+// background provenance migration. Reading the individual records happens
+// outside the storage directory lock so a large legacy library cannot block
+// new imports for the duration of the scan.
+func (u *Usenet) LegacyNZBIDs() ([]string, error) {
+	if u == nil || u.nzbStorage == nil {
+		return nil, errors.New("usenet NZB storage is unavailable")
+	}
+	ids, err := u.nzbStorage.GetAllNZBIDs()
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(ids)
+	return ids, nil
+}
+
+// LegacyNZBHydrationCandidate reports the Arr association and whether one
+// stored NZB still lacks PAR2 provenance. It intentionally examines one NZB at
+// a time so the startup migration can pace disk and allocation pressure.
+func (u *Usenet) LegacyNZBHydrationCandidate(nzoID string) (arrName string, needed bool, err error) {
+	if u == nil || u.nzbStorage == nil {
+		return "", false, errors.New("usenet NZB storage is unavailable")
+	}
+	nzb, err := u.nzbStorage.GetNZB(nzoID)
+	if err != nil {
+		return "", false, err
+	}
+	return nzb.Category, hasMissingRecoveryOrigins(nzb), nil
 }
 
 func (u *Usenet) hydrateLegacyNZB(ctx context.Context, nzoID, sourceName string, content []byte) (resultErr error) {

@@ -97,6 +97,8 @@ func (r *Service) probeEntry(ctx context.Context, runID string, c *candidate, he
 	case storage.HealthBroken:
 		h.LastFailedAt = h.LastCheckedAt
 		h.FailureReason = topReason(broken)
+	case storage.HealthUnknown:
+		h.FailureReason = firstDeferredReason(results)
 	}
 	if healthRepaired > 0 {
 		h.LastRepairAt = h.LastCheckedAt
@@ -107,6 +109,15 @@ func (r *Service) probeEntry(ctx context.Context, runID string, c *candidate, he
 
 	r.saveHealth(h)
 	return h, par2Stats
+}
+
+func firstDeferredReason(results []fileResult) string {
+	for _, result := range results {
+		if result.deferred && result.reason != "" {
+			return result.reason
+		}
+	}
+	return ""
 }
 
 func (r *Service) probeFiles(ctx context.Context, c *candidate, names []string, nzb *nzbProber, opts RunOptions, autoRepair, deepNZB bool) []fileResult {

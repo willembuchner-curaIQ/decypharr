@@ -27,8 +27,9 @@ type nzbRepairClient interface {
 }
 
 type nzbHydrationSource struct {
-	arrName string
-	mediaID int
+	arrName   string
+	mediaID   int
+	entryName string
 }
 
 type nzbProbeRequest struct {
@@ -49,6 +50,42 @@ type nzbRepairOutcome struct {
 type nzbRepairCache struct {
 	flights singleflight.Group
 	results *xsync.Map[string, *nzbRepairOutcome]
+}
+
+const legacyNZBHydrationPendingReason = "legacy_hydration_pending"
+
+var errLegacyNZBHydrationPending = errors.New("legacy NZB hydration is pending")
+
+type nzbLegacyPreparation struct {
+	needed bool
+	err    error
+}
+
+type nzbLegacyPreparationCache struct {
+	flights singleflight.Group
+	results *xsync.Map[string, *nzbLegacyPreparation]
+}
+
+func newNZBLegacyPreparationCache() *nzbLegacyPreparationCache {
+	return &nzbLegacyPreparationCache{results: xsync.NewMap[string, *nzbLegacyPreparation]()}
+}
+
+func (c *nzbLegacyPreparationCache) do(nzbID string, prepare func() *nzbLegacyPreparation) *nzbLegacyPreparation {
+	if c == nil || nzbID == "" {
+		return prepare()
+	}
+	if result, ok := c.results.Load(nzbID); ok {
+		return result
+	}
+	value, _, _ := c.flights.Do(nzbID, func() (any, error) {
+		if result, ok := c.results.Load(nzbID); ok {
+			return result, nil
+		}
+		result := prepare()
+		c.results.Store(nzbID, result)
+		return result, nil
+	})
+	return value.(*nzbLegacyPreparation)
 }
 
 func newNZBRepairCache() *nzbRepairCache {
@@ -77,19 +114,17 @@ func (c *nzbRepairCache) do(nzbID string, repair func() (usenetpkg.NZBRepairRepo
 
 type nzbProber struct {
 	client       nzbRepairClient
-	hydrate      func(context.Context, string, nzbHydrationSource) error
-	preparations *errorCache
-	hydrations   *errorCache
+	enqueue      func(string, nzbHydrationSource) legacyNZBHydrationDisposition
+	preparations *nzbLegacyPreparationCache
 	repairs      *nzbRepairCache
 	logger       zerolog.Logger
 }
 
-func newNZBProber(client nzbRepairClient, hydrate func(context.Context, string, nzbHydrationSource) error, logger zerolog.Logger) *nzbProber {
+func newNZBProber(client nzbRepairClient, enqueue func(string, nzbHydrationSource) legacyNZBHydrationDisposition, logger zerolog.Logger) *nzbProber {
 	return &nzbProber{
 		client:       client,
-		hydrate:      hydrate,
-		preparations: newErrorCache(),
-		hydrations:   newErrorCache(),
+		enqueue:      enqueue,
+		preparations: newNZBLegacyPreparationCache(),
 		repairs:      newNZBRepairCache(),
 		logger:       logger,
 	}
@@ -106,23 +141,26 @@ func (p *nzbProber) probe(ctx context.Context, request nzbProbeRequest) fileResu
 		return result
 	}
 
-	if err := p.prepareLegacy(ctx, request); err != nil {
-		p.logger.Warn().Err(err).Str("nzb_id", request.nzbID).Msg("Repair: legacy NZB hydration failed")
+	legacy := p.prepareLegacy(request)
+	legacyDisposition := legacyNZBHydrationUnavailable
+	if legacy.needed {
+		legacyDisposition = p.enqueueLegacy(request)
 	}
-
 	probeErr := p.client.CheckFile(ctx, request.nzbID, request.fileName)
 	sampledMissing := errors.Is(probeErr, customerror.UsenetSegmentMissingError)
-	canRecover := p.client.CanRecoverWithPAR2(request.nzbID)
-
-	if request.autoRepair && sampledMissing && !canRecover {
-		if err := p.hydrateNZB(ctx, request); err != nil {
-			result.broken = true
-			result.reason = "usenet_segment_missing"
-			return result
-		}
-		canRecover = p.client.CanRecoverWithPAR2(request.nzbID)
+	if sampledMissing && (legacy.err != nil || (legacy.needed && legacyDisposition != legacyNZBHydrationUnavailable)) {
+		result.deferred = true
+		result.reason = legacyNZBHydrationPendingReason
+		return result
+	}
+	if request.autoRepair && request.deepAudit && probeErr == nil &&
+		(legacy.err != nil || (legacy.needed && legacyDisposition != legacyNZBHydrationUnavailable)) {
+		result.deferred = true
+		result.reason = legacyNZBHydrationPendingReason
+		return result
 	}
 
+	canRecover := legacy.err == nil && !legacy.needed && p.client.CanRecoverWithPAR2(request.nzbID)
 	shouldRepair := request.autoRepair && canRecover && (sampledMissing || request.deepAudit && probeErr == nil)
 	if shouldRepair {
 		outcome := p.repairs.do(request.nzbID, func() (usenetpkg.NZBRepairReport, error) {
@@ -130,10 +168,10 @@ func (p *nzbProber) probe(ctx context.Context, request nzbProbeRequest) fileResu
 			if !errors.Is(err, recovery.ErrLegacyManifestUnsupported) {
 				return report, err
 			}
-			if hydrateErr := p.hydrateNZB(ctx, request); hydrateErr != nil {
-				return usenetpkg.NZBRepairReport{}, hydrateErr
+			if p.enqueueLegacy(request) != legacyNZBHydrationUnavailable {
+				return report, errLegacyNZBHydrationPending
 			}
-			return p.client.RepairNZB(ctx, request.nzbID)
+			return report, err
 		})
 		result.par2 = outcome
 		if done := applyNZBRepairOutcome(&result, outcome, request.fileName, sampledMissing); done {
@@ -144,6 +182,12 @@ func (p *nzbProber) probe(ctx context.Context, request nzbProbeRequest) fileResu
 
 	if probeErr == nil && request.verifyContent {
 		probeErr = p.client.VerifyFile(ctx, request.nzbID, request.fileName)
+	}
+	if errors.Is(probeErr, customerror.UsenetCorruptContentError) &&
+		(legacy.err != nil || (legacy.needed && legacyDisposition != legacyNZBHydrationUnavailable)) {
+		result.deferred = true
+		result.reason = legacyNZBHydrationPendingReason
+		return result
 	}
 	if probeErr == nil {
 		result.healthy = true
@@ -163,26 +207,25 @@ func (p *nzbProber) probe(ctx context.Context, request nzbProbeRequest) fileResu
 	return result
 }
 
-func (p *nzbProber) prepareLegacy(ctx context.Context, request nzbProbeRequest) error {
-	return p.preparations.do(request.nzbID, func() error {
+func (p *nzbProber) prepareLegacy(request nzbProbeRequest) *nzbLegacyPreparation {
+	return p.preparations.do(request.nzbID, func() *nzbLegacyPreparation {
 		needsHydration, err := p.client.NeedsPAR2Hydration(request.nzbID)
 		if err != nil {
-			return err
+			p.logger.Warn().Err(err).Str("nzb_id", request.nzbID).Msg("Repair: legacy NZB hydration state could not be read")
+			return &nzbLegacyPreparation{err: err}
 		}
 		if !needsHydration {
-			return nil
+			return &nzbLegacyPreparation{}
 		}
-		return p.hydrateNZB(ctx, request)
+		return &nzbLegacyPreparation{needed: true}
 	})
 }
 
-func (p *nzbProber) hydrateNZB(ctx context.Context, request nzbProbeRequest) error {
-	if p.hydrate == nil {
-		return errors.New("legacy NZB hydrator is unavailable")
+func (p *nzbProber) enqueueLegacy(request nzbProbeRequest) legacyNZBHydrationDisposition {
+	if p.enqueue == nil {
+		return legacyNZBHydrationUnavailable
 	}
-	return p.hydrations.do(request.nzbID, func() error {
-		return p.hydrate(ctx, request.nzbID, request.source)
-	})
+	return p.enqueue(request.nzbID, request.source)
 }
 
 func applyNZBRepairOutcome(result *fileResult, outcome *nzbRepairOutcome, fileName string, sampledMissing bool) bool {
@@ -196,6 +239,9 @@ func applyNZBRepairOutcome(result *fileResult, outcome *nzbRepairOutcome, fileNa
 	switch {
 	case fileRepaired, repairErr == nil && !sampledMissing:
 		return false
+	case errors.Is(repairErr, errLegacyNZBHydrationPending):
+		result.deferred = true
+		result.reason = legacyNZBHydrationPendingReason
 	case repairErr == nil:
 		result.broken = true
 		result.reason = "usenet_segment_missing"

@@ -261,6 +261,10 @@ func (a *Arr) FindGrabHistory(mediaDBID int) (*HistoryRecord, error) {
 
 // FindGrabHistoryCtx is FindGrabHistory with cancellation support.
 func (a *Arr) FindGrabHistoryCtx(ctx context.Context, mediaDBID int) (*HistoryRecord, error) {
+	return a.findGrabHistoryCtx(ctx, mediaDBID, false)
+}
+
+func (a *Arr) findGrabHistoryCtx(ctx context.Context, mediaDBID int, reacquisition bool) (*HistoryRecord, error) {
 	if a == nil {
 		return nil, fmt.Errorf("arr not configured")
 	}
@@ -289,7 +293,11 @@ func (a *Arr) FindGrabHistoryCtx(ctx context.Context, mediaDBID int) (*HistoryRe
 
 	var data HistorySchema
 	url := "api/v3/history?" + query.Encode()
-	resp, err := a.RequestCtx(ctx, http.MethodGet, url, nil, &data)
+	request := a.RequestCtx
+	if reacquisition {
+		request = a.requestNZBReacquisitionCtx
+	}
+	resp, err := request(ctx, http.MethodGet, url, nil, &data)
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +314,10 @@ func (a *Arr) FindGrabHistoryCtx(ctx context.Context, mediaDBID int) (*HistoryRe
 
 // FindGrabHistoryByDownloadIDCtx finds the grab that created a download-client item.
 func (a *Arr) FindGrabHistoryByDownloadIDCtx(ctx context.Context, downloadID string) (*HistoryRecord, error) {
+	return a.findGrabHistoryByDownloadIDCtx(ctx, downloadID, false)
+}
+
+func (a *Arr) findGrabHistoryByDownloadIDCtx(ctx context.Context, downloadID string, reacquisition bool) (*HistoryRecord, error) {
 	if a == nil {
 		return nil, fmt.Errorf("arr not configured")
 	}
@@ -326,7 +338,11 @@ func (a *Arr) FindGrabHistoryByDownloadIDCtx(ctx context.Context, downloadID str
 	query.Set("downloadId", downloadID)
 
 	var data HistorySchema
-	resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &data)
+	request := a.RequestCtx
+	if reacquisition {
+		request = a.requestNZBReacquisitionCtx
+	}
+	resp, err := request(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &data)
 	if err != nil {
 		return nil, err
 	}

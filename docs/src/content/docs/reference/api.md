@@ -109,7 +109,9 @@ Update the health-checker config (validates cron, workers, source).
 
 ### GET /api/repair/status
 
-Active run summary, last completed run, and counts of entries by status.
+Active run summary, last completed run, counts of entries by status, and the
+`legacy_nzb_hydration` background-migration snapshot (`running`, `paused`,
+`scan_complete`, queue counts, current NZB ID, and next attempt time).
 
 ### POST /api/repair/run
 

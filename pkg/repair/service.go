@@ -22,11 +22,12 @@ import (
 
 // Status is the snapshot returned by the /api/repair/status endpoint.
 type Status struct {
-	Enabled      bool                         `json:"enabled"`
-	NextRunAt    *time.Time                   `json:"next_run_at,omitempty"`
-	ActiveRun    *storage.RepairRun           `json:"active_run,omitempty"`
-	LastRun      *storage.RepairRun           `json:"last_run,omitempty"`
-	HealthCounts map[storage.HealthStatus]int `json:"health_counts"`
+	Enabled            bool                         `json:"enabled"`
+	NextRunAt          *time.Time                   `json:"next_run_at,omitempty"`
+	ActiveRun          *storage.RepairRun           `json:"active_run,omitempty"`
+	LastRun            *storage.RepairRun           `json:"last_run,omitempty"`
+	HealthCounts       map[storage.HealthStatus]int `json:"health_counts"`
+	LegacyNZBHydration LegacyNZBHydrationStatus     `json:"legacy_nzb_hydration"`
 }
 
 // RunOptions are one-off options for a manually-started repair run.
@@ -94,8 +95,7 @@ type Service struct {
 	hearsay       *hearsay.Service
 	logger        zerolog.Logger
 
-	legacyNZBMu sync.Mutex
-	legacyNZB   *legacyNZBRecoveryState
+	legacyNZBHydrator *legacyNZBHydrationWorker
 
 	mu             sync.Mutex
 	parentCtx      context.Context
@@ -109,7 +109,7 @@ type Service struct {
 
 // New builds a repair service from its dependencies.
 func New(deps Dependencies) *Service {
-	return &Service{
+	service := &Service{
 		scheduler:     deps.Scheduler,
 		backend:       deps.Backend,
 		storage:       deps.Storage,
@@ -119,8 +119,23 @@ func New(deps Dependencies) *Service {
 		hearsay:       deps.Hearsay,
 		logger:        logger.New("repair"),
 		parentCtx:     context.Background(),
-		legacyNZB:     newLegacyNZBRecoveryState(),
 	}
+	if deps.Usenet != nil && deps.Storage != nil {
+		service.legacyNZBHydrator = newLegacyNZBHydrationWorker(legacyNZBHydrationWorkerDeps{
+			listIDs: deps.Usenet.LegacyNZBIDs,
+			inspect: deps.Usenet.LegacyNZBHydrationCandidate,
+			hydrate: service.hydrateLegacyNZB,
+			markReady: func(entryName string) {
+				health, err := deps.Storage.GetEntryHealth(entryName)
+				if err == nil && health != nil && health.Status == storage.HealthUnknown && health.FailureReason == legacyNZBHydrationPendingReason {
+					deps.Storage.MarkEntryDirty(entryName, config.ProtocolNZB, "legacy_nzb_hydrated")
+				}
+			},
+			store:  deps.Storage,
+			logger: service.logger,
+		})
+	}
+	return service
 }
 
 func (r *Service) cfg() config.RepairConfig { return config.Get().Repair }

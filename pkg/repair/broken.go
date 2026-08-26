@@ -124,7 +124,9 @@ func (r *Service) FixBroken(ctx context.Context, names []string) (*storage.Repai
 		return nil, fmt.Errorf("failed to persist repair run: %w", err)
 	}
 
+	resumeLegacyHydration := r.pauseLegacyNZBHydration()
 	r.runWG.Go(func() {
+		defer resumeLegacyHydration()
 		defer func() {
 			r.mu.Lock()
 			if r.activeRunID == run.ID {
@@ -194,7 +196,9 @@ func (r *Service) ClearBroken(ctx context.Context, names []string) (*storage.Rep
 		return nil, fmt.Errorf("failed to persist repair run: %w", err)
 	}
 
+	resumeLegacyHydration := r.pauseLegacyNZBHydration()
 	r.runWG.Go(func() {
+		defer resumeLegacyHydration()
 		defer func() {
 			r.mu.Lock()
 			if r.activeRunID == run.ID {

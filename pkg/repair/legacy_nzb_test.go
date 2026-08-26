@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -101,104 +99,33 @@ func TestHydrateLegacyNZBFromSourcesPreservesUnexpectedLocalError(t *testing.T) 
 	}
 }
 
-func TestLegacyNZBRecoveryStateCachesStableFailureUntilExpiry(t *testing.T) {
-	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
-	state := newLegacyNZBRecoveryState()
-	state.cooldown = 24 * time.Hour
-	state.now = func() time.Time { return now }
-	failure := errors.New("no matching release")
-	calls := 0
-	attempt := func() error {
-		calls++
-		return failure
-	}
-
-	if err := state.do("arr\x00nzb", attempt); !errors.Is(err, failure) {
-		t.Fatalf("first error = %v", err)
-	}
-	if err := state.do("arr\x00nzb", attempt); !errors.Is(err, errLegacyNZBCooldown) || !errors.Is(err, failure) {
-		t.Fatalf("cached error = %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("attempt calls during cooldown = %d, want 1", calls)
-	}
-
-	now = now.Add(24*time.Hour + time.Second)
-	if err := state.do("arr\x00nzb", attempt); !errors.Is(err, failure) || errors.Is(err, errLegacyNZBCooldown) {
-		t.Fatalf("post-expiry error = %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("attempt calls after expiry = %d, want 2", calls)
-	}
-}
-
-func TestLegacyNZBRecoveryStateDoesNotCacheOperationalFailures(t *testing.T) {
+func TestLegacyNZBHydrationFailureClassification(t *testing.T) {
 	tests := []struct {
-		name string
-		err  error
+		name      string
+		err       error
+		permanent bool
 	}{
 		{name: "cancelled", err: context.Canceled},
 		{name: "deadline", err: context.DeadlineExceeded},
-		{name: "upstream 500", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusBadGateway}},
+		{name: "unknown operational error", err: errors.New("local storage unavailable")},
+		{name: "upstream 502", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusBadGateway}},
 		{name: "throttled", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusTooManyRequests}},
 		{name: "release search 503", err: &arr.NZBMetadataError{Stage: "release search", Status: http.StatusServiceUnavailable}},
+		{name: "no match", err: &arr.ReleaseMatchError{Stage: "identifier"}, permanent: true},
+		{name: "ambiguous", err: &arr.ReleaseMatchError{Stage: "identifier", Candidates: 2, Ambiguous: true}, permanent: true},
+		{name: "metadata 404", err: &arr.NZBMetadataError{Stage: "request", Status: http.StatusNotFound}, permanent: true},
+		{name: "metadata too large", err: &arr.NZBMetadataError{Stage: "response", Kind: arr.ErrNZBMetadataTooLarge}, permanent: true},
+		{name: "invalid metadata", err: &arr.NZBMetadataError{Stage: "validation", Kind: arr.ErrInvalidNZBMetadata}, permanent: true},
+		{name: "no arr source", err: errLegacyNZBNoArrSource, permanent: true},
+		{name: "no par2", err: usenetpkg.ErrLegacyNZBNoPAR2, permanent: true},
+		{name: "identity mismatch", err: usenetpkg.ErrLegacyNZBIdentityMismatch, permanent: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			state := newLegacyNZBRecoveryState()
-			calls := 0
-			for range 2 {
-				if err := state.do("arr\x00nzb", func() error {
-					calls++
-					return test.err
-				}); !errors.Is(err, test.err) {
-					t.Fatalf("error = %v, want %v", err, test.err)
-				}
-			}
-			if calls != 2 {
-				t.Fatalf("attempt calls = %d, want 2", calls)
+			if got := legacyNZBHydrationFailurePermanent(test.err); got != test.permanent {
+				t.Fatalf("permanent = %t, want %t", got, test.permanent)
 			}
 		})
-	}
-}
-
-func TestLegacyNZBRecoveryStateCoalescesConcurrentAttempts(t *testing.T) {
-	const callers = 24
-	state := newLegacyNZBRecoveryState()
-	var calls atomic.Int64
-	start := make(chan struct{})
-	release := make(chan struct{})
-	started := make(chan struct{})
-	var ready, done sync.WaitGroup
-	ready.Add(callers)
-	errs := make([]error, callers)
-
-	for i := range callers {
-		done.Go(func() {
-			ready.Done()
-			<-start
-			errs[i] = state.do("arr\x00nzb", func() error {
-				if calls.Add(1) == 1 {
-					close(started)
-				}
-				<-release
-				return errors.New("permanent failure")
-			})
-		})
-	}
-	ready.Wait()
-	close(start)
-	<-started
-	close(release)
-	done.Wait()
-
-	if calls.Load() != 1 {
-		t.Fatalf("attempt calls = %d, want 1", calls.Load())
-	}
-	for i, err := range errs {
-		if err == nil {
-			t.Fatalf("caller %d received nil error", i)
-		}
 	}
 }
 
@@ -225,6 +152,9 @@ func TestNZBHydrationSourceUsesManagedEntryCategory(t *testing.T) {
 	if source.arrName != "Sonarr" {
 		t.Fatalf("Arr name = %q, want Sonarr", source.arrName)
 	}
+	if source.entryName != "" {
+		t.Fatalf("entry name = %q, want empty candidate name", source.entryName)
+	}
 }
 
 func TestNZBHydrationSourceFallsBackToCandidateMedia(t *testing.T) {
@@ -235,6 +165,7 @@ func TestNZBHydrationSourceFallsBackToCandidateMedia(t *testing.T) {
 	service := &Service{arrs: arrs}
 	source := service.nzbHydrationSource(
 		&candidate{
+			name:    "Series/Season 01",
 			arrName: "Sonarr",
 			contentMap: map[string]arr.ContentFile{
 				"movie.mkv": {EpisodeId: 82},
@@ -245,6 +176,9 @@ func TestNZBHydrationSourceFallsBackToCandidateMedia(t *testing.T) {
 	)
 	if source.mediaID != 82 {
 		t.Fatalf("media ID = %d, want 82", source.mediaID)
+	}
+	if source.entryName != "Series/Season 01" {
+		t.Fatalf("entry name = %q", source.entryName)
 	}
 }
 

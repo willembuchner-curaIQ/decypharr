@@ -4,13 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"strings"
-	"sync"
-	"time"
-
-	"golang.org/x/sync/singleflight"
 
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/arr"
@@ -18,104 +13,12 @@ import (
 	usenetpkg "github.com/sirrobot01/decypharr/pkg/usenet"
 )
 
-const legacyNZBFailureCooldown = 24 * time.Hour
-
 var (
-	errLegacyNZBHydration = errors.New("legacy NZB hydration failed")
-	errLegacyNZBCooldown  = errors.New("legacy NZB hydration is in cooldown")
+	errLegacyNZBHydration   = errors.New("legacy NZB hydration failed")
+	errLegacyNZBNoArrSource = errors.New("legacy NZB has no associated Arr source")
 )
 
-type legacyNZBFailure struct {
-	until time.Time
-	err   error
-}
-
-// legacyNZBRecoveryState coalesces concurrent attempts and remembers only
-// stable failures. Successful attempts and operational/transient failures are
-// never negatively cached.
-type legacyNZBRecoveryState struct {
-	mu       sync.Mutex
-	failures map[string]legacyNZBFailure
-	flights  singleflight.Group
-	cooldown time.Duration
-	now      func() time.Time
-}
-
-func newLegacyNZBRecoveryState() *legacyNZBRecoveryState {
-	return &legacyNZBRecoveryState{
-		failures: make(map[string]legacyNZBFailure),
-		cooldown: legacyNZBFailureCooldown,
-		now:      time.Now,
-	}
-}
-
-func (s *legacyNZBRecoveryState) do(key string, attempt func() error) error {
-	if attempt == nil {
-		return errors.New("legacy NZB recovery attempt is unavailable")
-	}
-	if s == nil || strings.TrimSpace(key) == "" {
-		return attempt()
-	}
-	if err := s.cachedFailure(key); err != nil {
-		return err
-	}
-
-	_, err, _ := s.flights.Do(key, func() (any, error) {
-		if err := s.cachedFailure(key); err != nil {
-			return nil, err
-		}
-		err := attempt()
-		if err == nil {
-			s.clearFailure(key)
-			return nil, nil
-		}
-		if cacheLegacyNZBFailure(err) {
-			s.rememberFailure(key, err)
-		}
-		return nil, err
-	})
-	return err
-}
-
-func (s *legacyNZBRecoveryState) clock() time.Time {
-	if s.now == nil {
-		return time.Now()
-	}
-	return s.now()
-}
-
-func (s *legacyNZBRecoveryState) cachedFailure(key string) error {
-	now := s.clock()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	maps.DeleteFunc(s.failures, func(_ string, failure legacyNZBFailure) bool {
-		return !now.Before(failure.until)
-	})
-	failure, ok := s.failures[key]
-	if !ok {
-		return nil
-	}
-	return fmt.Errorf("%w until %s: %w", errLegacyNZBCooldown, failure.until.UTC().Format(time.RFC3339), failure.err)
-}
-
-func (s *legacyNZBRecoveryState) rememberFailure(key string, err error) {
-	cooldown := s.cooldown
-	if cooldown <= 0 {
-		cooldown = legacyNZBFailureCooldown
-	}
-	until := s.clock().Add(cooldown)
-	s.mu.Lock()
-	s.failures[key] = legacyNZBFailure{until: until, err: err}
-	s.mu.Unlock()
-}
-
-func (s *legacyNZBRecoveryState) clearFailure(key string) {
-	s.mu.Lock()
-	delete(s.failures, key)
-	s.mu.Unlock()
-}
-
-func cacheLegacyNZBFailure(err error) bool {
+func legacyNZBHydrationFailurePermanent(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
@@ -126,24 +29,19 @@ func cacheLegacyNZBFailure(err error) bool {
 	// throttling response, or upstream 5xx is operational even when it has no
 	// wrapped net.Error for the shared retry classifier to inspect.
 	if metadataErr, ok := errors.AsType[*arr.NZBMetadataError](err); ok {
-		return metadataErr.Status != http.StatusRequestTimeout &&
-			metadataErr.Status != http.StatusTooManyRequests &&
-			(metadataErr.Status < 500 || metadataErr.Status > 599)
+		if metadataErr.Status != 0 {
+			return metadataErr.Status != http.StatusRequestTimeout &&
+				metadataErr.Status != http.StatusTooManyRequests &&
+				(metadataErr.Status < 500 || metadataErr.Status > 599)
+		}
+		return errors.Is(metadataErr, arr.ErrNZBMetadataTooLarge) ||
+			errors.Is(metadataErr, arr.ErrInvalidNZBMetadata)
 	}
-	return true
-}
-
-func (r *Service) legacyNZBState() *legacyNZBRecoveryState {
-	r.legacyNZBMu.Lock()
-	defer r.legacyNZBMu.Unlock()
-	if r.legacyNZB == nil {
-		r.legacyNZB = newLegacyNZBRecoveryState()
-	}
-	return r.legacyNZB
-}
-
-func legacyNZBCooldownKey(arrName, nzbID string) string {
-	return strings.TrimSpace(arrName) + "\x00" + strings.TrimSpace(nzbID)
+	return errors.Is(err, arr.ErrNZBReacquireNoMatch) ||
+		errors.Is(err, arr.ErrNZBReacquireAmbiguous) ||
+		errors.Is(err, errLegacyNZBNoArrSource) ||
+		errors.Is(err, usenetpkg.ErrLegacyNZBIdentityMismatch) ||
+		errors.Is(err, usenetpkg.ErrLegacyNZBNoPAR2)
 }
 
 func (r *Service) hydrateLegacyNZB(ctx context.Context, nzbID string, source nzbHydrationSource) error {
@@ -154,31 +52,32 @@ func (r *Service) hydrateLegacyNZB(ctx context.Context, nzbID string, source nzb
 		ctx = context.Background()
 	}
 
-	err := r.legacyNZBState().do(legacyNZBCooldownKey(source.arrName, nzbID), func() error {
-		return hydrateLegacyNZBFromSources(
-			ctx,
-			nzbID,
-			r.usenet.LoadLegacyNZBSource,
-			func(ctx context.Context) ([]byte, error) {
-				if r.arrs == nil || strings.TrimSpace(source.arrName) == "" {
-					return nil, errors.New("no Arr source is associated with this NZB file")
-				}
-				a := r.arrs.Get(source.arrName)
-				if a == nil {
-					return nil, fmt.Errorf("Arr %q is unavailable", source.arrName)
-				}
-				if a.Host == "" || a.Token == "" || a.SkipRepair {
-					return nil, fmt.Errorf("Arr %q is not eligible for repair", source.arrName)
-				}
-				content, err := a.ReacquireNZBByDownloadID(ctx, nzbID)
-				if err == nil || source.mediaID <= 0 || !errors.Is(err, arr.ErrNZBReacquireNoMatch) {
-					return content, err
-				}
-				return a.ReacquireNZB(ctx, source.mediaID)
-			},
-			r.usenet.HydrateLegacyNZB,
-		)
-	})
+	err := hydrateLegacyNZBFromSources(
+		ctx,
+		nzbID,
+		r.usenet.LoadLegacyNZBSource,
+		func(ctx context.Context) ([]byte, error) {
+			if strings.TrimSpace(source.arrName) == "" {
+				return nil, errLegacyNZBNoArrSource
+			}
+			if r.arrs == nil {
+				return nil, errors.New("arr storage is unavailable")
+			}
+			a := r.arrs.Get(source.arrName)
+			if a == nil {
+				return nil, fmt.Errorf("arr %q is unavailable", source.arrName)
+			}
+			if a.Host == "" || a.Token == "" || a.SkipRepair {
+				return nil, fmt.Errorf("arr %q is not eligible for repair", source.arrName)
+			}
+			content, err := a.ReacquireNZBByDownloadID(ctx, nzbID)
+			if err == nil || source.mediaID <= 0 || !errors.Is(err, arr.ErrNZBReacquireNoMatch) {
+				return content, err
+			}
+			return a.ReacquireNZB(ctx, source.mediaID)
+		},
+		r.usenet.HydrateLegacyNZB,
+	)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errLegacyNZBHydration, err)
 	}
@@ -200,6 +99,7 @@ func (r *Service) nzbHydrationSource(candidate *candidate, entry *storage.Entry,
 	var source nzbHydrationSource
 	if candidate != nil {
 		source.arrName = candidate.arrName
+		source.entryName = candidate.name
 	}
 	if source.arrName == "" && entry != nil {
 		source.arrName = entry.Category
@@ -244,7 +144,7 @@ func hydrateLegacyNZBFromSources(ctx context.Context, nzbID string, load legacyN
 		return fmt.Errorf("load local legacy NZB source: %w", err)
 	}
 	if reacquire == nil {
-		return errors.New("Arr NZB reacquisition is unavailable")
+		return errors.New("arr NZB reacquisition is unavailable")
 	}
 	content, err = reacquire(ctx)
 	if err != nil {

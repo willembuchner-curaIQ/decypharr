@@ -17,6 +17,7 @@ type fileResult struct {
 	protocol config.Protocol
 	healthy  bool
 	broken   bool
+	deferred bool
 	reason   string
 	par2     *nzbRepairOutcome
 }
@@ -139,7 +140,7 @@ func (r *Service) probeAndHealCandidates(ctx context.Context, run *storage.Repai
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(max(1, r.workers()))
-	nzb := newNZBProber(r.usenet, r.hydrateLegacyNZB, r.logger)
+	nzb := newNZBProber(r.usenet, r.enqueueLegacyNZBHydration, r.logger)
 
 	for _, name := range names {
 		c := candidates[name]

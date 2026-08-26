@@ -14,7 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-var storeNames = []string{"entries", "queue", "items", "repair_state", "repair_runs"}
+var storeNames = []string{"entries", "queue", "items", "repair_state", "repair_runs", "legacy_nzb_hydration"}
 
 // legacyStoreNames are buckets from the v1 repair system. They are removed
 // on startup so they don't accumulate dead data.
@@ -22,13 +22,14 @@ var legacyStoreNames = []string{"repair_jobs", "repair_keys"}
 
 // Storage handles application persistence using appendstore.
 type Storage struct {
-	entries     *appendstore.Store
-	queue       *appendstore.Store
-	entryItems  *appendstore.Store
-	repairState *appendstore.Store
-	repairRuns  *appendstore.Store
-	dir         string
-	logger      zerolog.Logger
+	entries            *appendstore.Store
+	queue              *appendstore.Store
+	entryItems         *appendstore.Store
+	repairState        *appendstore.Store
+	repairRuns         *appendstore.Store
+	legacyNZBHydration *appendstore.Store
+	dir                string
+	logger             zerolog.Logger
 
 	healthCountsMu      sync.Mutex
 	healthCounts        map[HealthStatus]int
@@ -106,13 +107,14 @@ func NewStorage(dbPath string) (*Storage, error) {
 	}
 
 	s := &Storage{
-		entries:     itemStores["entries"],
-		queue:       itemStores["queue"],
-		entryItems:  itemStores["items"],
-		repairState: itemStores["repair_state"],
-		repairRuns:  itemStores["repair_runs"],
-		dir:         dbPath,
-		logger:      log,
+		entries:            itemStores["entries"],
+		queue:              itemStores["queue"],
+		entryItems:         itemStores["items"],
+		repairState:        itemStores["repair_state"],
+		repairRuns:         itemStores["repair_runs"],
+		legacyNZBHydration: itemStores["legacy_nzb_hydration"],
+		dir:                dbPath,
+		logger:             log,
 	}
 
 	if count, err := s.MigrateMetadata(); err != nil {
@@ -126,7 +128,7 @@ func NewStorage(dbPath string) (*Storage, error) {
 
 func (s *Storage) Close() error {
 	var errs []error
-	stores := []*appendstore.Store{s.entries, s.queue, s.entryItems, s.repairState, s.repairRuns}
+	stores := []*appendstore.Store{s.entries, s.queue, s.entryItems, s.repairState, s.repairRuns, s.legacyNZBHydration}
 	for _, store := range stores {
 		if store == nil {
 			continue
@@ -144,7 +146,7 @@ func (s *Storage) Close() error {
 // DiskSize returns the total on-disk size of all stores (O(1), no filesystem walk).
 func (s *Storage) DiskSize() int64 {
 	var size int64
-	for _, store := range []*appendstore.Store{s.entries, s.queue, s.entryItems, s.repairState, s.repairRuns} {
+	for _, store := range []*appendstore.Store{s.entries, s.queue, s.entryItems, s.repairState, s.repairRuns, s.legacyNZBHydration} {
 		if store != nil {
 			size += store.DiskSize()
 		}
@@ -186,6 +188,7 @@ func (s *Storage) copyFrom(other *Storage) error {
 		{"items", other.entryItems, s.entryItems},
 		{"repair_state", other.repairState, s.repairState},
 		{"repair_runs", other.repairRuns, s.repairRuns},
+		{"legacy_nzb_hydration", other.legacyNZBHydration, s.legacyNZBHydration},
 	}
 
 	for _, p := range pairs {
