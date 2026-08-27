@@ -158,10 +158,17 @@ class ConfigManager {
         const $ = (id) => document.getElementById(id);
         const h = hearsay || {};
         if ($('hearsay.enabled')) $('hearsay.enabled').checked = !h.disabled;
-        if ($('hearsay.publish')) $('hearsay.publish').checked = !h.no_publish;
+        if ($('hearsay.participate')) $('hearsay.participate').checked = !!h.participate;
+        if ($('hearsay.publish')) $('hearsay.publish').checked = !!h.publish;
+        if ($('hearsay.advice_mode')) $('hearsay.advice_mode').value = h.advice_mode || 'shadow';
+        if ($('hearsay.min_support')) $('hearsay.min_support').value = h.min_support || '';
+        if ($('hearsay.min_evidence')) $('hearsay.min_evidence').value = h.min_evidence || '';
+        if ($('hearsay.min_sources')) $('hearsay.min_sources').value = h.min_sources || '';
         if ($('hearsay.port')) $('hearsay.port').value = h.port || '';
         if ($('hearsay.gossip_port')) $('hearsay.gossip_port').value = h.gossip_port || '';
         if ($('hearsay.interval')) $('hearsay.interval').value = h.interval || '';
+        if ($('hearsay.max_storage_bytes')) $('hearsay.max_storage_bytes').value = h.max_storage_bytes || '';
+        if ($('hearsay.max_feeds_per_namespace')) $('hearsay.max_feeds_per_namespace').value = h.max_feeds_per_namespace || '';
         if ($('hearsay.follow')) $('hearsay.follow').value = (h.follow || []).join('\n');
     }
 
@@ -169,10 +176,17 @@ class ConfigManager {
         const $ = (id) => document.getElementById(id);
         return {
             disabled: !($('hearsay.enabled')?.checked ?? true),
-            no_publish: !($('hearsay.publish')?.checked ?? true),
+            participate: $('hearsay.participate')?.checked ?? false,
+            publish: $('hearsay.publish')?.checked ?? false,
+            advice_mode: $('hearsay.advice_mode')?.value || 'shadow',
+            min_support: parseFloat($('hearsay.min_support')?.value) || 0,
+            min_evidence: parseFloat($('hearsay.min_evidence')?.value) || 0,
+            min_sources: parseInt($('hearsay.min_sources')?.value, 10) || 0,
             port: parseInt($('hearsay.port')?.value, 10) || 0,
             gossip_port: parseInt($('hearsay.gossip_port')?.value, 10) || 0,
             interval: $('hearsay.interval')?.value.trim() || '',
+            max_storage_bytes: parseInt($('hearsay.max_storage_bytes')?.value, 10) || 0,
+            max_feeds_per_namespace: parseInt($('hearsay.max_feeds_per_namespace')?.value, 10) || 0,
             follow: ($('hearsay.follow')?.value || '')
                 .split('\n').map((k) => k.trim()).filter(Boolean),
         };

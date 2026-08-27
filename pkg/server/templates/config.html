@@ -1832,9 +1832,9 @@ fe80::/10</textarea>
                         <div class="alert alert-info">
                             <i class="bi bi-info-circle text-lg"></i>
                             <div class="text-sm">
-                                Hearsay lets Decypharr users help each other know which downloads are instantly
-                                available, before adding them. Your Decypharr shares what it already learned during
-                                normal use — nothing about your searches or what you watch is ever shared.
+                                Hearsay records outcome hints locally. Joining the public network and sharing those
+                                outcomes are separate, explicit choices. Shared records use content hashes, but reveal
+                                that the hash was attempted.
                                 <a href="https://docs.decypharr.com/guides/hearsay" target="_blank" rel="noopener"
                                    class="link link-primary font-medium">Learn more</a>.
                             </div>
@@ -1845,28 +1845,70 @@ fe80::/10</textarea>
                                 <input type="checkbox" class="checkbox checkbox-lg checkbox-primary"
                                        id="hearsay.enabled" name="hearsay.enabled" checked>
                                 <div>
-                                    <span class="label-text font-medium text-lg">Enable Hearsay</span>
-                                    <div class="label-text-alt">Decypharr uses what it and other users learned to
-                                        reject dead downloads at the add step, before any provider call.
+                                    <span class="label-text font-medium text-lg">Enable local Hearsay</span>
+                                    <div class="label-text-alt">Keep local observations and advice metrics. This does
+                                        not join the network.
                                     </div>
                                 </div>
                             </label>
                         </div>
 
-                        <div>
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                             <label class="label cursor-pointer justify-start gap-3">
                                 <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
-                                       id="hearsay.publish" name="hearsay.publish" checked>
+                                       id="hearsay.participate" name="hearsay.participate">
                                 <div>
-                                    <span class="label-text font-medium">Share back</span>
-                                    <div class="label-text-alt">Help other users the same way they help you. Turn
-                                        off to only receive.
+                                    <span class="label-text font-medium">Join the public network</span>
+                                    <div class="label-text-alt">Discover and receive signed observations from other
+                                        operators. This exposes your IP on public DHT topics.
+                                    </div>
+                                </div>
+                            </label>
+                            <label class="label cursor-pointer justify-start gap-3">
+                                <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
+                                       id="hearsay.publish" name="hearsay.publish">
+                                <div>
+                                    <span class="label-text font-medium">Share observations</span>
+                                    <div class="label-text-alt">Publish outcomes learned from real work. Joining the
+                                        network is also required.
                                     </div>
                                 </div>
                             </label>
                         </div>
 
-                        <div class="divider text-sm opacity-60">Advanced — the defaults work for everyone</div>
+                        <div class="divider text-sm opacity-60">Advice policy</div>
+
+                        <div>
+                            <label class="label" for="hearsay.advice_mode">
+                                <span class="font-medium">Mode</span>
+                            </label>
+                            <select class="select w-full" id="hearsay.advice_mode" name="hearsay.advice_mode">
+                                <option value="shadow">Shadow — measure only</option>
+                                <option value="active">Active — skip strongly denied adds</option>
+                            </select>
+                            <span class="label-text-alt opacity-70">Start in shadow mode, review accuracy on the Stats
+                                page, then opt into active decisions.</span>
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                            <div>
+                                <label class="label" for="hearsay.min_support"><span class="font-medium">Minimum support</span></label>
+                                <input type="number" min="0" max="1" step="0.05" class="input w-full"
+                                       id="hearsay.min_support" name="hearsay.min_support" placeholder="0.5">
+                            </div>
+                            <div>
+                                <label class="label" for="hearsay.min_evidence"><span class="font-medium">Minimum evidence</span></label>
+                                <input type="number" min="0" step="0.05" class="input w-full"
+                                       id="hearsay.min_evidence" name="hearsay.min_evidence" placeholder="0.3">
+                            </div>
+                            <div>
+                                <label class="label" for="hearsay.min_sources"><span class="font-medium">Minimum sources</span></label>
+                                <input type="number" min="1" step="1" class="input w-full"
+                                       id="hearsay.min_sources" name="hearsay.min_sources" placeholder="1">
+                            </div>
+                        </div>
+
+                        <div class="divider text-sm opacity-60">Network limits</div>
 
                         <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
                             <div>
@@ -1895,6 +1937,26 @@ fe80::/10</textarea>
                                        id="hearsay.interval" placeholder="30m">
                                 <span class="label-text-alt opacity-70">How often Decypharr sends and receives
                                     updates.</span>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                            <div>
+                                <label class="label" for="hearsay.max_storage_bytes">
+                                    <span class="font-medium">Maximum relay storage</span>
+                                </label>
+                                <input type="number" min="0" class="input w-full" name="hearsay.max_storage_bytes"
+                                       id="hearsay.max_storage_bytes" placeholder="1073741824">
+                                <span class="label-text-alt opacity-70">Bytes retained for relaying generations.</span>
+                            </div>
+                            <div>
+                                <label class="label" for="hearsay.max_feeds_per_namespace">
+                                    <span class="font-medium">Maximum sources per namespace</span>
+                                </label>
+                                <input type="number" min="1" class="input w-full"
+                                       name="hearsay.max_feeds_per_namespace" id="hearsay.max_feeds_per_namespace"
+                                       placeholder="256">
+                                <span class="label-text-alt opacity-70">Bounds discovered publisher metadata.</span>
                             </div>
                         </div>
 

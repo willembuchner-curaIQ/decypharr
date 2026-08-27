@@ -279,6 +279,14 @@
                                 <div class="text-xs text-base-content/70">Connected peers</div>
                                 <div class="font-bold text-success" id="hearsay-peers">-</div>
                             </div>
+                            <div>
+                                <div class="text-xs text-base-content/70">Advice coverage</div>
+                                <div class="font-bold text-info" id="hearsay-coverage">-</div>
+                            </div>
+                            <div>
+                                <div class="text-xs text-base-content/70">Verified accuracy</div>
+                                <div class="font-bold text-success" id="hearsay-accuracy">-</div>
+                            </div>
                         </div>
                         <div class="text-xs text-base-content/70 mt-2 font-mono truncate" id="hearsay-identity"
                              title="Your public key. Share it so others can follow you."></div>
@@ -1301,17 +1309,27 @@
                 if (!h.enabled) {
                     state.textContent = 'Off';
                     state.className = 'badge badge-ghost badge-sm ml-auto';
+                } else if (!h.participate) {
+                    state.textContent = `Local · ${h.advice_mode || 'shadow'}`;
+                    state.className = 'badge badge-ghost badge-sm ml-auto';
                 } else if (h.publish) {
-                    state.textContent = 'Sharing';
+                    state.textContent = `Sharing · ${h.advice_mode || 'shadow'}`;
                     state.className = 'badge badge-success badge-sm ml-auto';
                 } else {
-                    state.textContent = 'Receive only';
+                    state.textContent = `Receive · ${h.advice_mode || 'shadow'}`;
                     state.className = 'badge badge-info badge-sm ml-auto';
                 }
                 const feeds = Object.values(h.feeds || {}).reduce((a, b) => a + b, 0);
                 const peers = (h.transport?.torrents || []).reduce((a, t) => a + (t.active_peers || 0), 0);
+                const advice = Object.values(h.advice || {});
+                const evaluations = advice.reduce((sum, item) => sum + (item.evaluations || 0), 0);
+                const known = advice.reduce((sum, item) => sum + (item.positive || 0) + (item.negative || 0), 0);
+                const verified = advice.reduce((sum, item) => sum + (item.verified || 0), 0);
+                const correct = advice.reduce((sum, item) => sum + (item.correct || 0), 0);
                 document.getElementById('hearsay-feeds').textContent = h.enabled ? formatNumber(feeds) : '-';
                 document.getElementById('hearsay-peers').textContent = h.enabled ? formatNumber(peers) : '-';
+                document.getElementById('hearsay-coverage').textContent = evaluations ? `${(known / evaluations * 100).toFixed(1)}%` : '-';
+                document.getElementById('hearsay-accuracy').textContent = verified ? `${(correct / verified * 100).toFixed(1)}%` : '-';
                 document.getElementById('hearsay-identity').textContent = h.identity || '';
             }
 

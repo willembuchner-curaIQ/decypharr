@@ -1,9 +1,6 @@
-// Package hearsay wires decypharr into the Hearsay network
-// (github.com/sirrobot01/hearsay): observations that fall out of work
-// decypharr already does — repair probes, add outcomes, import
-// availability checks — are recorded, published, and used to fail
-// doomed adds fast. Every hook is a nil-safe no-op when the service
-// is disabled, so call sites never guard.
+// Package hearsay connects Decypharr's real outcomes to an embedded
+// Hearsay engine. Local shadow advice is the default; network access,
+// publishing, and active decisions require explicit configuration.
 package hearsay
 
 import (
@@ -12,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -32,16 +30,22 @@ import (
 )
 
 type Service struct {
-	engine   *hearsaylib.Hearsay
-	log      zerolog.Logger
-	debrids  map[string]string // vendor → cached namespace
-	uncached map[string]string // vendor → paired denial namespace
-	usenets  map[string]string // backbone → namespace
-	publish  bool
-	interval time.Duration
-	port     int
-	gossip   int
-	follow   []string
+	engine      *hearsaylib.Hearsay
+	log         zerolog.Logger
+	debrids     map[string]string
+	uncached    map[string]string
+	usenets     map[string]string
+	advisors    map[string]*hsdebrid.Advisor
+	adviceMode  hsdebrid.AdviceMode
+	policy      hsdebrid.AdvicePolicy
+	participate bool
+	publish     bool
+	interval    time.Duration
+	port        int
+	gossip      int
+	maxStorage  int64
+	maxFeeds    int
+	follow      []string
 
 	mu        sync.Mutex
 	node      *transport.Node
@@ -55,14 +59,31 @@ func New(cfg *config.Config, log zerolog.Logger) (*Service, error) {
 	if cfg.Hearsay.Disabled {
 		return nil, nil
 	}
+	if cfg.Hearsay.MaxStorageBytes < 0 || cfg.Hearsay.MaxFeedsPerNamespace < 0 {
+		return nil, fmt.Errorf("hearsay: transport limits must not be negative")
+	}
+	mode, err := parseAdviceMode(cfg.Hearsay.AdviceMode)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := advicePolicy(cfg.Hearsay)
+	if err != nil {
+		return nil, err
+	}
 	s := &Service{
-		log:      log.With().Str("component", "hearsay").Logger(),
-		debrids:  map[string]string{},
-		uncached: map[string]string{},
-		usenets:  map[string]string{},
-		publish:  !cfg.Hearsay.NoPublish,
-		port:     cfg.Hearsay.Port,
-		gossip:   cfg.Hearsay.GossipPort,
+		log:         log.With().Str("component", "hearsay").Logger(),
+		debrids:     map[string]string{},
+		uncached:    map[string]string{},
+		usenets:     map[string]string{},
+		advisors:    map[string]*hsdebrid.Advisor{},
+		adviceMode:  mode,
+		policy:      policy,
+		participate: cfg.Hearsay.Participate,
+		publish:     cfg.Hearsay.Participate && cfg.Hearsay.Publish,
+		port:        cfg.Hearsay.Port,
+		gossip:      cfg.Hearsay.GossipPort,
+		maxStorage:  cfg.Hearsay.MaxStorageBytes,
+		maxFeeds:    cfg.Hearsay.MaxFeedsPerNamespace,
 	}
 	var domains []hearsaylib.Domain
 	for _, d := range cfg.Debrids {
@@ -107,13 +128,29 @@ func New(cfg *config.Config, log zerolog.Logger) (*Service, error) {
 		s.interval = interval
 	}
 	for _, f := range cfg.Hearsay.Follow {
-		s.follow = append(s.follow, strings.ToLower(strings.TrimPrefix(strings.TrimSpace(f), "ed25519:")))
+		key := strings.ToLower(strings.TrimSpace(f))
+		s.follow = append(s.follow, strings.TrimPrefix(key, "ed25519:"))
 	}
-	engine, err := hearsaylib.New(filepath.Join(config.GetMainPath(), "hearsay"), domains...)
+	dir := filepath.Join(config.GetMainPath(), "hearsay")
+	engine, err := hearsaylib.New(dir, domains...)
 	if err != nil {
 		return nil, err
 	}
 	s.engine = engine
+	for vendor := range maps.Keys(s.debrids) {
+		advisor, err := hsdebrid.NewAdvisorWithPolicy(
+			engine,
+			vendor,
+			mode,
+			policy,
+			filepath.Join(dir, "advice", vendor+".json"),
+		)
+		if err != nil {
+			engine.Close()
+			return nil, err
+		}
+		s.advisors[vendor] = advisor
+	}
 	// A non-empty follow list is an allowlist, not a set of extra seeds.
 	// Retained generations answer queries whether or not the network is
 	// running, so drop what an earlier, unrestricted run discovered.
@@ -137,13 +174,47 @@ func New(cfg *config.Config, log zerolog.Logger) (*Service, error) {
 	return s, nil
 }
 
+func parseAdviceMode(value string) (hsdebrid.AdviceMode, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "shadow":
+		return hsdebrid.Shadow, nil
+	case "active":
+		return hsdebrid.Active, nil
+	default:
+		return 0, fmt.Errorf("hearsay: advice mode must be shadow or active")
+	}
+}
+
+func advicePolicy(cfg config.Hearsay) (hsdebrid.AdvicePolicy, error) {
+	policy := hsdebrid.DefaultAdvicePolicy()
+	if cfg.MinSupport != 0 {
+		policy.MinSupport = cfg.MinSupport
+	}
+	if cfg.MinEvidence != 0 {
+		policy.MinEvidence = cfg.MinEvidence
+	}
+	if cfg.MinSources != 0 {
+		policy.MinSources = cfg.MinSources
+	}
+	if policy.MinSupport < 0 || policy.MinSupport > 1 || policy.MinEvidence < 0 || policy.MinSources < 1 {
+		return hsdebrid.AdvicePolicy{}, fmt.Errorf("hearsay: invalid advice thresholds")
+	}
+	return policy, nil
+}
+
 // Start joins the network: seed and publish own generations, discover
 // and fetch others'. Runs until ctx is done.
 func (s *Service) Start(ctx context.Context) error {
-	if s == nil {
+	if s == nil || !s.participate {
 		return nil
 	}
-	node, err := transport.Listen(filepath.Join(config.GetMainPath(), "hearsay", "swarm"), s.port, s.gossip)
+	node, err := transport.ListenWithConfig(transport.NodeConfig{
+		Dir:                  filepath.Join(config.GetMainPath(), "hearsay", "swarm"),
+		Port:                 s.port,
+		GossipPort:           s.gossip,
+		MaxStorage:           s.maxStorage,
+		MaxFeedsPerNamespace: s.maxFeeds,
+	})
 	if err != nil {
 		return fmt.Errorf("hearsay transport: %w", err)
 	}
@@ -159,7 +230,7 @@ func (s *Service) Start(ctx context.Context) error {
 	for _, ns := range s.namespaces() {
 		node.Track(ns)
 		for _, key := range s.follow {
-			node.AddFeed(ns, key)
+			node.PinFeed(ns, key)
 		}
 	}
 	syncer := &transport.Syncer{
@@ -170,10 +241,7 @@ func (s *Service) Start(ctx context.Context) error {
 		Log:      slog.New(zerologHandler{log: s.log}),
 	}
 	go syncer.Run(ctx)
-	go func() {
-		<-ctx.Done()
-		s.Close()
-	}()
+	context.AfterFunc(ctx, s.Close)
 	s.log.Info().
 		Str("identity", "ed25519:"+hex.EncodeToString(s.engine.Identity())).
 		Int("namespaces", len(s.namespaces())).
@@ -183,16 +251,11 @@ func (s *Service) Start(ctx context.Context) error {
 }
 
 func (s *Service) namespaces() []string {
-	var out []string
-	for _, ns := range s.debrids {
-		out = append(out, ns)
-	}
-	for _, ns := range s.uncached {
-		out = append(out, ns)
-	}
-	for _, ns := range s.usenets {
-		out = append(out, ns)
-	}
+	out := make([]string, 0, len(s.debrids)+len(s.uncached)+len(s.usenets))
+	out = append(out, slices.Collect(maps.Values(s.debrids))...)
+	out = append(out, slices.Collect(maps.Values(s.uncached))...)
+	out = append(out, slices.Collect(maps.Values(s.usenets))...)
+	slices.Sort(out)
 	return out
 }
 
@@ -215,11 +278,16 @@ func (s *Service) Close() {
 
 // Status reports participation state for the API and UI.
 type Status struct {
-	Enabled   bool             `json:"enabled"`
-	Identity  string           `json:"identity,omitempty"`
-	Publish   bool             `json:"publish,omitempty"`
-	Feeds     map[string]int   `json:"feeds,omitempty"`
-	Transport *transport.Stats `json:"transport,omitempty"`
+	Enabled     bool                               `json:"enabled"`
+	Protocol    string                             `json:"protocol,omitempty"`
+	Participate bool                               `json:"participate"`
+	Publish     bool                               `json:"publish"`
+	AdviceMode  string                             `json:"advice_mode,omitempty"`
+	Identity    string                             `json:"identity,omitempty"`
+	Feeds       map[string]int                     `json:"feeds,omitempty"`
+	Metrics     hearsaylib.EngineMetrics           `json:"metrics"`
+	Advice      map[string]hsdebrid.AdvisorMetrics `json:"advice,omitempty"`
+	Transport   *transport.Stats                   `json:"transport,omitempty"`
 }
 
 func (s *Service) Status() Status {
@@ -227,13 +295,21 @@ func (s *Service) Status() Status {
 		return Status{}
 	}
 	st := Status{
-		Enabled:  true,
-		Identity: "ed25519:" + hex.EncodeToString(s.engine.Identity()),
-		Publish:  s.publish,
-		Feeds:    map[string]int{},
+		Enabled:     true,
+		Protocol:    hearsaylib.ProtocolVersion,
+		Participate: s.participate,
+		Publish:     s.publish,
+		AdviceMode:  adviceModeName(s.adviceMode),
+		Identity:    "ed25519:" + hex.EncodeToString(s.engine.Identity()),
+		Feeds:       map[string]int{},
+		Metrics:     s.engine.Metrics(),
+		Advice:      map[string]hsdebrid.AdvisorMetrics{},
 	}
 	for _, ns := range s.namespaces() {
 		st.Feeds[ns] = len(s.engine.Feeds(ns))
+	}
+	for vendor, advisor := range s.advisors {
+		st.Advice[vendor] = advisor.Snapshot()
 	}
 	s.mu.Lock()
 	node := s.node
@@ -243,6 +319,13 @@ func (s *Service) Status() Status {
 		st.Transport = &stats
 	}
 	return st
+}
+
+func adviceModeName(mode hsdebrid.AdviceMode) string {
+	if mode == hsdebrid.Active {
+		return "active"
+	}
+	return "shadow"
 }
 
 // ObserveTorrent records ground truth learned from a repair probe:
@@ -290,6 +373,58 @@ func (s *Service) ReportAdd(vendor, infohash string, instant bool) {
 	}
 }
 
+type AddDecision struct {
+	advisor *hsdebrid.Advisor
+	id      string
+	vendor  string
+	subject string
+	reject  bool
+}
+
+func (d AddDecision) Reject() bool {
+	return d.reject
+}
+
+func (s *Service) EvaluateAdd(vendor, infohash string) AddDecision {
+	vendor = strings.ToLower(strings.TrimSpace(vendor))
+	result := AddDecision{vendor: vendor, subject: infohash}
+	if s == nil || infohash == "" {
+		return result
+	}
+	advisor := s.advisors[vendor]
+	if advisor == nil {
+		return result
+	}
+	decision, err := advisor.Evaluate(infohash)
+	if err != nil {
+		s.log.Debug().Err(err).Str("provider", vendor).Msg("advice evaluation failed")
+		return result
+	}
+	result.advisor = advisor
+	result.id = decision.ID
+	result.reject = decision.UseHint && decision.State == hearsaylib.EvidenceNegative
+	return result
+}
+
+func (s *Service) RecordAdd(decision AddDecision, instant bool) {
+	if s == nil || decision.subject == "" {
+		return
+	}
+	if decision.advisor == nil || decision.id == "" {
+		s.ReportAdd(decision.vendor, decision.subject, instant)
+		return
+	}
+	if err := decision.advisor.RecordOutcome(decision.id, instant); err != nil {
+		s.log.Debug().Err(err).Str("provider", decision.vendor).Msg("advice outcome failed")
+	}
+}
+
+func (s *Service) DiscardAdd(decision AddDecision) {
+	if decision.advisor != nil && decision.id != "" {
+		decision.advisor.Discard(decision.id)
+	}
+}
+
 // ReportNZB feeds back an import-time completeness check: it records
 // local truth and scores every followed source that claimed on the
 // subject. A definitive miss is attributed to every configured
@@ -304,7 +439,7 @@ func (s *Service) ReportNZB(subject string, complete bool) {
 	if complete && len(s.usenets) != 1 {
 		return
 	}
-	for _, ns := range s.usenets {
+	for ns := range maps.Values(s.usenets) {
 		if err := s.engine.Report(ns, subject, complete); err != nil {
 			s.log.Debug().Err(err).Str("ns", ns).Msg("report failed")
 		}
@@ -319,12 +454,12 @@ func (s *Service) ReportNZB(subject string, complete bool) {
 // outright; the network needs corroboration, a low completeness mean,
 // and fresh confident sources.
 func (s *Service) NZBClaimedIncomplete(subject string) bool {
-	if s == nil || subject == "" || len(s.usenets) == 0 {
+	if s == nil || s.adviceMode != hsdebrid.Active || subject == "" || len(s.usenets) == 0 {
 		return false
 	}
-	for _, ns := range s.usenets {
+	for ns := range maps.Values(s.usenets) {
 		a, err := s.engine.Query(ns, subject)
-		if err != nil {
+		if err != nil || !a.Known {
 			return false
 		}
 		if a.Local {
@@ -336,49 +471,12 @@ func (s *Service) NZBClaimedIncomplete(subject string) bool {
 			// every backbone, so one namespace answers for all.
 			return a.Value < 0.5 && a.Age <= 24*time.Hour
 		}
-		if a.Sources < 2 || a.Value > 0.2 || a.Confidence < 0.6 {
+		if a.Value > 0.2 || a.Age > 24*time.Hour || a.Support < s.policy.MinSupport ||
+			a.EvidenceWeight < s.policy.MinEvidence || a.Sources < max(2, s.policy.MinSources) {
 			return false
 		}
 	}
 	return true
-}
-
-// KnownUncached reports whether a submit to vendor is a known waste:
-// the operator's own truth from the last six hours says not cached,
-// or the network corroborates a denial in the paired uncached
-// namespace while nobody claims cached. A positive claim always wins
-// — positives are the high-precision signal — and absence alone never
-// gates: it cannot distinguish a dead torrent from a fresh release
-// nobody has tried yet. The six hour bound matches the uncached
-// domain's half-life, because anyone's uncached download can flip the
-// state at any moment. For unknown subjects the submit itself stays
-// the oracle.
-func (s *Service) KnownUncached(vendor, infohash string) bool {
-	if s == nil || infohash == "" {
-		return false
-	}
-	vendor = strings.ToLower(vendor)
-	ns, ok := s.debrids[vendor]
-	if !ok {
-		return false
-	}
-	a, err := s.engine.Query(ns, infohash)
-	if err != nil {
-		return false
-	}
-	if a.Local {
-		return a.Value < 0.5 && a.Age <= 6*time.Hour
-	}
-	if a.Sources > 0 {
-		return false
-	}
-	u, err := s.engine.Query(s.uncached[vendor], infohash)
-	// Local truth is written to both namespaces together, so a local
-	// answer here means the cached branch above already ruled.
-	if err != nil || u.Local {
-		return false
-	}
-	return u.Sources >= 2 && u.Confidence >= 0.6
 }
 
 // zerologHandler maps slog records from the hearsay syncer onto

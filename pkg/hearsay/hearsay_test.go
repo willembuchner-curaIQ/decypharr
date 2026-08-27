@@ -2,9 +2,7 @@ package hearsay
 
 import (
 	"crypto/ed25519"
-	"encoding/binary"
 	"encoding/hex"
-	"math"
 	"testing"
 	"time"
 
@@ -28,6 +26,7 @@ func testService(t *testing.T) *Service {
 			{Provider: "torbox", Name: "tb"},
 		},
 	}
+	cfg.Hearsay.AdviceMode = "active"
 	cfg.Usenet.Providers = []config.UsenetProvider{{Host: "news.example", Backbone: "omicron"}}
 	s, err := New(cfg, zerolog.Nop())
 	if err != nil {
@@ -54,10 +53,52 @@ func TestDisabledIsInert(t *testing.T) {
 	if s.NZBClaimedIncomplete("abc") {
 		t.Fatal("nil service should never claim incomplete")
 	}
-	if s.KnownUncached("realdebrid", "abc") {
+	if s.EvaluateAdd("realdebrid", "abc").Reject() {
 		t.Fatal("nil service should never gate a submit")
 	}
 	s.Close()
+}
+
+func TestLocalOnlyShadowDefaults(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	cfg := &config.Config{Debrids: []config.Debrid{{Provider: "realdebrid"}}}
+	cfg.Hearsay.Publish = true
+	s, err := New(cfg, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	if err := s.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	status := s.Status()
+	if status.Participate || status.Publish || status.Transport != nil {
+		t.Fatalf("default mode joined the network: %+v", status)
+	}
+	if status.Protocol != hearsaylib.ProtocolVersion || status.AdviceMode != "shadow" {
+		t.Fatalf("protocol and advice mode = %q, %q", status.Protocol, status.AdviceMode)
+	}
+}
+
+func TestInvalidConfigurationDisablesHearsay(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*config.Hearsay)
+	}{
+		{name: "mode", mutate: func(cfg *config.Hearsay) { cfg.AdviceMode = "automatic" }},
+		{name: "support", mutate: func(cfg *config.Hearsay) { cfg.MinSupport = 1.1 }},
+		{name: "storage", mutate: func(cfg *config.Hearsay) { cfg.MaxStorageBytes = -1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config.SetConfigPath(t.TempDir())
+			cfg := &config.Config{Debrids: []config.Debrid{{Provider: "realdebrid"}}}
+			test.mutate(&cfg.Hearsay)
+			if service, err := New(cfg, zerolog.Nop()); err == nil || service != nil {
+				t.Fatalf("service, error = %v, %v", service, err)
+			}
+		})
+	}
 }
 
 // TestNZBClaimedIncompleteExpires pins that a local miss gates the
@@ -91,71 +132,90 @@ func TestNZBClaimedIncompleteExpires(t *testing.T) {
 	}
 }
 
-func TestKnownUncached(t *testing.T) {
+func TestActiveAdviceUsesLocalTruth(t *testing.T) {
 	s := testService(t)
 	const ih = "2c6b6858d61da9543d4231a71db4b1c9264b0685"
-	if s.KnownUncached("realdebrid", ih) {
+	decision := s.EvaluateAdd("realdebrid", ih)
+	if decision.Reject() {
 		t.Fatal("unknown subject must not gate a submit")
 	}
+	s.DiscardAdd(decision)
 	s.ObserveTorrent("realdebrid", ih, false)
-	if !s.KnownUncached("realdebrid", ih) {
+	decision = s.EvaluateAdd("realdebrid", ih)
+	if !decision.Reject() {
 		t.Fatal("fresh local negative must gate")
 	}
-	if s.KnownUncached("torbox", ih) {
+	s.DiscardAdd(decision)
+	decision = s.EvaluateAdd("torbox", ih)
+	if decision.Reject() {
 		t.Fatal("another vendor's truth must not gate")
 	}
+	s.DiscardAdd(decision)
 	s.ObserveTorrent("realdebrid", ih, true)
-	if s.KnownUncached("realdebrid", ih) {
+	decision = s.EvaluateAdd("realdebrid", ih)
+	if decision.Reject() {
 		t.Fatal("local positive must not gate")
+	}
+	s.DiscardAdd(decision)
+}
+
+func TestShadowAdviceMeasuresWithoutGating(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	cfg := &config.Config{Debrids: []config.Debrid{{Provider: "realdebrid"}}}
+	s, err := New(cfg, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	const ih = "2c6b6858d61da9543d4231a71db4b1c9264b0685"
+	s.ObserveTorrent("realdebrid", ih, false)
+	decision := s.EvaluateAdd("realdebrid", ih)
+	if decision.Reject() {
+		t.Fatal("shadow advice must not gate")
+	}
+	s.RecordAdd(decision, false)
+	metrics := s.Status().Advice["realdebrid"]
+	if metrics.Evaluations != 1 || metrics.Negative != 1 || metrics.Outcomes != 1 || metrics.Correct != 1 {
+		t.Fatalf("metrics = %+v", metrics)
 	}
 }
 
-// TestKnownUncachedNetworkDenial checks the network path of the
-// submit gate: corroborated fresh denials gate a subject the operator
-// never touched, and any positive cached claim overrides them.
-func TestKnownUncachedNetworkDenial(t *testing.T) {
+func TestActiveAdviceRequiresEarnedEvidence(t *testing.T) {
 	s := testService(t)
 	const ih = "2c6b6858d61da9543d4231a71db4b1c9264b0685"
-	ingest := func(ns string, key hearsaylib.Key) {
-		t.Helper()
-		_, priv, err := ed25519.GenerateKey(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		g, err := hearsaylib.BuildGeneration(priv, ns, hearsaylib.Bool, 1, time.Now(), 1, boolPayload(key))
-		if err != nil {
-			t.Fatal(err)
-		}
-		raw, err := g.MarshalBinary()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.engine.Ingest(raw); err != nil {
-			t.Fatal(err)
-		}
+	negativeTraining := []string{
+		"1111111111111111111111111111111111111111",
+		"2222222222222222222222222222222222222222",
 	}
-	denialKey, err := hsdebrid.NewUncached("realdebrid").Encode(ih)
-	if err != nil {
-		t.Fatal(err)
+	ingestPeer(t, s, hsdebrid.NewUncached("realdebrid"), append([]string{ih}, negativeTraining...))
+	decision := s.EvaluateAdd("realdebrid", ih)
+	if decision.Reject() {
+		t.Fatal("unverified evidence must not gate")
 	}
+	s.DiscardAdd(decision)
+	for _, subject := range negativeTraining {
+		s.ReportAdd("realdebrid", subject, false)
+	}
+	decision = s.EvaluateAdd("realdebrid", ih)
+	if !decision.Reject() {
+		t.Fatal("verified negative evidence must gate")
+	}
+	s.DiscardAdd(decision)
 
-	ingest("debrid.realdebrid.uncached", denialKey)
-	if s.KnownUncached("realdebrid", ih) {
-		t.Fatal("a single denying source must not gate a submit")
+	positiveTraining := []string{
+		"3333333333333333333333333333333333333333",
+		"4444444444444444444444444444444444444444",
+		"5555555555555555555555555555555555555555",
 	}
-	ingest("debrid.realdebrid.uncached", denialKey)
-	if !s.KnownUncached("realdebrid", ih) {
-		t.Fatal("two corroborating fresh denials must gate")
+	ingestPeer(t, s, hsdebrid.New("realdebrid"), append([]string{ih}, positiveTraining...))
+	for _, subject := range positiveTraining {
+		s.ReportAdd("realdebrid", subject, true)
 	}
-
-	cachedKey, err := hsdebrid.New("realdebrid").Encode(ih)
-	if err != nil {
-		t.Fatal(err)
+	decision = s.EvaluateAdd("realdebrid", ih)
+	if decision.Reject() {
+		t.Fatal("stronger positive evidence must override a denial")
 	}
-	ingest("debrid.realdebrid.cached", cachedKey)
-	if s.KnownUncached("realdebrid", ih) {
-		t.Fatal("a positive cached claim must override denials")
-	}
+	s.DiscardAdd(decision)
 }
 
 func TestObserveAndReport(t *testing.T) {
@@ -195,25 +255,7 @@ func TestFollowDropsUnlistedFeeds(t *testing.T) {
 	}
 	const ns = "debrid.realdebrid.cached"
 	const infohash = "2c6b6858d61da9543d4231a71db4b1c9264b0685"
-	_, priv, err := ed25519.GenerateKey(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := hsdebrid.New("realdebrid").Encode(infohash)
-	if err != nil {
-		t.Fatal(err)
-	}
-	g, err := hearsaylib.BuildGeneration(priv, ns, hearsaylib.Bool, 1, time.Now(), 1, boolPayload(key))
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := g.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := open.engine.Ingest(raw); err != nil {
-		t.Fatal(err)
-	}
+	ingestPeer(t, open, hsdebrid.New("realdebrid"), []string{infohash})
 	if a, _ := open.engine.Query(ns, infohash); a.Sources != 1 {
 		t.Fatalf("setup: sources = %d", a.Sources)
 	}
@@ -238,19 +280,27 @@ func TestFollowDropsUnlistedFeeds(t *testing.T) {
 	}
 }
 
-// boolPayload mirrors the library's bloom encoding for one key.
-func boolPayload(key hearsaylib.Key) []byte {
-	m := uint64(math.Ceil(-math.Log(0.01) / (math.Ln2 * math.Ln2)))
-	m = (m + 7) &^ 7
-	k := max(uint32(math.Round(float64(m)*math.Ln2)), 1)
-	bits := make([]byte, m/8)
-	h1 := binary.BigEndian.Uint64(key[0:8])
-	h2 := binary.BigEndian.Uint64(key[8:16])
-	for i := uint64(0); i < uint64(k); i++ {
-		p := (h1 + i*h2) % m
-		bits[p/8] |= 1 << (p % 8)
+func ingestPeer(t *testing.T, service *Service, domain hearsaylib.Domain, subjects []string) {
+	t.Helper()
+	peer, err := hearsaylib.New(t.TempDir(), domain)
+	if err != nil {
+		t.Fatal(err)
 	}
-	out := make([]byte, 4, 4+len(bits))
-	binary.BigEndian.PutUint32(out, k)
-	return append(out, bits...)
+	defer peer.Close()
+	for _, subject := range subjects {
+		if err := peer.Observe(domain.Namespace(), subject, 1, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	generation, err := peer.Publish(domain.Namespace())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := generation.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.engine.Ingest(raw); err != nil {
+		t.Fatal(err)
+	}
 }
