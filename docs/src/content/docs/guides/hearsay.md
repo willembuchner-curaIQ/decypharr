@@ -98,7 +98,7 @@ The identity, observations, metrics, and retained generations live in the `hears
 
 ## Upgrading from the older integration
 
-The current integration uses Hearsay `v0.6.0` and the HSY2 protocol. HSY1 remote generations are incompatible and are discarded on startup; local observations and the long-term identity remain usable.
+The current integration uses Hearsay `v0.6.1` and the HSY2 protocol. HSY1 remote generations are incompatible and are discarded on startup; local observations and the long-term identity remain usable.
 
 The old `no_publish` setting is replaced by the positive `publish` opt-in. Existing configurations do not silently join or publish after upgrading. Enable `participate` and `publish` explicitly if you want the previous network behavior, and move from shadow to active mode only after checking measured accuracy.
 
