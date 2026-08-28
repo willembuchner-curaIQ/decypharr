@@ -13,14 +13,13 @@ import (
 )
 
 const (
-	legacyNZBHydrationStartupDelay = 2 * time.Minute
-	legacyNZBHydrationScanInterval = 100 * time.Millisecond
-	legacyNZBHydrationItemInterval = time.Minute
-	legacyNZBHydrationBaseBackoff  = 5 * time.Minute
-	legacyNZBHydrationMaxBackoff   = time.Hour
+	legacyNZBHydrationStartupDelay = 15 * time.Second
+	legacyNZBHydrationBaseBackoff  = time.Minute
+	legacyNZBHydrationMaxBackoff   = 15 * time.Minute
 	legacyNZBHydrationItemTimeout  = 10 * time.Minute
 	legacyNZBHydrationStopTimeout  = 30 * time.Second
 	legacyNZBHydrationErrorLimit   = 2048
+	legacyNZBHydrationConcurrency  = 8
 )
 
 var errLegacyNZBHydrationPaused = errors.New("legacy NZB hydration paused for repair")
@@ -92,37 +91,42 @@ type LegacyNZBHydrationStatus struct {
 	Retrying      int        `json:"retrying"`
 	Unavailable   int        `json:"unavailable"`
 	Hydrated      int        `json:"hydrated"`
+	InFlight      int        `json:"in_flight"`
 	CurrentNZBID  string     `json:"current_nzb_id,omitempty"`
 	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
 }
 
-// legacyNZBHydrationWorker is deliberately single-threaded at the network
-// boundary. Sonarr/Radarr release searches are expensive; adding worker
-// concurrency here would merely move the repair-time stampede to startup.
+// legacyNZBHydrationInFlight tracks one hydration attempt so that a repair
+// pause can cancel it and wait for it to unwind.
+type legacyNZBHydrationInFlight struct {
+	cancel context.CancelCauseFunc
+	done   chan struct{}
+}
+
+// legacyNZBHydrationWorker drains the legacy NZB backlog with a bounded pool.
+// A single dispatcher picks jobs so ordering and Arr backoff stay centralised;
+// only the network call itself runs concurrently. Failures still back off per
+// job, and per Arr, which is what protects Sonarr/Radarr from a stampede.
 type legacyNZBHydrationWorker struct {
 	deps legacyNZBHydrationWorkerDeps
 
 	startupDelay time.Duration
-	scanInterval time.Duration
-	itemInterval time.Duration
 	baseBackoff  time.Duration
 	maxBackoff   time.Duration
 	itemTimeout  time.Duration
+	concurrency  int
 
-	mu            sync.Mutex
-	jobs          map[string]*legacyNZBHydrationJob
-	arrBackoffs   map[string]legacyNZBArrBackoff
-	wake          chan struct{}
-	pauses        int
-	running       bool
-	scanComplete  bool
-	hydrated      int
-	nextAttemptAt time.Time
-	currentNZBID  string
-	currentCancel context.CancelCauseFunc
-	currentDone   chan struct{}
-	cancel        context.CancelFunc
-	done          chan struct{}
+	mu           sync.Mutex
+	jobs         map[string]*legacyNZBHydrationJob
+	arrBackoffs  map[string]legacyNZBArrBackoff
+	inFlight     map[string]*legacyNZBHydrationInFlight
+	wake         chan struct{}
+	pauses       int
+	running      bool
+	scanComplete bool
+	hydrated     int
+	cancel       context.CancelFunc
+	done         chan struct{}
 }
 
 func newLegacyNZBHydrationWorker(deps legacyNZBHydrationWorkerDeps) *legacyNZBHydrationWorker {
@@ -132,13 +136,13 @@ func newLegacyNZBHydrationWorker(deps legacyNZBHydrationWorkerDeps) *legacyNZBHy
 	return &legacyNZBHydrationWorker{
 		deps:         deps,
 		startupDelay: legacyNZBHydrationStartupDelay,
-		scanInterval: legacyNZBHydrationScanInterval,
-		itemInterval: legacyNZBHydrationItemInterval,
 		baseBackoff:  legacyNZBHydrationBaseBackoff,
 		maxBackoff:   legacyNZBHydrationMaxBackoff,
 		itemTimeout:  legacyNZBHydrationItemTimeout,
+		concurrency:  legacyNZBHydrationConcurrency,
 		jobs:         make(map[string]*legacyNZBHydrationJob),
 		arrBackoffs:  make(map[string]legacyNZBArrBackoff),
+		inFlight:     make(map[string]*legacyNZBHydrationInFlight),
 		wake:         make(chan struct{}, 1),
 	}
 }
@@ -172,11 +176,11 @@ func (w *legacyNZBHydrationWorker) stop() {
 	}
 	w.mu.Lock()
 	cancel := w.cancel
-	currentCancel := w.currentCancel
+	inFlight := w.inFlightLocked()
 	done := w.done
 	w.mu.Unlock()
-	if currentCancel != nil {
-		currentCancel(context.Canceled)
+	for _, attempt := range inFlight {
+		attempt.cancel(context.Canceled)
 	}
 	if cancel != nil {
 		cancel()
@@ -194,12 +198,11 @@ func (w *legacyNZBHydrationWorker) stop() {
 }
 
 func (w *legacyNZBHydrationWorker) run(ctx context.Context, done chan struct{}) {
+	var wg sync.WaitGroup
 	defer func() {
+		wg.Wait()
 		w.mu.Lock()
 		w.running = false
-		w.currentNZBID = ""
-		w.currentCancel = nil
-		w.currentDone = nil
 		w.cancel = nil
 		w.mu.Unlock()
 		close(done)
@@ -214,22 +217,34 @@ func (w *legacyNZBHydrationWorker) run(ctx context.Context, done chan struct{}) 
 	}
 	w.scan(ctx, restored)
 
+	slots := make(chan struct{}, max(1, w.concurrency))
 	for ctx.Err() == nil {
 		if !w.waitUntilResumed(ctx) {
 			return
 		}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 		attempt, attemptCtx, cleanup, waitUntil := w.takeNext(ctx, time.Now())
 		if attempt == nil {
+			<-slots
 			if !w.waitForWork(ctx, waitUntil) {
 				return
 			}
 			continue
 		}
 
-		err := w.deps.hydrate(attemptCtx, attempt.nzbID, attempt.source)
-		cause := context.Cause(attemptCtx)
-		cleanup()
-		w.finishAttempt(*attempt, err, cause, time.Now())
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-slots }()
+			err := w.deps.hydrate(attemptCtx, attempt.nzbID, attempt.source)
+			cause := context.Cause(attemptCtx)
+			cleanup()
+			w.finishAttempt(*attempt, err, cause, time.Now())
+		}()
 	}
 }
 
@@ -342,9 +357,6 @@ func (w *legacyNZBHydrationWorker) scan(ctx context.Context, restored map[string
 			w.enqueue(nzbID, nzbHydrationSource{arrName: arrName}, false)
 		} else {
 			w.remove(nzbID)
-		}
-		if !waitLegacyNZBDuration(ctx, w.scanInterval) {
-			return
 		}
 	}
 
@@ -473,9 +485,6 @@ func (w *legacyNZBHydrationWorker) takeNext(ctx context.Context, now time.Time) 
 		if backoff := w.arrBackoffs[legacyNZBArrKey(job.source.arrName)]; backoff.retryAt.After(eligibleAt) {
 			eligibleAt = backoff.retryAt
 		}
-		if w.nextAttemptAt.After(eligibleAt) {
-			eligibleAt = w.nextAttemptAt
-		}
 		if selected == nil || legacyNZBJobBefore(job, eligibleAt, selected, selectedAt) {
 			selected = job
 			selectedAt = eligibleAt
@@ -492,9 +501,10 @@ func (w *legacyNZBHydrationWorker) takeNext(ctx context.Context, now time.Time) 
 	selected.priority = false
 	baseCtx, cancelCause := context.WithCancelCause(ctx)
 	attemptCtx, timeoutCancel := context.WithTimeoutCause(baseCtx, w.itemTimeout, context.DeadlineExceeded)
-	w.currentNZBID = selected.nzbID
-	w.currentCancel = cancelCause
-	w.currentDone = make(chan struct{})
+	w.inFlight[selected.nzbID] = &legacyNZBHydrationInFlight{
+		cancel: cancelCause,
+		done:   make(chan struct{}),
+	}
 	attempt := &legacyNZBHydrationAttempt{
 		nzbID:   selected.nzbID,
 		source:  selected.source,
@@ -525,11 +535,9 @@ func (w *legacyNZBHydrationWorker) finishAttempt(attempt legacyNZBHydrationAttem
 	var readyEntries []string
 
 	w.mu.Lock()
-	w.currentNZBID = ""
-	w.currentCancel = nil
-	if w.currentDone != nil {
-		close(w.currentDone)
-		w.currentDone = nil
+	if tracked := w.inFlight[attempt.nzbID]; tracked != nil {
+		delete(w.inFlight, attempt.nzbID)
+		close(tracked.done)
 	}
 	job := w.jobs[attempt.nzbID]
 	if job == nil {
@@ -549,7 +557,6 @@ func (w *legacyNZBHydrationWorker) finishAttempt(attempt legacyNZBHydrationAttem
 		return
 	}
 
-	w.nextAttemptAt = now.Add(w.itemInterval)
 	switch {
 	case err == nil:
 		readyEntries = make([]string, 0, len(job.entryNames))
@@ -564,7 +571,7 @@ func (w *legacyNZBHydrationWorker) finishAttempt(attempt legacyNZBHydrationAttem
 		deleteRecord = true
 	case job.version != attempt.version:
 		job.state = legacyNZBHydrationJobPending
-		job.retryAt = w.nextAttemptAt
+		job.retryAt = time.Time{}
 		job.priority = true
 		job.arrBackoff = false
 		job.backoffFailures = 0
@@ -721,21 +728,42 @@ func (w *legacyNZBHydrationWorker) pause() func() {
 	}
 	w.mu.Lock()
 	w.pauses++
-	currentDone := w.currentDone
-	if w.currentCancel != nil {
-		w.currentCancel(errLegacyNZBHydrationPaused)
+	inFlight := w.inFlightLocked()
+	for _, attempt := range inFlight {
+		attempt.cancel(errLegacyNZBHydrationPaused)
 	}
 	w.signalLocked()
 	w.mu.Unlock()
-	if currentDone != nil {
+	if len(inFlight) > 0 {
 		timer := time.NewTimer(legacyNZBHydrationStopTimeout)
-		select {
-		case <-currentDone:
-		case <-timer.C:
-			w.deps.logger.Warn().Msg("Legacy NZB hydration did not pause before repair timeout")
+		for _, attempt := range inFlight {
+			select {
+			case <-attempt.done:
+			case <-timer.C:
+				w.deps.logger.Warn().Msg("Legacy NZB hydration did not pause before repair timeout")
+				timer.Stop()
+				return w.resumeFunc()
+			}
 		}
 		timer.Stop()
 	}
+	return w.resumeFunc()
+}
+
+// inFlightLocked snapshots the live attempts so callers can cancel or wait on
+// them without holding the worker lock.
+func (w *legacyNZBHydrationWorker) inFlightLocked() []*legacyNZBHydrationInFlight {
+	if len(w.inFlight) == 0 {
+		return nil
+	}
+	attempts := make([]*legacyNZBHydrationInFlight, 0, len(w.inFlight))
+	for _, attempt := range w.inFlight {
+		attempts = append(attempts, attempt)
+	}
+	return attempts
+}
+
+func (w *legacyNZBHydrationWorker) resumeFunc() func() {
 	return sync.OnceFunc(func() {
 		w.mu.Lock()
 		if w.pauses > 0 {
@@ -801,7 +829,12 @@ func (w *legacyNZBHydrationWorker) status() LegacyNZBHydrationStatus {
 		Paused:       w.pauses > 0,
 		ScanComplete: w.scanComplete,
 		Hydrated:     w.hydrated,
-		CurrentNZBID: w.currentNZBID,
+		InFlight:     len(w.inFlight),
+	}
+	for nzbID := range w.inFlight {
+		if status.CurrentNZBID == "" || nzbID < status.CurrentNZBID {
+			status.CurrentNZBID = nzbID
+		}
 	}
 	var next time.Time
 	for _, job := range w.jobs {
@@ -817,9 +850,6 @@ func (w *legacyNZBHydrationWorker) status() LegacyNZBHydrationStatus {
 		eligibleAt := job.retryAt
 		if backoff := w.arrBackoffs[legacyNZBArrKey(job.source.arrName)]; backoff.retryAt.After(eligibleAt) {
 			eligibleAt = backoff.retryAt
-		}
-		if w.nextAttemptAt.After(eligibleAt) {
-			eligibleAt = w.nextAttemptAt
 		}
 		if next.IsZero() || eligibleAt.Before(next) {
 			next = eligibleAt

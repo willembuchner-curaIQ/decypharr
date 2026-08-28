@@ -73,26 +73,22 @@ func newTestLegacyNZBHydrationWorker(
 		logger:  zerolog.Nop(),
 	})
 	w.startupDelay = 0
-	w.scanInterval = 0
-	w.itemInterval = 0
 	w.baseBackoff = time.Millisecond
 	w.maxBackoff = 10 * time.Millisecond
 	w.itemTimeout = time.Second
 	return w
 }
 
-func TestLegacyNZBHydrationWorkerRunsOneAtATimeAndPacesAttempts(t *testing.T) {
-	type call struct {
-		nzbID string
-		at    time.Time
-	}
-	calls := make(chan call, 2)
-	var active atomic.Int32
-	var maximum atomic.Int32
+func TestLegacyNZBHydrationWorkerRunsConcurrentlyUpToLimit(t *testing.T) {
+	const concurrency = 4
+	ids := []string{"a", "b", "c", "d", "e", "f", "g", "h"}
+	var active, maximum atomic.Int32
+	var once sync.Once
+	reached := make(chan struct{})
 	worker := newTestLegacyNZBHydrationWorker(
-		[]string{"b", "a"},
+		ids,
 		newMemoryLegacyNZBHydrationStore(),
-		func(_ context.Context, nzbID string, _ nzbHydrationSource) error {
+		func(ctx context.Context, _ string, _ nzbHydrationSource) error {
 			current := active.Add(1)
 			for {
 				previous := maximum.Load()
@@ -100,30 +96,34 @@ func TestLegacyNZBHydrationWorkerRunsOneAtATimeAndPacesAttempts(t *testing.T) {
 					break
 				}
 			}
-			calls <- call{nzbID: nzbID, at: time.Now()}
-			time.Sleep(5 * time.Millisecond)
+			// Hold every attempt until the pool is saturated so the observed
+			// maximum reflects the limit rather than scheduling luck.
+			if current >= concurrency {
+				once.Do(func() { close(reached) })
+			}
+			select {
+			case <-reached:
+			case <-ctx.Done():
+			}
 			active.Add(-1)
 			return nil
 		},
 	)
-	worker.itemInterval = 35 * time.Millisecond
+	worker.concurrency = concurrency
 	worker.start(t.Context())
 	defer worker.stop()
 
-	first := receiveLegacyNZBCall(t, calls)
-	second := receiveLegacyNZBCall(t, calls)
-	if first.nzbID != "a" || second.nzbID != "b" {
-		t.Fatalf("attempt order = %q, %q; want a, b", first.nzbID, second.nzbID)
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("hydration never reached %d concurrent attempts, peaked at %d", concurrency, maximum.Load())
 	}
-	if elapsed := second.at.Sub(first.at); elapsed < 30*time.Millisecond {
-		t.Fatalf("attempt spacing = %s, want at least 30ms", elapsed)
-	}
-	if maximum.Load() != 1 {
-		t.Fatalf("maximum concurrent hydrations = %d, want 1", maximum.Load())
-	}
-	eventuallyLegacyNZB(t, time.Second, func() bool {
-		return worker.status().Hydrated == 2
+	eventuallyLegacyNZB(t, 5*time.Second, func() bool {
+		return worker.status().Hydrated == len(ids)
 	})
+	if peak := maximum.Load(); peak > concurrency {
+		t.Fatalf("maximum concurrent hydrations = %d, want at most %d", peak, concurrency)
+	}
 }
 
 func TestLegacyNZBHydrationWorkerPausesAndCancelsForRepair(t *testing.T) {
@@ -171,7 +171,6 @@ func TestLegacyNZBHydrationWorkerPersistsTransientBackoff(t *testing.T) {
 	worker := newTestLegacyNZBHydrationWorker(nil, state, func(context.Context, string, nzbHydrationSource) error { return nil })
 	worker.baseBackoff = 5 * time.Minute
 	worker.maxBackoff = 20 * time.Minute
-	worker.itemInterval = time.Minute
 	worker.enqueue("legacy", nzbHydrationSource{arrName: "Sonarr"}, false)
 
 	now := time.Date(2026, 8, 26, 7, 0, 0, 0, time.UTC)
@@ -215,7 +214,6 @@ func TestLegacyNZBHydrationWorkerArrFailureBacksOffSiblingJobs(t *testing.T) {
 	worker := newTestLegacyNZBHydrationWorker(nil, state, func(context.Context, string, nzbHydrationSource) error { return nil })
 	worker.baseBackoff = 5 * time.Minute
 	worker.maxBackoff = 20 * time.Minute
-	worker.itemInterval = 0
 	worker.enqueue("a", nzbHydrationSource{arrName: "Sonarr"}, false)
 	worker.enqueue("b", nzbHydrationSource{arrName: "Sonarr"}, false)
 
@@ -242,7 +240,6 @@ func TestLegacyNZBHydrationWorkerItemFailureDoesNotBackOffSiblingJobs(t *testing
 	worker := newTestLegacyNZBHydrationWorker(nil, newMemoryLegacyNZBHydrationStore(), func(context.Context, string, nzbHydrationSource) error { return nil })
 	worker.baseBackoff = 5 * time.Minute
 	worker.maxBackoff = 20 * time.Minute
-	worker.itemInterval = 0
 	worker.enqueue("a", nzbHydrationSource{arrName: "Sonarr"}, false)
 	worker.enqueue("b", nzbHydrationSource{arrName: "Sonarr"}, false)
 
