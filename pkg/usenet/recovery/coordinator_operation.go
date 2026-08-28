@@ -1474,7 +1474,7 @@ func sortedRawKeySet(set map[RawFileKey]bool) []RawFileKey {
 	for key := range set {
 		keys = append(keys, key)
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	slices.Sort(keys)
 	return keys
 }
 
