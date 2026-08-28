@@ -5,7 +5,7 @@ description: Use local and shared availability evidence safely.
 
 Hearsay is an optional hint layer for debrid cache availability and Usenet completeness. Decypharr records outcomes learned from normal adds, imports, and repair work. It never schedules probes to create observations.
 
-Local Hearsay is enabled by default. It does not join the public network or publish anything until you opt into each action separately.
+Local Hearsay, public network participation, and observation sharing are enabled by default. Advice remains in shadow mode, so shared evidence is measured but does not change download decisions until you explicitly select active mode.
 
 ## What is recorded
 
@@ -40,8 +40,8 @@ The Hearsay settings page exposes these options:
 | Setting | JSON key | Default |
 |---|---|---|
 | Enable local Hearsay | `disabled` | enabled |
-| Join the public network | `participate` | off |
-| Share observations | `publish` | off |
+| Join the public network | `participate` | on |
+| Share observations | `publish` | on |
 | Advice mode | `advice_mode` | `shadow` |
 | Sharing port | `port` | automatic |
 | Discovery port | `gossip_port` | automatic |
@@ -98,8 +98,8 @@ The identity, observations, metrics, and retained generations live in the `hears
 
 ## Upgrading from the older integration
 
-The current integration uses Hearsay `v0.6.1` and the HSY2 protocol. HSY1 remote generations are incompatible and are discarded on startup; local observations and the long-term identity remain usable.
+The current integration uses Hearsay `v0.6.2` and the HSY2 protocol. HSY1 remote generations are incompatible and are discarded on startup; local observations and the long-term identity remain usable. Hearsay `v0.6.2` also waits for a valid generation pointer before advertising a feed.
 
-The old `no_publish` setting is replaced by the positive `publish` opt-in. Existing configurations do not silently join or publish after upgrading. Enable `participate` and `publish` explicitly if you want the previous network behavior, and move from shadow to active mode only after checking measured accuracy.
+The old `no_publish` setting is replaced by `publish`. Missing `participate` and `publish` values now default to `true`, matching the standalone daemon. Explicit `false` values remain respected. Set both to `false` for local-only operation, and move from shadow to active mode only after checking measured accuracy.
 
 To turn Hearsay off completely, clear **Enable local Hearsay** or set `"disabled": true`.

@@ -1,13 +1,48 @@
 package config
 
-import "testing"
+import (
+	"testing"
+
+	json "github.com/bytedance/sonic"
+)
 
 func TestHearsayIsZero(t *testing.T) {
 	if !(Hearsay{}).IsZero() {
 		t.Fatal("empty Hearsay config should be zero")
 	}
-	if (Hearsay{Participate: true}).IsZero() {
+	if (Hearsay{Participate: new(false)}).IsZero() {
 		t.Fatal("explicit participation should not be zero")
+	}
+}
+
+func TestHearsayNetworkDefaults(t *testing.T) {
+	if !(Hearsay{}).Participates() || !(Hearsay{}).Publishes() {
+		t.Fatal("network participation and publishing should default on")
+	}
+	if (Hearsay{Participate: new(false)}).Participates() {
+		t.Fatal("explicit participation opt-out ignored")
+	}
+	if (Hearsay{Publish: new(false)}).Publishes() {
+		t.Fatal("explicit publishing opt-out ignored")
+	}
+}
+
+func TestHearsayExplicitOptOutRoundTrip(t *testing.T) {
+	cfg := Config{Hearsay: Hearsay{
+		Participate: new(false),
+		Publish:     new(false),
+	}}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Config
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Hearsay.Participate == nil || decoded.Hearsay.Publish == nil ||
+		decoded.Hearsay.Participates() || decoded.Hearsay.Publishes() {
+		t.Fatalf("network opt-out did not survive round trip: %s", raw)
 	}
 }
 
@@ -25,7 +60,7 @@ func TestHearsayEnvironment(t *testing.T) {
 	var cfg Config
 	cfg.applyHearsayEnvVars()
 	h := cfg.Hearsay
-	if !h.Participate || !h.Publish || h.AdviceMode != "active" {
+	if h.Participate == nil || h.Publish == nil || !h.Participates() || !h.Publishes() || h.AdviceMode != "active" {
 		t.Fatalf("consent and mode = %+v", h)
 	}
 	if h.MinSupport != 0.7 || h.MinEvidence != 0.4 || h.MinSources != 3 {

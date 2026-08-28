@@ -7,8 +7,8 @@ import (
 
 type Hearsay struct {
 	Disabled             bool     `json:"disabled,omitzero"`
-	Participate          bool     `json:"participate,omitzero"`
-	Publish              bool     `json:"publish,omitzero"`
+	Participate          *bool    `json:"participate,omitempty"`
+	Publish              *bool    `json:"publish,omitempty"`
 	AdviceMode           string   `json:"advice_mode,omitempty"`
 	MinSupport           float64  `json:"min_support,omitzero"`
 	MinEvidence          float64  `json:"min_evidence,omitzero"`
@@ -21,8 +21,16 @@ type Hearsay struct {
 	Follow               []string `json:"follow,omitempty"`
 }
 
+func (h Hearsay) Participates() bool {
+	return h.Participate == nil || *h.Participate
+}
+
+func (h Hearsay) Publishes() bool {
+	return h.Participates() && (h.Publish == nil || *h.Publish)
+}
+
 func (h Hearsay) IsZero() bool {
-	return !h.Disabled && !h.Participate && !h.Publish && h.AdviceMode == "" &&
+	return !h.Disabled && h.Participate == nil && h.Publish == nil && h.AdviceMode == "" &&
 		h.MinSupport == 0 && h.MinEvidence == 0 && h.MinSources == 0 &&
 		h.Port == 0 && h.GossipPort == 0 && h.Interval == "" &&
 		h.MaxStorageBytes == 0 && h.MaxFeedsPerNamespace == 0 && len(h.Follow) == 0
@@ -33,10 +41,10 @@ func (c *Config) applyHearsayEnvVars() {
 		c.Hearsay.Disabled = parseBool(v)
 	}
 	if v := getEnv("HEARSAY__PARTICIPATE"); v != "" {
-		c.Hearsay.Participate = parseBool(v)
+		c.Hearsay.Participate = new(parseBool(v))
 	}
 	if v := getEnv("HEARSAY__PUBLISH"); v != "" {
-		c.Hearsay.Publish = parseBool(v)
+		c.Hearsay.Publish = new(parseBool(v))
 	}
 	if v := getEnv("HEARSAY__ADVICE_MODE"); v != "" {
 		c.Hearsay.AdviceMode = strings.ToLower(strings.TrimSpace(v))

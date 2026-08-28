@@ -59,24 +59,35 @@ func TestDisabledIsInert(t *testing.T) {
 	s.Close()
 }
 
-func TestLocalOnlyShadowDefaults(t *testing.T) {
+func TestNetworkPublisherShadowDefaults(t *testing.T) {
 	config.SetConfigPath(t.TempDir())
 	cfg := &config.Config{Debrids: []config.Debrid{{Provider: "realdebrid"}}}
-	cfg.Hearsay.Publish = true
 	s, err := New(cfg, zerolog.Nop())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	if err := s.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
 	status := s.Status()
-	if status.Participate || status.Publish || status.Transport != nil {
-		t.Fatalf("default mode joined the network: %+v", status)
+	if !status.Participate || !status.Publish {
+		t.Fatalf("network defaults disabled: %+v", status)
 	}
 	if status.Protocol != hearsaylib.ProtocolVersion || status.AdviceMode != "shadow" {
 		t.Fatalf("protocol and advice mode = %q, %q", status.Protocol, status.AdviceMode)
+	}
+}
+
+func TestExplicitNetworkOptOut(t *testing.T) {
+	config.SetConfigPath(t.TempDir())
+	cfg := &config.Config{Debrids: []config.Debrid{{Provider: "realdebrid"}}}
+	cfg.Hearsay.Participate = new(false)
+	s, err := New(cfg, zerolog.Nop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	status := s.Status()
+	if status.Participate || status.Publish {
+		t.Fatalf("network opt-out ignored: %+v", status)
 	}
 }
 

@@ -158,8 +158,8 @@ class ConfigManager {
         const $ = (id) => document.getElementById(id);
         const h = hearsay || {};
         if ($('hearsay.enabled')) $('hearsay.enabled').checked = !h.disabled;
-        if ($('hearsay.participate')) $('hearsay.participate').checked = !!h.participate;
-        if ($('hearsay.publish')) $('hearsay.publish').checked = !!h.publish;
+        if ($('hearsay.participate')) $('hearsay.participate').checked = h.participate ?? true;
+        if ($('hearsay.publish')) $('hearsay.publish').checked = h.publish ?? true;
         if ($('hearsay.advice_mode')) $('hearsay.advice_mode').value = h.advice_mode || 'shadow';
         if ($('hearsay.min_support')) $('hearsay.min_support').value = h.min_support || '';
         if ($('hearsay.min_evidence')) $('hearsay.min_evidence').value = h.min_evidence || '';
@@ -176,8 +176,8 @@ class ConfigManager {
         const $ = (id) => document.getElementById(id);
         return {
             disabled: !($('hearsay.enabled')?.checked ?? true),
-            participate: $('hearsay.participate')?.checked ?? false,
-            publish: $('hearsay.publish')?.checked ?? false,
+            participate: $('hearsay.participate')?.checked ?? true,
+            publish: $('hearsay.publish')?.checked ?? true,
             advice_mode: $('hearsay.advice_mode')?.value || 'shadow',
             min_support: parseFloat($('hearsay.min_support')?.value) || 0,
             min_evidence: parseFloat($('hearsay.min_evidence')?.value) || 0,

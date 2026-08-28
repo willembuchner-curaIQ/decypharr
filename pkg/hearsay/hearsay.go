@@ -1,6 +1,6 @@
 // Package hearsay connects Decypharr's real outcomes to an embedded
-// Hearsay engine. Local shadow advice is the default; network access,
-// publishing, and active decisions require explicit configuration.
+// Hearsay engine. Network sharing is enabled by default; active decisions
+// remain opt-in.
 package hearsay
 
 import (
@@ -78,8 +78,8 @@ func New(cfg *config.Config, log zerolog.Logger) (*Service, error) {
 		advisors:    map[string]*hsdebrid.Advisor{},
 		adviceMode:  mode,
 		policy:      policy,
-		participate: cfg.Hearsay.Participate,
-		publish:     cfg.Hearsay.Participate && cfg.Hearsay.Publish,
+		participate: cfg.Hearsay.Participates(),
+		publish:     cfg.Hearsay.Publishes(),
 		port:        cfg.Hearsay.Port,
 		gossip:      cfg.Hearsay.GossipPort,
 		maxStorage:  cfg.Hearsay.MaxStorageBytes,

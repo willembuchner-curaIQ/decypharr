@@ -250,7 +250,7 @@ func (m *Manager) init() {
 	// Initialize notifications service
 	m.Notifications = notifications.New(&m.config.Notifications, m.logger)
 
-	// Initialize local Hearsay state; network participation remains opt-in.
+	// Initialize Hearsay state and its default network participation.
 	if hs, err := hearsay.New(m.config, m.logger); err != nil {
 		m.logger.Warn().Err(err).Msg("Hearsay disabled: failed to initialize")
 	} else {

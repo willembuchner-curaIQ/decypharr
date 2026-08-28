@@ -1832,9 +1832,9 @@ fe80::/10</textarea>
                         <div class="alert alert-info">
                             <i class="bi bi-info-circle text-lg"></i>
                             <div class="text-sm">
-                                Hearsay records outcome hints locally. Joining the public network and sharing those
-                                outcomes are separate, explicit choices. Shared records use content hashes, but reveal
-                                that the hash was attempted.
+                                Hearsay records outcome hints locally, joins the public network, and shares learned
+                                outcomes by default. Shared records use content hashes, but reveal that the hash was
+                                attempted. Clear either network option below to opt out.
                                 <a href="https://docs.decypharr.com/guides/hearsay" target="_blank" rel="noopener"
                                    class="link link-primary font-medium">Learn more</a>.
                             </div>
@@ -1846,8 +1846,8 @@ fe80::/10</textarea>
                                        id="hearsay.enabled" name="hearsay.enabled" checked>
                                 <div>
                                     <span class="label-text font-medium text-lg">Enable local Hearsay</span>
-                                    <div class="label-text-alt">Keep local observations and advice metrics. This does
-                                        not join the network.
+                                    <div class="label-text-alt">Keep local observations and advice metrics. Disabling
+                                        this also stops network participation.
                                     </div>
                                 </div>
                             </label>
@@ -1856,7 +1856,7 @@ fe80::/10</textarea>
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                             <label class="label cursor-pointer justify-start gap-3">
                                 <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
-                                       id="hearsay.participate" name="hearsay.participate">
+                                       id="hearsay.participate" name="hearsay.participate" checked>
                                 <div>
                                     <span class="label-text font-medium">Join the public network</span>
                                     <div class="label-text-alt">Discover and receive signed observations from other
@@ -1866,7 +1866,7 @@ fe80::/10</textarea>
                             </label>
                             <label class="label cursor-pointer justify-start gap-3">
                                 <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
-                                       id="hearsay.publish" name="hearsay.publish">
+                                       id="hearsay.publish" name="hearsay.publish" checked>
                                 <div>
                                     <span class="label-text font-medium">Share observations</span>
                                     <div class="label-text-alt">Publish outcomes learned from real work. Joining the
