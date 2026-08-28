@@ -140,15 +140,15 @@ func rawFileKeysFor(manifest *recovery.Manifest, file nzbparser.NzbFile) []recov
 	seen := make(map[recovery.RawFileKey]struct{})
 	keys := make([]recovery.RawFileKey, 0, 1)
 	for _, segment := range file.Segments {
-		raw, _, ok := manifest.FindArticle(segment.Id)
+		key, ok := manifest.FindArticleKey(segment.Id)
 		if !ok {
 			continue
 		}
-		if _, exists := seen[raw.Key]; exists {
+		if _, exists := seen[key]; exists {
 			continue
 		}
-		seen[raw.Key] = struct{}{}
-		keys = append(keys, raw.Key)
+		seen[key] = struct{}{}
+		keys = append(keys, key)
 	}
 	return keys
 }

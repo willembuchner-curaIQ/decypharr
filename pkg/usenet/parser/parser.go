@@ -591,9 +591,8 @@ func (p *NZBParser) groupProcessedFiles(allFiles []contentResult, manifest *reco
 			group.rawFileKeys[rawFileIdentity(item.file)] = item.rawFileKey
 		}
 		for _, segment := range item.file.Segments {
-			raw, _, ok := manifest.FindArticle(segment.Id)
-			if ok {
-				group.rawArticleKeys[segment.Id] = raw.Key
+			if key, ok := manifest.FindArticleKey(segment.Id); ok {
+				group.rawArticleKeys[segment.Id] = key
 			}
 		}
 		for _, g := range item.file.Groups {

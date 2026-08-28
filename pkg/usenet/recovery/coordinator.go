@@ -439,8 +439,8 @@ func (c *Coordinator) ObserveArticle(_ context.Context, nzbID string, segment re
 	}
 	key := RawFileKey(segment.RawFileKey)
 	if key == 0 {
-		if file, _, ok := manifest.FindArticle(segment.MessageID); ok {
-			key = file.Key
+		if found, ok := manifest.FindArticleKey(segment.MessageID); ok {
+			key = found
 		}
 	}
 	if key == 0 {

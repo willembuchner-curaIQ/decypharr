@@ -39,6 +39,9 @@ type Manifest struct {
 	Files   []RawFile `json:"files"`
 
 	mu sync.RWMutex
+	// articleKeys maps message ID to owning raw-file key. Built lazily by
+	// indexArticlesLocked; nil means not built yet.
+	articleKeys map[string]RawFileKey
 }
 
 // RawFile is one posted file from the NZB rather than one logical file exposed
@@ -167,21 +170,50 @@ func (m *Manifest) UpdateArticleLayout(key RawFileKey, number int, offset, size 
 	}
 }
 
-// FindArticle resolves a message ID to owned raw-file and article snapshots.
-func (m *Manifest) FindArticle(messageID string) (RawFile, Article, bool) {
+// FindArticleKey resolves a message ID to the key of the raw file that posted
+// it. The lookup index is built on first use: message IDs are assigned when the
+// manifest is built and never change afterwards, so it needs no invalidation.
+func (m *Manifest) FindArticleKey(messageID string) (RawFileKey, bool) {
 	if m == nil || messageID == "" {
-		return RawFile{}, Article{}, false
+		return 0, false
 	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	if m.articleKeys != nil {
+		key, ok := m.articleKeys[messageID]
+		m.mu.RUnlock()
+		return key, ok
+	}
+	m.mu.RUnlock()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.articleKeys == nil {
+		m.indexArticlesLocked()
+	}
+	key, ok := m.articleKeys[messageID]
+	return key, ok
+}
+
+func (m *Manifest) indexArticlesLocked() {
+	total := 0
+	for i := range m.Files {
+		total += len(m.Files[i].Articles)
+	}
+	// A message ID may be posted under more than one raw file. The scan this
+	// index replaced returned the first match in file order, so keep first-wins.
+	index := make(map[string]RawFileKey, total)
 	for i := range m.Files {
 		for j := range m.Files[i].Articles {
-			if m.Files[i].Articles[j].MessageID == messageID {
-				return cloneRawFile(m.Files[i]), m.Files[i].Articles[j], true
+			id := m.Files[i].Articles[j].MessageID
+			if id == "" {
+				continue
+			}
+			if _, exists := index[id]; !exists {
+				index[id] = m.Files[i].Key
 			}
 		}
 	}
-	return RawFile{}, Article{}, false
+	m.articleKeys = index
 }
 
 func cloneRawFile(file RawFile) RawFile {
