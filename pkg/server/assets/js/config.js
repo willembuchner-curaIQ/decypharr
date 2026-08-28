@@ -576,7 +576,7 @@ class ConfigManager {
         return `
         <div class="card bg-base-100 border border-base-300 shadow-sm debrid-config" data-index="${index}">
             <div class="card-body">
-                <div class="flex justify-between items-start mb-4">
+                <div class="mb-4 flex items-start justify-between gap-3">
                     <h3 class="card-title text-lg">
                         <i class="bi bi-cloud mr-2 text-secondary"></i>
                         Debrid #${index + 1}
@@ -643,7 +643,7 @@ class ConfigManager {
                         </div>
                     </div>
                     <div class="space-y-4">
-                        <div class="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                             <div>
                                 <label class="label" for="debrid[${index}].rate_limit">
                                     <span class=" font-medium">Rate Limit</span>
@@ -734,7 +734,7 @@ class ConfigManager {
                         <span class="text-sm opacity-70">Automatically expire links after this duration</span>
                     </div>
                 </div>
-                <div class="grid grid-cols-2 lg:grid-cols-3 gap-4 mt-6">
+                <div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     <div>
                         <label class="label cursor-pointer justify-start gap-2">
                             <input type="checkbox" class="checkbox checkbox-primary" 
@@ -801,7 +801,7 @@ class ConfigManager {
         return `
             <div class="card bg-base-200 border border-base-300 directory-item">
                 <div class="card-body">
-                    <div class="flex justify-between items-start mb-4">
+                    <div class="mb-4 flex items-start justify-between gap-3">
                         <h5 class="text-lg font-medium">Virtual Directory</h5>
                         <button type="button" class="btn btn-error btn-xs" onclick="this.closest('.directory-item').remove();">
                             <i class="bi bi-trash"></i>
@@ -2404,7 +2404,7 @@ class ConfigManager {
         return `
         <div class="card bg-base-200 border border-base-300 usenet-provider" data-index="${index}">
             <div class="card-body">
-                <div class="flex justify-between items-start mb-4">
+                <div class="mb-4 flex items-start justify-between gap-3">
                     <h4 class="font-bold text-lg">
                         <i class="bi bi-server mr-2"></i>
                         Provider #${index + 1}

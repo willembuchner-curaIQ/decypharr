@@ -15,61 +15,61 @@
     <form id="configForm" class="space-y-6">
         <div class="card bg-base-100 shadow-xl">
             <div class="card-body">
-                <div class="border-b border-base-300 mb-8 overflow-x-auto">
-                    <nav class="flex min-w-max gap-8" aria-label="Configuration Tabs">
+                <div class="border-b border-base-300 mb-6 overflow-x-auto sm:mb-8">
+                    <nav class="flex min-w-max gap-3 sm:gap-8" aria-label="Configuration Tabs">
                         <button type="button"
                                 class="tab-button active cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-primary text-primary font-medium text-sm"
                                 data-tab="general">
                             <i class="bi bi-gear text-lg"></i>
-                            <span class="hidden sm:inline">General</span>
+                            <span>General</span>
                         </button>
                         <button type="button"
                                 class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                 data-tab="debrid">
                             <i class="bi bi-cloud text-lg"></i>
-                            <span class="hidden sm:inline">Debrid</span>
+                            <span>Debrid</span>
                         </button>
                         <button type="button"
                                 class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                 data-tab="usenet">
                             <i class="bi bi-newspaper text-lg"></i>
-                            <span class="hidden sm:inline">Usenet</span>
+                            <span>Usenet</span>
                         </button>
                         <button type="button"
                                 class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                 data-tab="arrs">
                             <i class="bi bi-collection text-lg"></i>
-                            <span class="hidden sm:inline">*Arrs</span>
+                            <span>*Arrs</span>
                         </button>
                         <button type="button"
                                 class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                 data-tab="mounts">
                             <i class="bi bi-hdd-stack text-lg"></i>
-                            <span class="hidden sm:inline">Mounts</span>
+                            <span>Mounts</span>
                         </button>
                         <button type="button"
                                 class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                 data-tab="shares">
                             <i class="bi bi-share text-lg"></i>
-                            <span class="hidden sm:inline">Shares</span>
+                            <span>Shares</span>
                         </button>
                         <button type="button"
                                 class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                 data-tab="repair">
                             <i class="bi bi-heart-pulse text-lg"></i>
-                            <span class="hidden sm:inline">Repair</span>
+                            <span>Repair</span>
                         </button>
                         <button type="button"
                                 class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                 data-tab="hearsay">
                             <i class="bi bi-broadcast text-lg"></i>
-                            <span class="hidden sm:inline">Hearsay</span>
+                            <span>Hearsay</span>
                         </button>
                     </nav>
                 </div>
 
-                <div class="sticky top-10 z-30 flex justify-end mb-4">
-                    <button type="submit" class="btn btn-success btn-lg shadow-lg">
+                <div class="sticky top-20 z-30 flex justify-end mb-4">
+                    <button type="submit" class="btn btn-success btn-lg w-full shadow-lg sm:w-auto">
                         <i class="bi bi-save mr-2"></i>Save Configuration
                     </button>
                 </div>
@@ -78,8 +78,8 @@
 
                 <div class="tab-content" data-tab-content="general">
                     <div class="space-y-6">
-                    <div class="border-b border-base-300 mb-6">
-                        <nav class="subtab-nav flex flex-wrap gap-4" data-subtab-group="general" data-subtab-accent="primary" aria-label="general sub-tabs">
+                    <div class="border-b border-base-300 mb-6 overflow-x-auto">
+                        <nav class="subtab-nav flex min-w-max gap-2 sm:gap-4" data-subtab-group="general" data-subtab-accent="primary" aria-label="general sub-tabs">
                             <button type="button"
                                     class="subtab-button active cursor-pointer py-2 px-4 border-b-2 border-primary text-primary font-medium text-sm"
                                     data-subtab="settings">
@@ -525,7 +525,7 @@
                         <div>
                             <p class="text-sm opacity-70 mb-4">Select which events should trigger notifications.
                                 If none are selected, all events are enabled.</p>
-                            <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                                 <div>
                                     <label class="label cursor-pointer justify-start gap-2">
                                         <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
@@ -603,9 +603,9 @@
 
                 <div class="tab-content hidden" data-tab-content="debrid">
                             <div class="space-y-6">
-                                <div class="flex justify-between items-center">
+                                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                                     <h3 class="text-xl font-semibold flex items-center"></h3>
-                                    <button type="button" id="addDebridBtn" class="btn btn-secondary btn-sm">
+                                    <button type="button" id="addDebridBtn" class="btn btn-secondary btn-sm w-full sm:w-auto">
                                         <i class="bi bi-plus mr-2"></i>Add Account
                                     </button>
                                 </div>
@@ -617,8 +617,8 @@
 
                 <div class="tab-content hidden" data-tab-content="usenet">
                     <div class="space-y-6">
-                    <div class="border-b border-base-300 mb-6">
-                        <nav class="subtab-nav flex flex-wrap gap-4" data-subtab-group="usenet" data-subtab-accent="secondary" aria-label="usenet sub-tabs">
+                    <div class="border-b border-base-300 mb-6 overflow-x-auto">
+                        <nav class="subtab-nav flex min-w-max gap-2 sm:gap-4" data-subtab-group="usenet" data-subtab-accent="secondary" aria-label="usenet sub-tabs">
                             <button type="button"
                                     class="subtab-button active cursor-pointer py-2 px-4 border-b-2 border-secondary text-secondary font-medium text-sm"
                                     data-subtab="settings">
@@ -636,7 +636,7 @@
                                 <!-- Streaming Settings -->
                                 <div class="card bg-base-200">
                                     <div class="card-body">
-                                        <div class="grid grid-cols-3 lg:grid-cols-4 gap-4 mt-6 mb-4">
+                                        <div class="mt-2 mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:mt-6 lg:grid-cols-4">
                                             <div>
                                                 <label class="label" for="usenet.max_connections">
                                                     <span class="font-medium">Max Connections Per File</span>
@@ -785,8 +785,8 @@
                                 <!-- NNTP Servers -->
                                 <div class="card bg-base-200">
                                     <div class="card-body">
-                                        <div class="flex justify-between items-center mb-4">
-                                            <button type="button" id="addUsenetProviderBtn" class="btn btn-info btn-sm">
+                                        <div class="mb-4 flex sm:justify-end">
+                                            <button type="button" id="addUsenetProviderBtn" class="btn btn-info btn-sm w-full sm:w-auto">
                                                 <i class="bi bi-plus mr-2"></i>Add Server
                                             </button>
                                         </div>
@@ -803,8 +803,8 @@
                 <div class="tab-content hidden" data-tab-content="arrs">
                     <div class="space-y-6">
 
-                    <div class="border-b border-base-300 mb-6">
-                        <nav class="subtab-nav flex flex-wrap gap-4" data-subtab-group="arrs" data-subtab-accent="warning" aria-label="arrs sub-tabs">
+                    <div class="border-b border-base-300 mb-6 overflow-x-auto">
+                        <nav class="subtab-nav flex min-w-max gap-2 sm:gap-4" data-subtab-group="arrs" data-subtab-accent="warning" aria-label="arrs sub-tabs">
                             <button type="button"
                                     class="subtab-button active cursor-pointer py-2 px-4 border-b-2 border-warning text-warning font-medium text-sm"
                                     data-subtab="applications">
@@ -825,7 +825,7 @@
                             </button>
                         </div>
 
-                        <div id="arrConfigs" class="grid grid-cols-2 gap-4">
+                        <div id="arrConfigs" class="grid grid-cols-1 gap-4 lg:grid-cols-2">
                         </div>
                     </div>
 
@@ -939,8 +939,8 @@
                         </div>
 
                         <!-- Sub-tabs for mount types -->
-                        <div class="border-b border-base-300 mb-6">
-                            <nav class="flex gap-4" aria-label="Mount Type Tabs">
+                        <div class="border-b border-base-300 mb-6 overflow-x-auto">
+                            <nav class="flex min-w-max gap-2 sm:gap-4" aria-label="Mount Type Tabs">
                                 <button type="button"
                                         class="mount-subtab-button active cursor-pointer py-2 px-4 border-b-2 border-primary text-primary font-medium text-sm"
                                         data-mount-tab="dfs">
@@ -1320,7 +1320,7 @@
                                         <h4 class="text-lg font-semibold mb-4 flex items-center">
                                             <i class="bi bi-gear mr-2"></i>Advanced Settings
                                         </h4>
-                                        <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                                        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                                             <div>
                                                 <label class="label cursor-pointer justify-start gap-3">
                                                     <input type="checkbox" class="checkbox checkbox-primary"
@@ -1439,8 +1439,8 @@
 
                 <div class="tab-content hidden" data-tab-content="shares">
                     <div class="space-y-6">
-                    <div class="border-b border-base-300 mb-6">
-                        <nav class="subtab-nav flex flex-wrap gap-4" data-subtab-group="shares" data-subtab-accent="primary" aria-label="shares sub-tabs">
+                    <div class="border-b border-base-300 mb-6 overflow-x-auto">
+                        <nav class="subtab-nav flex min-w-max gap-2 sm:gap-4" data-subtab-group="shares" data-subtab-accent="primary" aria-label="shares sub-tabs">
                             <button type="button"
                                     class="subtab-button active cursor-pointer py-2 px-4 border-b-2 border-primary text-primary font-medium text-sm"
                                     data-subtab="nfs">
@@ -1967,6 +1967,14 @@ fe80::/10</textarea>
 </div>
 
 <script>
+    function revealSettingsTab(button) {
+        const scroller = button?.closest('nav')?.parentElement;
+        if (!scroller || scroller.scrollWidth <= scroller.clientWidth) return;
+
+        const targetLeft = button.offsetLeft - ((scroller.clientWidth - button.offsetWidth) / 2);
+        scroller.scrollTo({left: Math.max(0, targetLeft), behavior: 'auto'});
+    }
+
     // Tab Navigation Handler
     document.addEventListener('DOMContentLoaded', function () {
         window.configManager = new ConfigManager();
@@ -2014,6 +2022,7 @@ fe80::/10</textarea>
             const activeButton = document.querySelector(`[data-tab="${targetTab}"]`);
             if (activeButton) {
                 activeButton.classList.add('active');
+                revealSettingsTab(activeButton);
             }
 
             // Hide all tab contents
@@ -2104,6 +2113,7 @@ fe80::/10</textarea>
             if (activeButton) {
                 activeButton.classList.add('active', 'border-primary', 'text-primary');
                 activeButton.classList.remove('border-transparent', 'text-base-content/70');
+                revealSettingsTab(activeButton);
             }
 
             // Hide all mount sub-tab contents
@@ -2165,6 +2175,8 @@ fe80::/10</textarea>
             btn.classList.toggle('border-transparent', !on);
             btn.classList.toggle('text-base-content/70', !on);
         });
+
+        revealSettingsTab(nav.querySelector(`.subtab-button[data-subtab="${key}"]`));
 
         document.querySelectorAll(`.subtab-panel[data-subtab-group="${group}"]`).forEach(panel => {
             panel.classList.toggle('hidden', panel.dataset.subtabPanel !== key);
