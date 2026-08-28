@@ -3,8 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 type UsenetProvider struct {
@@ -139,13 +139,11 @@ type Usenet struct {
 	// TCP+TLS+AUTH reconnect storm on every resume. Default: 5m.
 	ConnIdleTimeout string `json:"conn_idle_timeout,omitempty"`
 	// Availability check sampling
-	AvailabilitySamplePercent       int    `json:"availability_sample_percent,omitempty"`        // Percentage of segments to check during repair (1-100, default: 10)
-	ImportAvailabilitySamplePercent int    `json:"import_availability_sample_percent,omitempty"` // Percentage of segments to check when adding an NZB (1-100, default: 1)
-	DiskBufferPath                  string `json:"disk_buffer_path,omitempty"`                   // Path for disk buffer storage (empty = main_path/usenet/streams)
-
-	// BufferToDisk retains rewind for legacy callers that do not declare which
-	// layer owns it. DFS and WebDAV paths declare ownership explicitly.
-	BufferToDisk bool `json:"buffer_to_disk,omitempty"`
+	AvailabilitySamplePercent       int `json:"availability_sample_percent,omitempty"`        // Percentage of segments to check during repair (1-100, default: 10)
+	ImportAvailabilitySamplePercent int `json:"import_availability_sample_percent,omitempty"` // Percentage of segments to check when adding an NZB (1-100, default: 1)
+	// DiskPath enables disk-backed rewind buffering when non-empty. Empty keeps
+	// the bounded streaming window in memory.
+	DiskPath string `json:"disk_path,omitempty"`
 
 	// BufferMemory caps resident Usenet extents across open window-mode streams.
 	// Empty defaults to 512MB; "0" disables the cap.
@@ -169,8 +167,13 @@ func (u Usenet) BufferMemoryBytes() int64 {
 	return n
 }
 
+// UsesDiskBuffer reports whether Usenet streams should retain rewind data on disk.
+func (u Usenet) UsesDiskBuffer() bool {
+	return strings.TrimSpace(u.DiskPath) != ""
+}
+
 func (u Usenet) IsZero() bool {
-	return len(u.Providers) == 0 && u.MaxConnections == 0 && u.ProcessingMaxConnections == 0 && u.ReadAhead == "" && u.ProcessingTimeout == "" && u.PAR2.IsZero()
+	return len(u.Providers) == 0 && u.MaxConnections == 0 && u.ProcessingMaxConnections == 0 && u.ReadAhead == "" && u.ProcessingTimeout == "" && !u.UsesDiskBuffer() && u.PAR2.IsZero()
 }
 
 func (c *Config) updateUsenetConfig() {
@@ -201,7 +204,7 @@ func (c *Config) updateUsenetConfig() {
 		c.Usenet.ProcessingTimeout = "10m" // Default: 10 minutes for NZB processing
 	}
 
-	// CacheDir: empty = system temp folder (no default needed)
+	// DiskPath intentionally remains empty so memory buffering is the default.
 
 	// Availability sample percent default - clamp to valid range
 	if c.Usenet.AvailabilitySamplePercent <= 0 {
@@ -213,10 +216,6 @@ func (c *Config) updateUsenetConfig() {
 		c.Usenet.ImportAvailabilitySamplePercent = 1
 	} else if c.Usenet.ImportAvailabilitySamplePercent > 100 {
 		c.Usenet.ImportAvailabilitySamplePercent = 100
-	}
-
-	if c.Usenet.DiskBufferPath == "" {
-		c.Usenet.DiskBufferPath = filepath.Join(GetMainPath(), "usenet", "streams")
 	}
 
 	if c.Usenet.PAR2.MaxDownloadPercent <= 0 {
@@ -326,6 +325,9 @@ func (c *Config) applyUsenetEnvVars() {
 		if v, err := strconv.Atoi(availabilitySample); err == nil {
 			c.Usenet.ImportAvailabilitySamplePercent = v
 		}
+	}
+	if diskPath := getEnv("USENET__DISK_PATH"); diskPath != "" {
+		c.Usenet.DiskPath = diskPath
 	}
 
 	if enabled := getEnv("USENET__PAR2__ENABLED"); enabled != "" {

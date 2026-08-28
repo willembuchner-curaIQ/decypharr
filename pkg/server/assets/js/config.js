@@ -220,7 +220,6 @@ class ConfigManager {
         if ($('repair.strategy')) $('repair.strategy').value = repair.strategy || 'per_entry';
         if ($('repair.stop_schedule')) $('repair.stop_schedule').value = repair.stop_schedule || '';
         if ($('repair.auto_repair')) $('repair.auto_repair').checked = !!repair.auto_repair;
-        if ($('repair.skip_nzb_repair')) $('repair.skip_nzb_repair').checked = !!repair.skip_nzb_repair;
         if ($('repair.verify_content')) $('repair.verify_content').checked = !!repair.verify_content;
     }
 
@@ -241,7 +240,6 @@ class ConfigManager {
             strategy: $('repair.strategy')?.value || 'per_entry',
             stop_schedule: $('repair.stop_schedule')?.value.trim() || '',
             auto_repair: $('repair.auto_repair')?.checked || false,
-            skip_nzb_repair: $('repair.skip_nzb_repair')?.checked || false,
             verify_content: $('repair.verify_content')?.checked || false,
             arrs,
         };
@@ -1500,8 +1498,7 @@ class ConfigManager {
             conn_idle_timeout: document.querySelector('[name="usenet.conn_idle_timeout"]')?.value || "",
             availability_sample_percent: parseInt(document.querySelector('[name="usenet.availability_sample_percent"]')?.value) || 10,
             import_availability_sample_percent: parseInt(document.querySelector('[name="usenet.import_availability_sample_percent"]')?.value) || 1,
-            disk_buffer_path: document.querySelector('[name="usenet.disk_buffer_path"]')?.value || "",
-            buffer_to_disk: document.querySelector('[name="usenet.buffer_to_disk"]')?.checked || false,
+            disk_path: document.querySelector('[name="usenet.disk_path"]')?.value.trim() || "",
             buffer_memory: document.querySelector('[name="usenet.buffer_memory"]')?.value || "",
             par2: {
                 enabled: document.querySelector('[name="usenet.par2.enabled"]')?.checked ?? true,
@@ -2349,8 +2346,7 @@ class ConfigManager {
             'conn_idle_timeout': usenet.conn_idle_timeout,
             'availability_sample_percent': usenet.availability_sample_percent,
             'import_availability_sample_percent': usenet.import_availability_sample_percent,
-            'disk_buffer_path': usenet.disk_buffer_path,
-            'buffer_to_disk': usenet.buffer_to_disk,
+            'disk_path': usenet.disk_path,
             'buffer_memory': usenet.buffer_memory
         };
 

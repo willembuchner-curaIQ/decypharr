@@ -157,9 +157,6 @@ func (r *Service) effectiveProtocolScope(opts RunOptions) string {
 	if scope := normalizeRepairProtocolScope(opts.ProtocolScope); scope != "" {
 		return scope
 	}
-	if r.cfg().SkipNZBRepair {
-		return string(config.ProtocolTorrent)
-	}
 	return "all"
 }
 

@@ -73,8 +73,9 @@ func NewFS(ctx context.Context, client *nntp.Client, maxConcurrent int, prefetch
 		ctx = context.Background()
 	}
 
+	usenetConfig := config.Get().Usenet
 	retention := reader.RetentionWindow
-	if config.Get().Usenet.BufferToDisk {
+	if usenetConfig.UsesDiskBuffer() {
 		retention = reader.RetentionRewind
 	}
 	f := &FS{
@@ -83,7 +84,7 @@ func NewFS(ctx context.Context, client *nntp.Client, maxConcurrent int, prefetch
 		client:        client,
 		maxConcurrent: maxConcurrent,
 		prefetchSize:  prefetchSize,
-		diskPath:      config.Get().Usenet.DiskBufferPath,
+		diskPath:      usenetConfig.DiskPath,
 		retention:     retention,
 		logger:        logger,
 	}
@@ -224,8 +225,6 @@ func (f *FS) CreateReaderAtForVolume(vol *types.Volume) (PrefetchableReaderAt, i
 // createNewReaderForVolume uses the new reader.StreamingReader with Pin/Unpin pattern.
 // This fixes the "chunk does not exist" race condition.
 func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, int64, func(), error) {
-	cfg := config.Get()
-
 	// Convert segments to new reader format
 	segments := reader.VolumeToSegmentMeta(vol)
 	if len(segments) == 0 {
@@ -239,7 +238,7 @@ func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, 
 	readerConfig := reader.DefaultConfig()
 	readerConfig.MaxConnections = f.maxConcurrent
 	readerConfig.PrefetchAhead = reader.PrefetchAheadSegments(f.prefetchSize, segments)
-	readerConfig.DiskPath = cfg.Usenet.DiskBufferPath
+	readerConfig.DiskPath = f.diskPath
 	readerConfig.Retention = f.retention
 	readerConfig.Scheduler = f.scheduler
 	readerConfig.Recovery = f.recovery

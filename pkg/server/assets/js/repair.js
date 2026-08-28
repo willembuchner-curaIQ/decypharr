@@ -63,9 +63,7 @@ class RepairManager {
         if (autoRepair) autoRepair.checked = !!this.repairConfig.auto_repair;
         if (verifyContent) verifyContent.checked = !!this.repairConfig.verify_content;
         if (deepNZB) deepNZB.checked = false;
-        const defaultProtocol = this.repairConfig.skip_nzb_repair ? 'torrent' : 'all';
-        const protocol = document.querySelector(`input[name="runProtocol"][value="${defaultProtocol}"]`)
-            || document.getElementById('runProtocolAll');
+        const protocol = document.getElementById('runProtocolAll');
         if (protocol) protocol.checked = true;
         if (typeof modal.showModal === 'function') {
             modal.showModal();

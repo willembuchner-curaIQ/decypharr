@@ -26,9 +26,7 @@ func (r *Service) Start(ctx context.Context) error {
 
 	cfg := r.cfg()
 	if !cfg.Enabled {
-		if !cfg.SkipNZBRepair {
-			r.legacyNZBHydrator.start(ctx)
-		}
+		r.legacyNZBHydrator.start(ctx)
 		r.logger.Info().Msg("Repair disabled in config")
 		return nil
 	}
@@ -73,9 +71,7 @@ func (r *Service) Start(ctx context.Context) error {
 		r.stopScheduled = true
 		r.logger.Info().Str("stop_schedule", stopSchedule).Msg("Repair sweep stop schedule registered")
 	}
-	if !cfg.SkipNZBRepair {
-		r.legacyNZBHydrator.start(ctx)
-	}
+	r.legacyNZBHydrator.start(ctx)
 	return nil
 }
 

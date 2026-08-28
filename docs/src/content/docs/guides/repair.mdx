@@ -55,7 +55,6 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
     "deep_nzb_interval": "720h",
     "arrs": [],
     "auto_repair": true,
-    "skip_nzb_repair": false,
     "verify_content": false,
     "notify_on_complete": false,
     "nntp_connection_percent": 20,
@@ -75,7 +74,6 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
 | `deep_nzb_interval`       | Minimum age for a full distinct-article STAT audit when an NZB next receives its normal repair check. Use `0` to disable. | `720h` |
 | `arrs`                    | Optional filter when `source=arr`. Empty list means all eligible Arrs.                   | `[]`        |
 | `auto_repair`             | When `true`, brokens are repaired in the same sweep. When `false`, the sweep is detect-only. | `false` |
-| `skip_nzb_repair`         | Skip NZB / Usenet entries during scheduled sweeps.                                      | `false` |
 | `verify_content`          | During NZB probes, also read each media file's head through the streaming stack and check for a valid container signature. Finds files whose articles exist but were assembled wrong. Downloads one article per file probed. | `false` |
 | `notify_on_complete`      | Send a notification when a sweep finishes.                                               | `false`     |
 | `nntp_connection_percent` | Percentage of NNTP connections the probe is allowed to use. Avoids starving downloads.   | `20`        |
@@ -130,7 +128,7 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 10. If hydration is definitively unavailable or PAR2 cannot cover a confirmed missing range, Arr delete + search remains the fallback. Connection and provider errors remain `unknown` and never trigger replacement.
 11. The entry's health and the run's PAR2 scanned/missing/repaired/failed/traffic counters are persisted live.
 
-Legacy hydration is preparation rather than an automatic repair action, so `auto_repair: false` does not disable it. It also continues when the recurring sweep is disabled; set `skip_nzb_repair: true` to suppress both NZB sweep work and the background migration. Migration counts and the current item are available in `legacy_nzb_hydration` from `GET /api/repair/status`.
+Legacy hydration is preparation rather than an automatic repair action, so `auto_repair: false` does not disable it. It also continues when the recurring sweep is disabled. Migration counts and the current item are available in `legacy_nzb_hydration` from `GET /api/repair/status`.
 
 Foreground playback and scheduled repair use the same patch store. A scheduled patch removes the first-play repair pause; a patch created mid-stream is reused by later scheduled audits. Background STAT and BODY work shares the configured `nntp_connection_percent` pool and is globally limited so active streams retain capacity.
 
@@ -139,7 +137,7 @@ A failure to persist a single entry's health update is logged but never aborts t
 ## Stop and disable
 
 - **Stop** cancels the active run. In-flight probes return at the next checkpoint, the run is marked `cancelled`, and entries that hadn't yet finished probing revert to their previous status.
-- **Disable** (`enabled=false`) cancels any in-flight run and unregisters the cron job. Per-entry health data is **kept**, so Browse badges stay meaningful and single-entry rechecks remain available. The paced legacy-NZB preparation worker remains independent of the recurring sweep unless `skip_nzb_repair` is enabled.
+- **Disable** (`enabled=false`) cancels any in-flight run and unregisters the cron job. Per-entry health data is **kept**, so Browse badges stay meaningful and single-entry rechecks remain available. The paced legacy-NZB preparation worker remains independent of the recurring sweep.
 
 ## Singleton invariants
 
@@ -223,7 +221,7 @@ Each entry row carries a health badge whose colour reflects the current status (
 
 The badges flip live during a sweep — entries move through `repairing → healthy/broken` as the workers report results, without needing to refresh after the run finishes.
 
-## Per-Arr and per-protocol skips
+## Per-Arr skips
 
 Disable repair for specific Arrs:
 
@@ -232,16 +230,6 @@ Disable repair for specific Arrs:
   "arrs": [
     { "name": "Sonarr", "skip_repair": true }
   ]
-}
-```
-
-Skip repair for all NZB / Usenet entries:
-
-```json
-{
-  "repair": {
-    "skip_nzb_repair": true
-  }
 }
 ```
 

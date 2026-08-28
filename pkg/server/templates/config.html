@@ -25,9 +25,15 @@
                         </button>
                         <button type="button"
                                 class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
-                                data-tab="providers">
-                            <i class="bi bi-collection text-lg"></i>
-                            <span class="hidden sm:inline">Providers</span>
+                                data-tab="debrid">
+                            <i class="bi bi-cloud text-lg"></i>
+                            <span class="hidden sm:inline">Debrid</span>
+                        </button>
+                        <button type="button"
+                                class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
+                                data-tab="usenet">
+                            <i class="bi bi-newspaper text-lg"></i>
+                            <span class="hidden sm:inline">Usenet</span>
                         </button>
                         <button type="button"
                                 class="tab-button cursor-pointer flex items-center gap-2 py-3 px-1 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
@@ -595,24 +601,7 @@
                     </div>
                 </div>
 
-                <div class="tab-content hidden" data-tab-content="providers">
-                    <div class="space-y-6">
-                    <div class="border-b border-base-300 mb-6">
-                        <nav class="subtab-nav flex flex-wrap gap-4" data-subtab-group="providers" data-subtab-accent="secondary" aria-label="providers sub-tabs">
-                            <button type="button"
-                                    class="subtab-button active cursor-pointer py-2 px-4 border-b-2 border-secondary text-secondary font-medium text-sm"
-                                    data-subtab="debrid">
-                                <i class="bi bi-cloud mr-2"></i>Debrid
-                            </button>
-                            <button type="button"
-                                    class="subtab-button cursor-pointer py-2 px-4 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
-                                    data-subtab="usenet">
-                                <i class="bi bi-newspaper mr-2"></i>Usenet
-                            </button>
-                        </nav>
-                    </div>
-
-                    <div class="subtab-panel" data-subtab-group="providers" data-subtab-panel="debrid">
+                <div class="tab-content hidden" data-tab-content="debrid">
                             <div class="space-y-6">
                                 <div class="flex justify-between items-center">
                                     <h3 class="text-xl font-semibold flex items-center"></h3>
@@ -624,9 +613,10 @@
                                     <!-- Debrid configs will be added here dynamically -->
                                 </div>
                             </div>
-                    </div>
+                </div>
 
-                    <div class="subtab-panel hidden" data-subtab-group="providers" data-subtab-panel="usenet">
+                <div class="tab-content hidden" data-tab-content="usenet">
+                    <div class="space-y-6">
                     <div class="border-b border-base-300 mb-6">
                         <nav class="subtab-nav flex flex-wrap gap-4" data-subtab-group="usenet" data-subtab-accent="secondary" aria-label="usenet sub-tabs">
                             <button type="button"
@@ -646,7 +636,7 @@
                                 <!-- Streaming Settings -->
                                 <div class="card bg-base-200">
                                     <div class="card-body">
-                                        <div class="grid grid-cols-2 lg:grid-cols-3 gap-4 mt-6">
+                                        <div class="grid grid-cols-3 lg:grid-cols-4 gap-4 mt-6 mb-4">
                                             <div>
                                                 <label class="label" for="usenet.max_connections">
                                                     <span class="font-medium">Max Connections Per File</span>
@@ -716,13 +706,13 @@
                                                     adding an NZB (1-100, default: 1)</span>
                                             </div>
                                             <div>
-                                                <label class="label" for="usenet.disk_buffer_path">
-                                                    <span class="font-medium">Disk Buffer Path</span>
+                                                <label class="label" for="usenet.disk_path">
+                                                    <span class="font-medium">Disk Path <span class="opacity-60 font-normal">(optional)</span></span>
                                                 </label>
                                                 <input type="text" class="input w-full"
-                                                       name="usenet.disk_buffer_path" id="usenet.disk_buffer_path"
-                                                       placeholder="/cache">
-                                                <span class="text-sm opacity-70">Path for disk buffering during streaming</span>
+                                                       name="usenet.disk_path" id="usenet.disk_path"
+                                                       placeholder="/cache/usenet">
+                                                <span class="text-sm opacity-70">Leave empty to buffer in memory. Set a path to enable disk-backed rewind buffering.</span>
                                             </div>
                                             <div>
                                                 <label class="label" for="usenet.buffer_memory">
@@ -735,59 +725,56 @@
                                                     across all open streams (e.g., 512MB, 1GB). Ignored when
                                                     buffering to disk</span>
                                             </div>
+                                        </div>
 
-                                            <div>
-                                                <label class="label cursor-pointer justify-start gap-3">
-                                                    <input type="checkbox" class="checkbox checkbox-primary"
-                                                           name="usenet.buffer_to_disk" id="usenet.buffer_to_disk">
-                                                    <div>
-                                                        <span class="font-medium">Buffer to Disk</span>
-                                                        <div class="label-text-alt">Write the streaming window to disk
-                                                            instead of keeping it in RAM (default).</div>
-                                                    </div>
-                                                </label>
-                                            </div>
-                                            <div>
-                                                <label class="label cursor-pointer justify-start gap-3">
-                                                    <input type="checkbox" class="checkbox checkbox-secondary"
-                                                           name="usenet.par2.enabled" id="usenet.par2.enabled" checked>
-                                                    <div>
-                                                        <span class="font-medium">PAR2 Repair</span>
-                                                        <div class="label-text-alt">Repair missing or corrupt articles only
-                                                            after normal provider and backbone failover.</div>
-                                                    </div>
-                                                </label>
-                                            </div>
-                                            <div>
-                                                <label class="label" for="usenet.par2.max_download_percent">
-                                                    <span class="font-medium">PAR2 Traffic Limit %</span>
-                                                </label>
-                                                <input type="number" class="input w-full"
-                                                       name="usenet.par2.max_download_percent"
-                                                       id="usenet.par2.max_download_percent" min="1" max="25"
-                                                       value="10">
-                                                <span class="text-sm opacity-70">Extra repair traffic as a percentage of
-                                                    posted NZB bytes (hard maximum: 25%)</span>
-                                            </div>
-                                            <div>
-                                                <label class="label" for="usenet.par2.max_download_bytes">
-                                                    <span class="font-medium">PAR2 Absolute Traffic Limit</span>
-                                                </label>
-                                                <input type="text" class="input w-full"
-                                                       name="usenet.par2.max_download_bytes"
-                                                       id="usenet.par2.max_download_bytes" value="512MB">
-                                                <span class="text-sm opacity-70">Absolute extra-download cap; the smaller
-                                                    of this and the percentage limit wins</span>
-                                            </div>
-                                            <div>
-                                                <label class="label" for="usenet.par2.max_storage">
-                                                    <span class="font-medium">PAR2 Storage Limit</span>
-                                                </label>
-                                                <input type="text" class="input w-full"
-                                                       name="usenet.par2.max_storage"
-                                                       id="usenet.par2.max_storage" value="8GB">
-                                                <span class="text-sm opacity-70">Dedicated metadata, recovery-slice, and
-                                                    repaired-patch storage</span>
+                                        <!-- PAR2 Settings -->
+                                        <div class="mt-8 border-t border-base-300 pt-6">
+                                            <h4 class="text-lg font-semibold flex items-center">
+                                                <i class="bi bi-shield-check mr-2 text-secondary"></i>PAR2 Settings
+                                            </h4>
+
+                                            <label class="label cursor-pointer justify-start gap-3 mt-3">
+                                                <input type="checkbox" class="checkbox checkbox-secondary checkbox-lg"
+                                                       name="usenet.par2.enabled" id="usenet.par2.enabled" checked>
+                                                <div>
+                                                    <span class="font-medium">Enable PAR2 Repair</span>
+                                                    <div class="label-text-alt">Repair missing or corrupt articles only
+                                                        after normal provider and backbone failover.</div>
+                                                </div>
+                                            </label>
+
+                                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                                                <div>
+                                                    <label class="label" for="usenet.par2.max_download_percent">
+                                                        <span class="font-medium">PAR2 Traffic Limit %</span>
+                                                    </label>
+                                                    <input type="number" class="input w-full"
+                                                           name="usenet.par2.max_download_percent"
+                                                           id="usenet.par2.max_download_percent" min="1" max="25"
+                                                           value="10">
+                                                    <span class="text-sm opacity-70">Extra repair traffic as a percentage of
+                                                        posted NZB bytes (hard maximum: 25%)</span>
+                                                </div>
+                                                <div>
+                                                    <label class="label" for="usenet.par2.max_download_bytes">
+                                                        <span class="font-medium">PAR2 Absolute Traffic Limit</span>
+                                                    </label>
+                                                    <input type="text" class="input w-full"
+                                                           name="usenet.par2.max_download_bytes"
+                                                           id="usenet.par2.max_download_bytes" value="512MB">
+                                                    <span class="text-sm opacity-70">Absolute extra-download cap; the smaller
+                                                        of this and the percentage limit wins</span>
+                                                </div>
+                                                <div>
+                                                    <label class="label" for="usenet.par2.max_storage">
+                                                        <span class="font-medium">PAR2 Storage Limit</span>
+                                                    </label>
+                                                    <input type="text" class="input w-full"
+                                                           name="usenet.par2.max_storage"
+                                                           id="usenet.par2.max_storage" value="8GB">
+                                                    <span class="text-sm opacity-70">Dedicated metadata, recovery-slice, and
+                                                        repaired-patch storage</span>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
@@ -808,8 +795,6 @@
                                         </div>
                                     </div>
                                 </div>
-                    </div>
-
                     </div>
 
                     </div>
@@ -1468,11 +1453,6 @@
                             </button>
                             <button type="button"
                                     class="subtab-button cursor-pointer py-2 px-4 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
-                                    data-subtab="share_cache">
-                                <i class="bi bi-database mr-2"></i>Cache
-                            </button>
-                            <button type="button"
-                                    class="subtab-button cursor-pointer py-2 px-4 border-b-2 border-transparent text-base-content/70 hover:text-base-content hover:border-base-300 font-medium text-sm transition-colors"
                                     data-subtab="webdav">
                                 <i class="bi bi-hdd-network mr-2"></i>WebDAV
                             </button>
@@ -1619,69 +1599,6 @@ fe80::/10</textarea>
                         </div>
                     </div>
 
-                    <div class="subtab-panel hidden" data-subtab-group="shares" data-subtab-panel="share_cache">
-                        <div class="card bg-base-200">
-                            <div class="card-body">
-                                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                                    <div>
-                                        <h3 class="text-xl font-semibold flex items-center">
-                                            <i class="bi bi-database mr-2 text-info"></i>Share Read Cache
-                                        </h3>
-                                        <p class="text-sm opacity-70">On-disk cache shared by the NFS and SMB servers. It turns client seeks and repeated scanner reads into disk hits instead of new debrid sessions. Does not apply to WebDAV or the mount.</p>
-                                    </div>
-                                    <label class="label cursor-pointer justify-start gap-3">
-                                        <input type="checkbox" class="checkbox checkbox-primary" name="share_cache.enabled"
-                                               id="share_cache.enabled">
-                                        <span class="font-medium">Enabled</span>
-                                    </label>
-                                </div>
-
-                                <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
-                                    <div class="lg:col-span-3">
-                                        <label class="label" for="share_cache.dir">
-                                            <span class="font-medium">Cache Directory</span>
-                                        </label>
-                                        <input type="text" class="input w-full" name="share_cache.dir"
-                                               id="share_cache.dir" placeholder="/app/share-cache">
-                                        <span class="text-sm opacity-70">Empty uses <code>&lt;config dir&gt;/share-cache</code>. Keep it off ZFS and btrfs where possible: the cache reclaims space inside open files by punching holes, which those filesystems refuse, so the size limit becomes advisory.</span>
-                                    </div>
-                                    <div>
-                                        <label class="label" for="share_cache.max_size">
-                                            <span class="font-medium">Max Size</span>
-                                        </label>
-                                        <input type="text" class="input w-full" name="share_cache.max_size"
-                                               id="share_cache.max_size" placeholder="10GB">
-                                        <span class="text-sm opacity-70">Default 10GB. The cache holds headers and the recently played part of a file, not whole files.</span>
-                                    </div>
-                                    <div>
-                                        <label class="label" for="share_cache.max_age">
-                                            <span class="font-medium">Max Age</span>
-                                        </label>
-                                        <input type="text" class="input w-full" name="share_cache.max_age"
-                                               id="share_cache.max_age" placeholder="24h">
-                                        <span class="text-sm opacity-70">Drops content nothing has read for this long.</span>
-                                    </div>
-                                    <div>
-                                        <label class="label" for="share_cache.chunk_size">
-                                            <span class="font-medium">Chunk Size</span>
-                                        </label>
-                                        <input type="text" class="input w-full" name="share_cache.chunk_size"
-                                               id="share_cache.chunk_size" placeholder="4MB">
-                                        <span class="text-sm opacity-70">Base fetch size, doubling up to 16x while a stream stays sequential.</span>
-                                    </div>
-                                    <div>
-                                        <label class="label" for="share_cache.read_ahead">
-                                            <span class="font-medium">Read Ahead</span>
-                                        </label>
-                                        <input type="text" class="input w-full" name="share_cache.read_ahead"
-                                               id="share_cache.read_ahead" placeholder="16MB">
-                                        <span class="text-sm opacity-70">Fetched beyond each read so a sequential stream never stalls at the cache edge.</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
                     <div class="subtab-panel hidden" data-subtab-group="shares" data-subtab-panel="webdav">
                             <div class="space-y-6">
                                 <div class="space-y-4">
@@ -1698,6 +1615,67 @@ fe80::/10</textarea>
                                         shares — set it under General.</p>
                                 </div>
                             </div>
+                    </div>
+
+                    <div class="card bg-base-200">
+                        <div class="card-body">
+                            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                    <h3 class="text-xl font-semibold flex items-center">
+                                        <i class="bi bi-database mr-2 text-info"></i>Share Read Cache
+                                    </h3>
+                                    <p class="text-sm opacity-70">On-disk cache shared by the NFS and SMB servers. It turns client seeks and repeated scanner reads into disk hits instead of new debrid sessions. Does not apply to WebDAV or the mount.</p>
+                                </div>
+                                <label class="label cursor-pointer justify-start gap-3">
+                                    <input type="checkbox" class="checkbox checkbox-primary" name="share_cache.enabled"
+                                           id="share_cache.enabled">
+                                    <span class="font-medium">Enabled</span>
+                                </label>
+                            </div>
+
+                            <div class="grid grid-cols-1 gap-4 lg:grid-cols-3">
+                                <div class="lg:col-span-3">
+                                    <label class="label" for="share_cache.dir">
+                                        <span class="font-medium">Cache Directory</span>
+                                    </label>
+                                    <input type="text" class="input w-full" name="share_cache.dir"
+                                           id="share_cache.dir" placeholder="/app/share-cache">
+                                    <span class="text-sm opacity-70">Empty uses <code>&lt;config dir&gt;/share-cache</code>. Keep it off ZFS and btrfs where possible: the cache reclaims space inside open files by punching holes, which those filesystems refuse, so the size limit becomes advisory.</span>
+                                </div>
+                                <div>
+                                    <label class="label" for="share_cache.max_size">
+                                        <span class="font-medium">Max Size</span>
+                                    </label>
+                                    <input type="text" class="input w-full" name="share_cache.max_size"
+                                           id="share_cache.max_size" placeholder="10GB">
+                                    <span class="text-sm opacity-70">Default 10GB. The cache holds headers and the recently played part of a file, not whole files.</span>
+                                </div>
+                                <div>
+                                    <label class="label" for="share_cache.max_age">
+                                        <span class="font-medium">Max Age</span>
+                                    </label>
+                                    <input type="text" class="input w-full" name="share_cache.max_age"
+                                           id="share_cache.max_age" placeholder="24h">
+                                    <span class="text-sm opacity-70">Drops content nothing has read for this long.</span>
+                                </div>
+                                <div>
+                                    <label class="label" for="share_cache.chunk_size">
+                                        <span class="font-medium">Chunk Size</span>
+                                    </label>
+                                    <input type="text" class="input w-full" name="share_cache.chunk_size"
+                                           id="share_cache.chunk_size" placeholder="4MB">
+                                    <span class="text-sm opacity-70">Base fetch size, doubling up to 16x while a stream stays sequential.</span>
+                                </div>
+                                <div>
+                                    <label class="label" for="share_cache.read_ahead">
+                                        <span class="font-medium">Read Ahead</span>
+                                    </label>
+                                    <input type="text" class="input w-full" name="share_cache.read_ahead"
+                                           id="share_cache.read_ahead" placeholder="16MB">
+                                    <span class="text-sm opacity-70">Fetched beyond each read so a sequential stream never stalls at the cache edge.</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     </div>
@@ -1806,16 +1784,11 @@ fe80::/10</textarea>
                             </div>
                         </div>
 
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <label class="label cursor-pointer justify-start gap-3">
                                 <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
                                        id="repair.auto_repair" name="repair.auto_repair">
                                 <span class="label-text font-medium" title="Missing NZB articles are repaired locally with PAR2 before Arr replacement is attempted.">Auto-repair when broken</span>
-                            </label>
-                            <label class="label cursor-pointer justify-start gap-3">
-                                <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
-                                       id="repair.skip_nzb_repair" name="repair.skip_nzb_repair">
-                                <span class="label-text font-medium">Skip NZB repair</span>
                             </label>
                             <label class="label cursor-pointer justify-start gap-3"
                                    title="Read each media file's head and check for a valid container signature during NZB probes. Finds files whose articles exist but were assembled wrong. Downloads one article per file probed.">
@@ -2014,8 +1987,16 @@ fe80::/10</textarea>
             webdav: ['shares', 'webdav'],
         };
 
+        // Providers used to be the parent tab for Debrid and Usenet. Keep its
+        // old bookmark pointing to the first promoted provider tab.
+        const tabAliases = {
+            providers: 'debrid',
+        };
+
         // Tab switching function
         function switchTab(targetTab) {
+            targetTab = tabAliases[targetTab] || targetTab;
+
             const moved = movedTabs[targetTab];
             if (moved) {
                 const [parent, subTab] = moved;
@@ -2166,8 +2147,7 @@ fe80::/10</textarea>
     });
 
     // Generic sub-tab navigation. Each group is independent and identified by
-    // data-subtab-group, so nesting needs no extra code: Providers > Usenet is
-    // just the "usenet" group living inside the "providers" group's panel.
+    // data-subtab-group.
     //
     //   <nav class="subtab-nav" data-subtab-group="G" data-subtab-accent="primary">
     //       <button class="subtab-button" data-subtab="K">

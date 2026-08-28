@@ -290,7 +290,7 @@ func fsKey(nzoID, filename string) string {
 }
 
 func configuredRetention() Retention {
-	if config.Get().Usenet.BufferToDisk {
+	if config.Get().Usenet.UsesDiskBuffer() {
 		return RetentionRewind
 	}
 	return RetentionWindow
@@ -331,26 +331,23 @@ func New() (*Usenet, error) {
 		return nil, err
 	}
 
-	// Rewind files are session-scoped; clear any left by an interrupted run.
-	streamsDir := cfg.Usenet.DiskBufferPath
-	if strings.TrimSpace(streamsDir) == "" {
-		_ = client.Close()
-		return nil, fmt.Errorf("Usenet stream cache path is empty")
-	}
-	if err := os.MkdirAll(streamsDir, 0o755); err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("create Usenet stream cache: %w", err)
-	}
-	staleEntries, err := os.ReadDir(streamsDir)
-	if err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("read Usenet stream cache: %w", err)
-	}
-	for _, entry := range staleEntries {
-		if strings.HasPrefix(entry.Name(), "cache-") {
-			if err := os.RemoveAll(filepath.Join(streamsDir, entry.Name())); err != nil {
-				_ = client.Close()
-				return nil, fmt.Errorf("clear stale Usenet stream cache %q: %w", entry.Name(), err)
+	// Disk rewind files are session-scoped; clear any left by an interrupted run.
+	if streamsDir := strings.TrimSpace(usenetConfig.DiskPath); streamsDir != "" {
+		if err := os.MkdirAll(streamsDir, 0o755); err != nil {
+			_ = client.Close()
+			return nil, fmt.Errorf("create Usenet stream cache: %w", err)
+		}
+		staleEntries, err := os.ReadDir(streamsDir)
+		if err != nil {
+			_ = client.Close()
+			return nil, fmt.Errorf("read Usenet stream cache: %w", err)
+		}
+		for _, entry := range staleEntries {
+			if strings.HasPrefix(entry.Name(), "cache-") {
+				if err := os.RemoveAll(filepath.Join(streamsDir, entry.Name())); err != nil {
+					_ = client.Close()
+					return nil, fmt.Errorf("clear stale Usenet stream cache %q: %w", entry.Name(), err)
+				}
 			}
 		}
 	}

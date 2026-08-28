@@ -278,10 +278,7 @@ Increase timeout:
 
 ### Incomplete downloads
 
-1. Enable repair:
-   ```json
-   {"repair": {"skip_nzb_repair": false}}
-   ```
+1. Enable Repair and configure a schedule, or start a manual NZB repair.
 2. Check provider retention (old content may be incomplete)
 3. Try different provider
 
@@ -387,12 +384,12 @@ docker stats decypharr
 
 ### High memory usage
 
-**Usenet streams use disk buffer**. Check:
+Usenet streams buffer in memory by default. To use disk-backed rewind buffering instead, set:
 
 ```json
 {
   "usenet": {
-    "disk_buffer_path": "/cache/usenet"
+    "disk_path": "/cache/usenet"
   }
 }
 ```

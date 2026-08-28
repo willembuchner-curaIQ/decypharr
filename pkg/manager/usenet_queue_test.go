@@ -30,7 +30,6 @@ func TestAddNewNZBQueuesBeforeNetworkParsing(t *testing.T) {
 		}},
 		MaxConnections:           1,
 		ProcessingMaxConnections: 1,
-		DiskBufferPath:           t.TempDir(),
 		PAR2:                     config.PAR2Repair{Enabled: new(false)},
 	}
 	t.Cleanup(func() { cfg.Usenet = oldUsenet })

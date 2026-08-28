@@ -119,7 +119,7 @@ Array of Debrid services:
     "processing_timeout": "10m",
     "availability_sample_percent": 10,
     "import_availability_sample_percent": 1,
-    "disk_buffer_path": "/cache/usenet/streams",
+    "disk_path": "",
     "par2": {
       "enabled": true,
       "max_download_percent": 10,
@@ -141,7 +141,7 @@ Array of Debrid services:
 | `processing_timeout`          | string | Max time for NZB processing     | `10m`                        |
 | `availability_sample_percent` | int    | % of segments to check during repairs (1-100) | `10`             |
 | `import_availability_sample_percent` | int | % of segments to check when adding an NZB (1-100) | `1`         |
-| `disk_buffer_path`            | string | Disk buffer location            | `{main_path}/usenet/streams` |
+| `disk_path`                   | string | Disk-backed rewind location; empty buffers in memory | `""` (memory) |
 | `par2`                        | object | Bounded, on-demand PAR2 recovery | See below                    |
 
 ### PAR2 Fields
@@ -389,7 +389,6 @@ move the cache to another filesystem.
     "recheck_interval": "168h",
     "deep_nzb_interval": "720h",
     "auto_repair": true,
-    "skip_nzb_repair": false,
     "nntp_connection_percent": 20
   }
 }
@@ -406,7 +405,6 @@ move the cache to another filesystem.
 | `deep_nzb_interval`       | Minimum age for a full NZB STAT audit during a normal repair check; `0` disables periodic deep audits | `720h` |
 | `arrs`                    | Optional Arr filter when `source=arr`. Empty = all eligible                | `[]`        |
 | `auto_repair`             | When `true`, missing NZB ranges use PAR2 first; remaining brokens fall back to Arr replacement | `false` |
-| `skip_nzb_repair`         | Skip NZB / Usenet entries during sweeps and disable background legacy-NZB hydration | `false`     |
 | `nntp_connection_percent` | Share of NNTP connections probes may use, to avoid starving downloads      | `20`        |
 
 See the [Health Checker & Repair guide](/guides/repair/) for the full model, API, and Browse-page integration.

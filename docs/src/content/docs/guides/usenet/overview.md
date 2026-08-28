@@ -171,12 +171,12 @@ grabs a replacement release. The check reads one article per video file.
 ```json
 {
   "usenet": {
-    "disk_buffer_path": "/cache/usenet/streams"
+    "disk_path": "/cache/usenet/streams"
   }
 }
 ```
 
-Streams use disk buffer for assembly. Ensure sufficient disk space.
+The default empty `disk_path` keeps the bounded streaming window in memory. Set a path to enable disk-backed rewind buffering, and ensure that location has sufficient free space.
 
 ## Repair
 
@@ -300,7 +300,7 @@ Full Usenet config with optimal settings:
     "read_ahead": "32MB",
     "processing_timeout": "15m",
     "availability_sample_percent": 5,
-    "disk_buffer_path": "/cache/usenet",
+    "disk_path": "/cache/usenet",
     "par2": {
       "enabled": true,
       "max_download_percent": 10,

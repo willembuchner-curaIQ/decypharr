@@ -37,6 +37,27 @@ func TestValidateUsenetRejectsDuplicateProvider(t *testing.T) {
 	}
 }
 
+func TestUsenetDiskPathSelectsBufferStorage(t *testing.T) {
+	var c Config
+	c.updateUsenetConfig()
+	if c.Usenet.DiskPath != "" {
+		t.Fatalf("default disk path = %q, want empty", c.Usenet.DiskPath)
+	}
+	if c.Usenet.UsesDiskBuffer() {
+		t.Fatal("empty disk path should use memory buffering")
+	}
+
+	c.Usenet.DiskPath = "  "
+	if c.Usenet.UsesDiskBuffer() {
+		t.Fatal("whitespace disk path should use memory buffering")
+	}
+
+	c.Usenet.DiskPath = "/cache/usenet"
+	if !c.Usenet.UsesDiskBuffer() {
+		t.Fatal("non-empty disk path should use disk buffering")
+	}
+}
+
 func TestPAR2RepairDefaultsAreEnabledAndBounded(t *testing.T) {
 	p := PAR2Repair{}
 	if !p.IsEnabled() {
@@ -68,7 +89,8 @@ func TestPAR2RepairCanBeDisabledAndCannotRequestFullNZB(t *testing.T) {
 	}
 }
 
-func TestApplyUsenetEnvVarsPAR2(t *testing.T) {
+func TestApplyUsenetEnvVarsDiskPathAndPAR2(t *testing.T) {
+	t.Setenv("DECYPHARR_USENET__DISK_PATH", "/cache/usenet")
 	t.Setenv("DECYPHARR_USENET__PAR2__ENABLED", "false")
 	t.Setenv("DECYPHARR_USENET__PAR2__MAX_DOWNLOAD_PERCENT", "7")
 	t.Setenv("DECYPHARR_USENET__PAR2__MAX_DOWNLOAD_BYTES", "64MB")
@@ -76,6 +98,9 @@ func TestApplyUsenetEnvVarsPAR2(t *testing.T) {
 
 	var c Config
 	c.applyUsenetEnvVars()
+	if c.Usenet.DiskPath != "/cache/usenet" {
+		t.Fatalf("environment disk path = %q, want /cache/usenet", c.Usenet.DiskPath)
+	}
 	if c.Usenet.PAR2.IsEnabled() {
 		t.Fatal("environment override did not disable PAR2 repair")
 	}
