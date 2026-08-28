@@ -110,11 +110,11 @@
     }
 </style>
 <div class="container mx-auto">
-    <div class="flex items-center justify-between mb-6">
+    <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div class="flex items-center gap-3">
-            <h1 class="text-3xl font-bold text-primary">System Statistics</h1>
+            <h1 class="text-2xl font-bold text-primary sm:text-3xl">System Statistics</h1>
         </div>
-        <button id="refresh-stats" class="btn btn-outline btn-sm">
+        <button id="refresh-stats" class="btn btn-outline btn-sm w-full sm:w-auto">
             <i class="bi bi-arrow-clockwise"></i>
             Refresh
         </button>
@@ -127,7 +127,8 @@
 
     <div id="stats-content" style="display: none;">
         <!-- Tab Navigation -->
-        <div role="tablist" class="tabs tabs-boxed mb-6">
+        <div class="mb-6 overflow-x-auto">
+            <div role="tablist" class="tabs tabs-boxed min-w-max flex-nowrap">
             <a role="tab" class="tab tab-active" data-tab="overview">
                 <i class="bi bi-speedometer2 mr-2"></i>Overview
             </a>
@@ -141,6 +142,7 @@
             <a role="tab" class="tab" data-tab="mount">
                 <i class="bi bi-hdd-stack mr-2"></i>Mount
             </a>
+            </div>
         </div>
 
         <!-- Overview Tab -->
@@ -334,7 +336,7 @@
         <div id="tab-streams" class="tab-content hidden">
             <div class="card bg-base-100 shadow-xl" id="streams-card">
                 <div class="card-header p-6 pb-3">
-                    <div class="card-title text-xl justify-between items-center">
+                    <div class="card-title flex-col items-start gap-3 text-xl sm:flex-row sm:items-center sm:justify-between">
                         <h2>
                             <i class="bi bi-broadcast text-success"></i>
                             Active Streams
@@ -367,13 +369,13 @@
         <div id="tab-mount" class="tab-content hidden">
             <div class="card bg-base-100 shadow-xl" id="mount-card">
                 <div class="card-header p-6 pb-3">
-                    <div class="card-title text-xl justify-between items-center">
+                    <div class="card-title flex-col items-start gap-3 text-xl sm:flex-row sm:items-center sm:justify-between">
                         <h2>
                             <i class="bi bi-hdd-stack text-primary"></i>
                             Mount Statistics
                         </h2>
-                        <div class="flex gap-2">
-                            <a href="{{.URLBase}}debug/logs/rclone" class="btn btn-sm btn-outline" target="_blank"
+                        <div class="flex w-full gap-2 sm:w-auto">
+                            <a href="{{.URLBase}}debug/logs/rclone" class="btn btn-sm btn-outline w-full sm:w-auto" target="_blank"
                                id="rclone-logs-btn">
                                 <i class="bi bi-arrow-right"></i>
                                 View Logs
@@ -431,9 +433,9 @@
             <i class="bi bi-exclamation-triangle"></i>
             <span>Cached files may need to be downloaded again after purging.</span>
         </div>
-        <div class="modal-action">
-            <button type="button" class="btn btn-ghost" id="cancel-purge-cache">Cancel</button>
-            <button type="button" class="btn btn-error" id="confirm-purge-cache">
+        <div class="modal-action grid grid-cols-2 gap-2 sm:flex">
+            <button type="button" class="btn btn-ghost w-full sm:w-auto" id="cancel-purge-cache">Cancel</button>
+            <button type="button" class="btn btn-error w-full sm:w-auto" id="confirm-purge-cache">
                 <i class="bi bi-trash3"></i>
                 Purge Cache
             </button>
@@ -461,6 +463,12 @@
                 // Update tab states
                 tabs.forEach(t => t.classList.remove('tab-active'));
                 tab.classList.add('tab-active');
+
+                const tabScroller = tab.closest('[role="tablist"]')?.parentElement;
+                if (tabScroller && tabScroller.scrollWidth > tabScroller.clientWidth) {
+                    const targetLeft = tab.offsetLeft - ((tabScroller.clientWidth - tab.offsetWidth) / 2);
+                    tabScroller.scrollTo({left: Math.max(0, targetLeft), behavior: 'auto'});
+                }
 
                 // Show/hide content
                 document.querySelectorAll('.tab-content').forEach(content => {
@@ -1045,7 +1053,7 @@
                     html += `
                         <div class="card bg-base-200" id="debrid-card-${profile.name.replace(/\s+/g, '-')}">
                             <div class="card-body p-4">
-                                <div class="flex justify-between items-start">
+                                <div class="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
                                     <div>
                                         <div class="flex items-center gap-2">
                                             <h3 class="card-title text-lg">${profile.name || 'Unknown Service'}</h3>
@@ -1053,8 +1061,8 @@
                                         </div>
                                         <p class="text-sm text-base-content/70">${profile.username || 'No username'}</p>
                                     </div>
-                                    <div class="text-right">
-                                        <div class="flex items-center gap-2 justify-end">
+                                    <div class="text-left sm:text-right">
+                                        <div class="flex flex-wrap items-center gap-2 sm:justify-end">
                                             <button
                                                 class="btn btn-xs btn-ghost debrid-speed-test-btn"
                                                 data-provider="${profile.name}"
@@ -1096,7 +1104,7 @@
                                     <i class="bi bi-person-lines-fill text-primary"></i>
                                     Accounts
                                 </h4>
-                                <div class="grid grid-cols-2 md:grid-cols-2 gap-2">
+                                <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
                         `;
 
                         accounts.forEach((account, index) => {
@@ -1157,7 +1165,7 @@
                 html += `
                     <div class="card bg-base-200">
                         <div class="card-body p-4">
-                            <div class="flex justify-between items-start">
+                            <div class="flex flex-col items-start gap-2 sm:flex-row sm:justify-between">
                                 <div>
                                     <div class="flex items-center gap-2">
                                         <h3 class="card-title text-lg">Usenet</h3>
@@ -1165,7 +1173,7 @@
                                     </div>
                                     <p class="text-sm text-base-content/70">${nntpProviders.length} server(s) configured</p>
                                 </div>
-                                <div class="text-right">
+                                <div class="text-left sm:text-right">
                                     <div class="text-sm text-base-content/70">${formatNumber(totalCreated)} / ${formatNumber(maxConns)} connections</div>
                                 </div>
                             </div>

@@ -132,7 +132,7 @@
     </div>
 </header>
 
-<main class="flex-1 container mx-auto px-3 py-4 sm:px-4 sm:py-6">
+<main class="flex-1 container mx-auto px-3 py-4 sm:px-4 sm:py-6 {{if or (eq .Page "login") (eq .Page "register")}}flex items-center{{end}}">
     {{ if eq .Page "index" }}
     {{ template "index" . }}
     {{ else if eq .Page "browse" }}
