@@ -158,6 +158,22 @@ class SetupWizard {
     }
 
     updateProgressIndicators(currentStep) {
+        const stepNames = [
+            'Authentication',
+            'Debrid Account',
+            'Usenet Provider',
+            'Download Folder',
+            'Mount System',
+            'Overview',
+        ];
+        const mobileProgress = document.getElementById('setup-progress');
+        const mobileProgressName = document.getElementById('setup-progress-name');
+        const mobileProgressLabel = document.getElementById('setup-progress-label');
+
+        if (mobileProgress) mobileProgress.value = currentStep;
+        if (mobileProgressName) mobileProgressName.textContent = stepNames[currentStep - 1];
+        if (mobileProgressLabel) mobileProgressLabel.textContent = `Step ${currentStep} of 6`;
+
         for (let i = 1; i <= 6; i++) {
             const indicator = document.getElementById(`step-indicator-${i}`);
             if (i <= currentStep) {
