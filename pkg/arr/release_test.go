@@ -131,6 +131,66 @@ func TestReacquireNZBMissingHistoryReturnsStableNoMatch(t *testing.T) {
 	}
 }
 
+// The grab record already carries the indexer download URL. Using it avoids a
+// live release search, which is the slowest and most failure-prone step.
+func TestReacquireNZBPrefersHistoryDownloadURL(t *testing.T) {
+	var searched bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/history":
+			fmt.Fprint(w, `{"records":[{"downloadId":"nzo-1","movieId":7,"sourceTitle":"Release","data":{"guid":"g","downloadUrl":"/indexer/get?id=abc"}}]}`)
+		case "/indexer/get":
+			fmt.Fprint(w, testNZB)
+		case "/api/v3/release":
+			searched = true
+			fmt.Fprint(w, `[]`)
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	a := &Arr{Host: server.URL, Token: "secret", Type: Radarr}
+	data, err := a.ReacquireNZB(t.Context(), 7)
+	if err != nil || string(data) != testNZB {
+		t.Fatalf("data=%q err=%v", data, err)
+	}
+	if searched {
+		t.Fatal("release search ran even though history carried a download URL")
+	}
+}
+
+// A stale URL (removed indexer, rotated key) must not strand an otherwise
+// recoverable NZB: the release search still has to run.
+func TestReacquireNZBFallsBackWhenHistoryDownloadURLFails(t *testing.T) {
+	var searched bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/history":
+			fmt.Fprint(w, `{"records":[{"downloadId":"nzo-1","movieId":7,"sourceTitle":"Release","data":{"guid":"g","downloadUrl":"/indexer/stale"}}]}`)
+		case "/indexer/stale":
+			http.Error(w, "indexer does not exist", http.StatusNotFound)
+		case "/api/v3/release":
+			searched = true
+			fmt.Fprint(w, `[{"guid":"g","protocol":"usenet","downloadUrl":"/indexer/fresh"}]`)
+		case "/indexer/fresh":
+			fmt.Fprint(w, testNZB)
+		default:
+			t.Errorf("unexpected request %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	a := &Arr{Host: server.URL, Token: "secret", Type: Radarr}
+	data, err := a.ReacquireNZB(t.Context(), 7)
+	if err != nil || string(data) != testNZB {
+		t.Fatalf("data=%q err=%v", data, err)
+	}
+	if !searched {
+		t.Fatal("stale download URL did not fall back to a release search")
+	}
+}
+
 func TestReacquireNZBByDownloadIDResolvesManagedCandidate(t *testing.T) {
 	tests := []struct {
 		name       string

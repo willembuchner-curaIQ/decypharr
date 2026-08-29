@@ -126,46 +126,6 @@ func TestLegacyNZBHydrationWorkerRunsConcurrentlyUpToLimit(t *testing.T) {
 	}
 }
 
-func TestLegacyNZBHydrationWorkerPausesAndCancelsForRepair(t *testing.T) {
-	started := make(chan struct{})
-	canceled := make(chan error, 1)
-	resumed := make(chan struct{})
-	var calls atomic.Int32
-	worker := newTestLegacyNZBHydrationWorker(
-		[]string{"legacy"},
-		newMemoryLegacyNZBHydrationStore(),
-		func(ctx context.Context, _ string, _ nzbHydrationSource) error {
-			if calls.Add(1) == 1 {
-				close(started)
-				<-ctx.Done()
-				canceled <- context.Cause(ctx)
-				return ctx.Err()
-			}
-			close(resumed)
-			return nil
-		},
-	)
-	worker.start(t.Context())
-	defer worker.stop()
-
-	receiveLegacyNZBSignal(t, started)
-	resume := worker.pause()
-	defer resume()
-	if cause := receiveLegacyNZBError(t, canceled); !errors.Is(cause, errLegacyNZBHydrationPaused) {
-		t.Fatalf("cancellation cause = %v", cause)
-	}
-	select {
-	case <-resumed:
-		t.Fatal("hydration resumed while repair pause was active")
-	case <-time.After(40 * time.Millisecond):
-	}
-	resume()
-	receiveLegacyNZBSignal(t, resumed)
-	eventuallyLegacyNZB(t, time.Second, func() bool {
-		return worker.status().Hydrated == 1
-	})
-}
-
 func TestLegacyNZBHydrationWorkerPersistsTransientBackoff(t *testing.T) {
 	state := newMemoryLegacyNZBHydrationStore()
 	worker := newTestLegacyNZBHydrationWorker(nil, state, func(context.Context, string, nzbHydrationSource) error { return nil })
@@ -340,16 +300,6 @@ func receiveLegacyNZBCall[T any](t *testing.T, ch <-chan T) T {
 		var zero T
 		return zero
 	}
-}
-
-func receiveLegacyNZBSignal(t *testing.T, ch <-chan struct{}) {
-	t.Helper()
-	receiveLegacyNZBCall(t, ch)
-}
-
-func receiveLegacyNZBError(t *testing.T, ch <-chan error) error {
-	t.Helper()
-	return receiveLegacyNZBCall(t, ch)
 }
 
 func eventuallyLegacyNZB(t *testing.T, timeout time.Duration, condition func() bool) {

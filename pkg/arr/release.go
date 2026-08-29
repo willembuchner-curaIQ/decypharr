@@ -213,16 +213,32 @@ func (a *Arr) ReacquireNZBByDownloadID(ctx context.Context, downloadID string) (
 }
 
 func (a *Arr) reacquireNZB(ctx context.Context, mediaDBID int, history *HistoryRecord) ([]byte, error) {
+	// The grab record already carries the indexer download URL, so the common
+	// case needs no release search at all. SearchCurrentReleases re-queries
+	// every configured indexer live: it is by far the slowest step here and the
+	// dominant failure mode, since a search that outlives the response header
+	// timeout fails an otherwise recoverable NZB.
+	var directErr error
+	if address := strings.TrimSpace(historyDataValue(history.Data, "downloadUrl")); address != "" {
+		content, err := a.downloadNZBMetadata(ctx, address)
+		if err == nil {
+			return content, nil
+		}
+		// A removed indexer or a rotated key leaves a stale URL behind. The
+		// search below can still recover those, so keep the cause and continue.
+		directErr = fmt.Errorf("history download URL: %w", err)
+	}
+
 	releases, err := a.SearchCurrentReleases(ctx, mediaDBID)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(directErr, err)
 	}
 	matched, err := matchGrabbedRelease(*history, releases)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(directErr, err)
 	}
 	if strings.TrimSpace(matched.DownloadURL) == "" {
-		return nil, &ReleaseMatchError{Stage: "download URL"}
+		return nil, errors.Join(directErr, &ReleaseMatchError{Stage: "download URL"})
 	}
 	return a.downloadNZBMetadata(ctx, matched.DownloadURL)
 }

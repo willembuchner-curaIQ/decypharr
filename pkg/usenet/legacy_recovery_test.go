@@ -216,6 +216,55 @@ func TestLoadLegacyNZBSourceUsesOnlyIDKeyedLocalMetadata(t *testing.T) {
 	}
 }
 
+// A completed import keeps only the compressed archive, so the archive alone
+// has to satisfy hydration without any Arr round trip.
+func TestArchivedNZBSourceSurvivesCompletionAndDeletion(t *testing.T) {
+	metaDir := t.TempDir()
+	store := &NZBStorage{metaDir: metaDir, logger: zerolog.Nop()}
+	const id = "archived-id"
+	if err := store.AddNZB(&storage.NZB{ID: id, Name: "Release.Name", Status: NZBStatusCompleted}); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte(`<?xml version="1.0"?><nzb><file subject="x.par2"></file></nzb>`)
+	source := filepath.Join(metaDir, id+".nzb")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	u := &Usenet{metadataDir: metaDir, nzbStorage: store, logger: zerolog.Nop()}
+	nzb := &storage.NZB{ID: id, Name: "Release.Name", Path: source}
+	if err := u.archiveNZBSource(nzb); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+	// Completion removes the plain source; only the archive should remain.
+	if err := os.Remove(source); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := u.nzbArchivePath(id)
+	if filepath.Ext(archive) == ".nzb" {
+		t.Fatalf("archive %q would be re-imported by the metadata watcher", archive)
+	}
+	if _, err := os.Stat(archive); err != nil {
+		t.Fatalf("archive missing: %v", err)
+	}
+
+	name, got, err := u.LoadLegacyNZBSource(id)
+	if err != nil {
+		t.Fatalf("load from archive: %v", err)
+	}
+	if name != "Release.Name.nzb" || string(got) != string(content) {
+		t.Fatalf("name=%q content=%q", name, got)
+	}
+
+	if err := os.Remove(archive); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := u.LoadLegacyNZBSource(id); !errors.Is(err, ErrLegacyNZBSourceUnavailable) {
+		t.Fatalf("error after archive removal = %v", err)
+	}
+}
+
 func TestHydrateLegacyNZBMapsExactReleaseWithoutRetainingXML(t *testing.T) {
 	config.Reset()
 	config.SetConfigPath(t.TempDir())

@@ -37,9 +37,7 @@ func (r *Service) RecheckEntry(ctx context.Context, entryName string, fix bool) 
 	if ctx == nil {
 		ctx = r.parentCtx
 	}
-	resumeLegacyHydration := r.pauseLegacyNZBHydration()
 	r.runWG.Go(func() {
-		defer resumeLegacyHydration()
 		if fix {
 			r.attachArrContext(ctx, c)
 		}
@@ -108,9 +106,7 @@ func (r *Service) RecheckMedia(ctx context.Context, arrName, mediaID string, fix
 		return nil, fmt.Errorf("failed to persist repair run: %w", err)
 	}
 
-	resumeLegacyHydration := r.pauseLegacyNZBHydration()
 	r.runWG.Go(func() {
-		defer resumeLegacyHydration()
 		defer func() {
 			r.mu.Lock()
 			if r.activeRunID == run.ID {

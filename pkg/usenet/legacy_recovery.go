@@ -1,6 +1,7 @@
 package usenet
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -63,7 +64,7 @@ func (u *Usenet) LoadLegacyNZBSource(nzoID string) (string, []byte, error) {
 		sourceName += ".nzb"
 	}
 
-	paths := make([]string, 0, 3)
+	paths := make([]string, 0, 4)
 	if nzb.Path != "" {
 		paths = append(paths, nzb.Path)
 	}
@@ -71,6 +72,8 @@ func (u *Usenet) LoadLegacyNZBSource(nzoID string) (string, []byte, error) {
 		paths = append(paths,
 			filepath.Join(u.metadataDir, nzoID+".nzb"),
 			filepath.Join(u.metadataDir, nzoID+".queued"),
+			// Completed imports keep only the compressed archive.
+			u.nzbArchivePath(nzoID),
 		)
 	}
 
@@ -120,10 +123,23 @@ func readBoundedNZBMetadata(path string) ([]byte, error) {
 	if info.IsDir() {
 		return nil, fmt.Errorf("NZB source is a directory")
 	}
-	if info.Size() > maxLegacyNZBMetadataBytes {
+
+	var source io.Reader = file
+	if strings.HasSuffix(path, ".gz") {
+		// Only the decompressed length is meaningful for an archive, and the
+		// LimitReader below is what actually bounds it: a small archive can
+		// still expand past the limit.
+		reader, err := gzip.NewReader(file)
+		if err != nil {
+			return nil, fmt.Errorf("open NZB archive: %w", err)
+		}
+		defer reader.Close()
+		source = reader
+	} else if info.Size() > maxLegacyNZBMetadataBytes {
 		return nil, fmt.Errorf("NZB metadata exceeds %d-byte limit", maxLegacyNZBMetadataBytes)
 	}
-	content, err := io.ReadAll(io.LimitReader(file, maxLegacyNZBMetadataBytes+1))
+
+	content, err := io.ReadAll(io.LimitReader(source, maxLegacyNZBMetadataBytes+1))
 	if err != nil {
 		return nil, err
 	}

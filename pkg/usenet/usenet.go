@@ -1,6 +1,7 @@
 package usenet
 
 import (
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -1360,6 +1361,64 @@ func (u *Usenet) saveNZBFile(id string, content []byte) (string, error) {
 	return path, nil
 }
 
+// nzbArchivePath locates the retained, compressed source for an NZB. The name
+// must not end in .nzb: ClaimNewNZBs treats any bare .nzb in the metadata
+// directory as an unmanaged import and would re-import the whole archive.
+func (u *Usenet) nzbArchivePath(id string) string {
+	if u.metadataDir == "" || id == "" {
+		return ""
+	}
+	return filepath.Join(u.metadataDir, id+".nzb.gz")
+}
+
+// archiveNZBSource keeps a compressed copy of the source NZB so PAR2 recovery
+// can recover the raw article layout and parity files without going back to an
+// indexer. It writes through a temporary file so an interrupted write cannot
+// leave a truncated archive that only fails much later, at hydration time.
+func (u *Usenet) archiveNZBSource(nzb *storage.NZB) error {
+	if nzb == nil || nzb.Path == "" {
+		return nil
+	}
+	path := u.nzbArchivePath(nzb.ID)
+	if path == "" {
+		return nil
+	}
+	content, err := os.ReadFile(nzb.Path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read NZB source: %w", err)
+	}
+
+	tmp := path + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("create NZB archive: %w", err)
+	}
+	writer := gzip.NewWriter(file)
+	if _, err := writer.Write(content); err != nil {
+		_ = writer.Close()
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("compress NZB archive: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("flush NZB archive: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close NZB archive: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit NZB archive: %w", err)
+	}
+	return nil
+}
+
 // StageNZB persists a queued NZB before an active-download worker starts.
 func (u *Usenet) StageNZB(id string, content []byte) (string, error) {
 	if id == "" {
@@ -1393,13 +1452,20 @@ func (u *Usenet) markAsProcessing(nzb *storage.NZB) error {
 func (u *Usenet) markAsCompleted(nzb *storage.NZB) error {
 	nzb.Status = NZBStatusCompleted
 
-	// The parsed segment map (.meta) is the only artifact needed for streaming
-	// and repair, so the raw .nzb source file is dead weight once the NZB
-	// completes — delete it (and its processing marker) immediately. Path is
-	// cleared so a later Delete()/watch scan ignores the now-absent file; with
-	// the source gone there is nothing for ClaimNewNZBs to re-import, so no
-	// .processed marker is needed.
+	// The .meta segment map alone is enough to stream a completed NZB, but it is
+	// not enough to repair one: PAR2 recovery needs the raw article layout and
+	// the parity files, and only the source NZB carries both. Treating the
+	// source as dead weight is what forced the legacy hydration migration to go
+	// back to the Arrs, so keep a compressed copy instead of deleting it. NZBs
+	// are highly repetitive XML and compress by roughly an order of magnitude.
+	//
+	// The archive deliberately does not keep the .nzb extension: the metadata
+	// directory watcher treats a bare .nzb as an unmanaged import, and would
+	// re-import every archived source on the next scan.
 	if nzb.Path != "" {
+		if err := u.archiveNZBSource(nzb); err != nil {
+			u.logger.Warn().Err(err).Str("path", nzb.Path).Msg("Failed to archive NZB source file after completion")
+		}
 		if err := os.Remove(nzb.Path); err != nil && !os.IsNotExist(err) {
 			u.logger.Warn().Err(err).Str("path", nzb.Path).Msg("Failed to delete NZB source file after completion")
 		}
@@ -1456,6 +1522,14 @@ func (u *Usenet) Delete(nzoID string) error {
 		_ = os.Remove(processedMarker)
 		failedMarker := nzb.Path + ".failed"
 		_ = os.Remove(failedMarker)
+	}
+
+	// A completed NZB has no Path, so the retained source archive has to be
+	// removed by ID or it outlives every other trace of the NZB.
+	if archive := u.nzbArchivePath(nzoID); archive != "" {
+		if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
+			u.logger.Warn().Err(err).Str("path", archive).Msg("Failed to delete NZB source archive from disk")
+		}
 	}
 
 	// Delete from file-based storage

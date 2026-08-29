@@ -19,10 +19,8 @@ const (
 	legacyNZBHydrationItemTimeout  = 10 * time.Minute
 	legacyNZBHydrationStopTimeout  = 30 * time.Second
 	legacyNZBHydrationErrorLimit   = 2048
-	legacyNZBHydrationConcurrency  = 8
+	legacyNZBHydrationConcurrency  = 5
 )
-
-var errLegacyNZBHydrationPaused = errors.New("legacy NZB hydration paused for repair")
 
 type legacyNZBHydrationDisposition uint8
 
@@ -85,7 +83,6 @@ type legacyNZBHydrationAttempt struct {
 // It describes migration activity, not the health of any particular entry.
 type LegacyNZBHydrationStatus struct {
 	Running       bool       `json:"running"`
-	Paused        bool       `json:"paused"`
 	ScanComplete  bool       `json:"scan_complete"`
 	Pending       int        `json:"pending"`
 	Retrying      int        `json:"retrying"`
@@ -121,7 +118,6 @@ type legacyNZBHydrationWorker struct {
 	arrBackoffs  map[string]legacyNZBArrBackoff
 	inFlight     map[string]*legacyNZBHydrationInFlight
 	wake         chan struct{}
-	pauses       int
 	running      bool
 	scanComplete bool
 	hydrated     int
@@ -208,7 +204,7 @@ func (w *legacyNZBHydrationWorker) run(ctx context.Context, done chan struct{}) 
 		close(done)
 	}()
 
-	if !waitLegacyNZBDuration(ctx, w.startupDelay) || !w.waitUntilResumed(ctx) {
+	if !waitLegacyNZBDuration(ctx, w.startupDelay) {
 		return
 	}
 	restored := w.restorePersisted()
@@ -219,9 +215,6 @@ func (w *legacyNZBHydrationWorker) run(ctx context.Context, done chan struct{}) 
 
 	slots := make(chan struct{}, max(1, w.concurrency))
 	for ctx.Err() == nil {
-		if !w.waitUntilResumed(ctx) {
-			return
-		}
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
@@ -259,22 +252,6 @@ func waitLegacyNZBDuration(ctx context.Context, delay time.Duration) bool {
 		return false
 	case <-timer.C:
 		return true
-	}
-}
-
-func (w *legacyNZBHydrationWorker) waitUntilResumed(ctx context.Context) bool {
-	for {
-		w.mu.Lock()
-		paused := w.pauses > 0
-		w.mu.Unlock()
-		if !paused {
-			return ctx.Err() == nil
-		}
-		select {
-		case <-ctx.Done():
-			return false
-		case <-w.wake:
-		}
 	}
 }
 
@@ -346,7 +323,7 @@ func (w *legacyNZBHydrationWorker) scan(ctx context.Context, restored map[string
 	}
 	seen := make(map[string]struct{}, len(ids))
 	for _, nzbID := range ids {
-		if !w.waitUntilResumed(ctx) {
+		if ctx.Err() != nil {
 			return
 		}
 		seen[nzbID] = struct{}{}
@@ -471,9 +448,6 @@ func legacyNZBSourceImproves(current, incoming nzbHydrationSource) bool {
 func (w *legacyNZBHydrationWorker) takeNext(ctx context.Context, now time.Time) (*legacyNZBHydrationAttempt, context.Context, func(), time.Time) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.pauses > 0 {
-		return nil, nil, nil, time.Time{}
-	}
 
 	var selected *legacyNZBHydrationJob
 	var selectedAt time.Time
@@ -545,12 +519,6 @@ func (w *legacyNZBHydrationWorker) finishAttempt(attempt legacyNZBHydrationAttem
 		return
 	}
 	job.inFlight = false
-	if err != nil && errors.Is(cause, errLegacyNZBHydrationPaused) {
-		job.priority = true
-		w.signalLocked()
-		w.mu.Unlock()
-		return
-	}
 	if errors.Is(cause, context.Canceled) && err != nil {
 		w.signalLocked()
 		w.mu.Unlock()
@@ -722,34 +690,6 @@ func (w *legacyNZBHydrationWorker) waitForWork(ctx context.Context, until time.T
 	}
 }
 
-func (w *legacyNZBHydrationWorker) pause() func() {
-	if w == nil {
-		return func() {}
-	}
-	w.mu.Lock()
-	w.pauses++
-	inFlight := w.inFlightLocked()
-	for _, attempt := range inFlight {
-		attempt.cancel(errLegacyNZBHydrationPaused)
-	}
-	w.signalLocked()
-	w.mu.Unlock()
-	if len(inFlight) > 0 {
-		timer := time.NewTimer(legacyNZBHydrationStopTimeout)
-		for _, attempt := range inFlight {
-			select {
-			case <-attempt.done:
-			case <-timer.C:
-				w.deps.logger.Warn().Msg("Legacy NZB hydration did not pause before repair timeout")
-				timer.Stop()
-				return w.resumeFunc()
-			}
-		}
-		timer.Stop()
-	}
-	return w.resumeFunc()
-}
-
 // inFlightLocked snapshots the live attempts so callers can cancel or wait on
 // them without holding the worker lock.
 func (w *legacyNZBHydrationWorker) inFlightLocked() []*legacyNZBHydrationInFlight {
@@ -761,24 +701,6 @@ func (w *legacyNZBHydrationWorker) inFlightLocked() []*legacyNZBHydrationInFligh
 		attempts = append(attempts, attempt)
 	}
 	return attempts
-}
-
-func (w *legacyNZBHydrationWorker) resumeFunc() func() {
-	return sync.OnceFunc(func() {
-		w.mu.Lock()
-		if w.pauses > 0 {
-			w.pauses--
-		}
-		w.signalLocked()
-		w.mu.Unlock()
-	})
-}
-
-func (r *Service) pauseLegacyNZBHydration() func() {
-	if r == nil {
-		return func() {}
-	}
-	return r.legacyNZBHydrator.pause()
 }
 
 func (r *Service) enqueueLegacyNZBHydration(nzbID string, source nzbHydrationSource) legacyNZBHydrationDisposition {
@@ -826,7 +748,6 @@ func (w *legacyNZBHydrationWorker) status() LegacyNZBHydrationStatus {
 	defer w.mu.Unlock()
 	status := LegacyNZBHydrationStatus{
 		Running:      w.running,
-		Paused:       w.pauses > 0,
 		ScanComplete: w.scanComplete,
 		Hydrated:     w.hydrated,
 		InFlight:     len(w.inFlight),
