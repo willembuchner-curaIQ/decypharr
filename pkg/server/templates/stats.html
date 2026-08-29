@@ -136,8 +136,11 @@
                 <i class="bi bi-broadcast mr-2"></i>Streams
                 <span class="badge badge-sm ml-2" id="streams-tab-count">0</span>
             </a>
-            <a role="tab" class="tab" data-tab="providers">
-                <i class="bi bi-collection mr-2"></i>Providers
+            <a role="tab" class="tab" data-tab="debrid">
+                <i class="bi bi-cloud-arrow-down mr-2"></i>Debrid
+            </a>
+            <a role="tab" class="tab" data-tab="usenet">
+                <i class="bi bi-newspaper mr-2"></i>Usenet
             </a>
             <a role="tab" class="tab" data-tab="mount">
                 <i class="bi bi-hdd-stack mr-2"></i>Mount
@@ -270,23 +273,46 @@
                         <h3 class="card-title text-base">
                             <i class="bi bi-broadcast text-primary"></i>
                             Hearsay
-                            <span class="badge badge-ghost badge-sm ml-auto" id="hearsay-state">-</span>
+                            <span class="tooltip tooltip-left ml-auto"
+                                  data-tip="Off, Local, Receive or Sharing — then the advice mode.">
+                                <span class="badge badge-ghost badge-sm" id="hearsay-state">-</span>
+                            </span>
                         </h3>
                         <div class="grid grid-cols-2 gap-2 mt-2">
                             <div>
-                                <div class="text-xs text-base-content/70">Sources found</div>
+                                <div class="text-xs text-base-content/70 flex items-center gap-1">
+                                    Sources found
+                                    <span class="tooltip" data-tip="Peer feeds you follow, across all namespaces.">
+                                        <i class="bi bi-info-circle"></i>
+                                    </span>
+                                </div>
                                 <div class="font-bold text-info" id="hearsay-feeds">-</div>
                             </div>
                             <div>
-                                <div class="text-xs text-base-content/70">Connected peers</div>
+                                <div class="text-xs text-base-content/70 flex items-center gap-1">
+                                    Connected peers
+                                    <span class="tooltip" data-tip="Peers you are swapping data with right now.">
+                                        <i class="bi bi-info-circle"></i>
+                                    </span>
+                                </div>
                                 <div class="font-bold text-success" id="hearsay-peers">-</div>
                             </div>
                             <div>
-                                <div class="text-xs text-base-content/70">Advice coverage</div>
+                                <div class="text-xs text-base-content/70 flex items-center gap-1">
+                                    Advice coverage
+                                    <span class="tooltip" data-tip="Share of lookups a peer already had an answer for.">
+                                        <i class="bi bi-info-circle"></i>
+                                    </span>
+                                </div>
                                 <div class="font-bold text-info" id="hearsay-coverage">-</div>
                             </div>
                             <div>
-                                <div class="text-xs text-base-content/70">Verified accuracy</div>
+                                <div class="text-xs text-base-content/70 flex items-center gap-1">
+                                    Verified accuracy
+                                    <span class="tooltip" data-tip="Share of checked answers that proved right.">
+                                        <i class="bi bi-info-circle"></i>
+                                    </span>
+                                </div>
                                 <div class="font-bold text-success" id="hearsay-accuracy">-</div>
                             </div>
                         </div>
@@ -350,17 +376,32 @@
             </div>
         </div>
 
-        <!-- Providers Tab -->
-        <div id="tab-providers" class="tab-content hidden">
-            <div class="card bg-base-100 shadow-xl" id="providers-card">
+        <!-- Debrid Tab -->
+        <div id="tab-debrid" class="tab-content hidden">
+            <div class="card bg-base-100 shadow-xl" id="debrid-card">
                 <div class="card-header p-6 pb-3">
                     <h2 class="card-title text-xl">
-                        <i class="bi bi-collection text-secondary"></i>
-                        Providers
+                        <i class="bi bi-cloud-arrow-down text-secondary"></i>
+                        Debrid Providers
                     </h2>
                 </div>
-                <div class="card-body p-6 pt-3" id="providers-content">
-                    <p class="text-base-content/70">Loading providers...</p>
+                <div class="card-body p-6 pt-3" id="debrid-content">
+                    <p class="text-base-content/70">Loading debrid providers...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Usenet Tab -->
+        <div id="tab-usenet" class="tab-content hidden">
+            <div class="card bg-base-100 shadow-xl" id="usenet-card">
+                <div class="card-header p-6 pb-3">
+                    <h2 class="card-title text-xl">
+                        <i class="bi bi-newspaper text-accent"></i>
+                        Usenet Providers
+                    </h2>
+                </div>
+                <div class="card-body p-6 pt-3" id="usenet-content">
+                    <p class="text-base-content/70">Loading usenet providers...</p>
                 </div>
             </div>
         </div>
@@ -1013,257 +1054,338 @@
             streamsContent.innerHTML = html;
         }
 
-        function updateProviders(debrids, usenetData) {
-            const providersContent = document.getElementById('providers-content');
+        // PAR2 recovery counters, from Usenet.Stats()["par2_recovery"].
+        function renderPar2Stats(par2) {
+            if (!par2) {
+                return '';
+            }
 
-            const hasDebrids = debrids && debrids.length > 0;
-            const hasUsenet = usenetData && usenetData.providers && usenetData.providers.length > 0;
+            const attempts = par2.repair_attempts || 0;
+            const successes = par2.repair_successes || 0;
+            const failures = par2.repair_failures || 0;
+            const successRate = attempts ? `${(successes / attempts * 100).toFixed(1)}%` : '-';
+            const store = par2.store || {};
 
-            if (!hasDebrids && !hasUsenet) {
-                providersContent.innerHTML = '<p class="text-base-content/70">No providers configured.</p>';
+            const stat = (title, value, tone) =>
+                `<div class="stat">
+                    <div class="stat-title text-xs">${title}</div>
+                    <div class="stat-value text-sm ${tone || ''}">${value}</div>
+                </div>`;
+
+            // Only reasons that actually fired are worth the space.
+            const reasons = Object.entries(par2.failure_reasons || {})
+                .filter(([, count]) => count > 0)
+                .map(([reason, count]) =>
+                    `<span class="badge badge-ghost badge-sm">${reason.replace(/_/g, ' ')}: ${formatNumber(count)}</span>`)
+                .join('');
+
+            return `
+                <div class="card bg-base-200">
+                    <div class="card-body p-4">
+                        <div class="flex items-center gap-2">
+                            <h3 class="card-title text-lg">PAR2 Repair</h3>
+                            <span class="badge badge-warning badge-sm">alpha</span>
+                        </div>
+                        <p class="text-sm text-base-content/70">Rebuilds missing or corrupt articles from recovery data.</p>
+
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                            ${stat('Repair Attempts', formatNumber(attempts))}
+                            ${stat('Repaired', formatNumber(successes), 'text-success')}
+                            ${stat('Failed', formatNumber(failures), 'text-error')}
+                            ${stat('Success Rate', successRate, 'text-info')}
+                        </div>
+
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
+                            ${stat('Patch Hits', formatNumber(par2.patch_hits || 0))}
+                            ${stat('BODY Calls', formatNumber(par2.body_calls || 0))}
+                            ${stat('Recovery Downloaded', window.decypharrUtils.formatBytes(par2.recovery_payload_bytes || 0))}
+                            ${stat('Patches Written', window.decypharrUtils.formatBytes(par2.patch_bytes || 0))}
+                        </div>
+
+                        <div class="mt-4">
+                            <h4 class="font-semibold mb-2 text-sm">
+                                <i class="bi bi-hdd text-primary"></i>
+                                Recovery Store
+                            </h4>
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                ${stat('Entries', formatNumber(store.entries || 0))}
+                                ${stat('On Disk', window.decypharrUtils.formatBytes(store.disk_bytes || 0))}
+                                ${stat('Recovery Slices', formatNumber(store.recovery_slices || 0))}
+                                ${stat('Cached Patches', formatNumber(store.patches || 0))}
+                            </div>
+                        </div>
+
+                        ${reasons ? `
+                        <div class="mt-4">
+                            <h4 class="font-semibold mb-2 text-sm">
+                                <i class="bi bi-exclamation-triangle text-warning"></i>
+                                Failure Reasons
+                            </h4>
+                            <div class="flex flex-wrap gap-2">${reasons}</div>
+                        </div>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        function updateDebridProviders(debrids) {
+            const debridContent = document.getElementById('debrid-content');
+
+            if (!debrids || debrids.length === 0) {
+                debridContent.innerHTML = '<p class="text-base-content/70">No debrid providers configured.</p>';
                 return;
             }
 
             let html = '<div class="space-y-4">';
 
-            // Render debrid providers
-            if (hasDebrids) {
-                debrids.forEach(debrid => {
-                    const profile = debrid.profile || {};
-                    const library = debrid.library || {};
-                    const accounts = debrid.accounts || [];
-                    const storedSpeedTest = debrid.speed_test_result;
+            debrids.forEach(debrid => {
+                const profile = debrid.profile || {};
+                const library = debrid.library || {};
+                const accounts = debrid.accounts || [];
+                const storedSpeedTest = debrid.speed_test_result;
 
-                    // Generate initial speed result HTML from stored result
-                    let debridSpeedResultHtml = '';
-                    if (storedSpeedTest && !storedSpeedTest.error) {
-                        const speedMbps = storedSpeedTest.speed_mbps ? (storedSpeedTest.speed_mbps * 8).toFixed(1) : '';
-                        const latency = storedSpeedTest.latency_ms ? `${storedSpeedTest.latency_ms}ms` : '';
-                        const testedAt = storedSpeedTest.tested_at ? new Date(storedSpeedTest.tested_at).toLocaleTimeString() : '';
-                        debridSpeedResultHtml = `
-                            <div class="flex items-center gap-2 text-success">
-                                <i class="bi bi-check-circle"></i>
-                                ${latency ? `<span><strong>${latency}</strong> latency</span>` : ''}
-                                ${speedMbps ? `<span><strong>${speedMbps} Mbps</strong></span>` : ''}
-                            </div>
-                            <div class="text-xs text-base-content/50">Tested: ${testedAt}</div>
-                        `;
-                    }
-
-                    html += `
-                        <div class="card bg-base-200" id="debrid-card-${profile.name.replace(/\s+/g, '-')}">
-                            <div class="card-body p-4">
-                                <div class="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
-                                    <div>
-                                        <div class="flex items-center gap-2">
-                                            <h3 class="card-title text-lg">${profile.name || 'Unknown Service'}</h3>
-                                            <span class="badge badge-secondary badge-sm">Debrid</span>
-                                        </div>
-                                        <p class="text-sm text-base-content/70">${profile.username || 'No username'}</p>
-                                    </div>
-                                    <div class="text-left sm:text-right">
-                                        <div class="flex flex-wrap items-center gap-2 sm:justify-end">
-                                            <button
-                                                class="btn btn-xs btn-ghost debrid-speed-test-btn"
-                                                data-provider="${profile.name}"
-                                                onclick="runDebridSpeedTest('${profile.name}');">
-                                                Test Speed
-                                            </button>
-                                            <div class="text-sm font-mono">${formatNumber(profile.points || 0)} points</div>
-                                        </div>
-                                        <div id="debrid-speed-result-${profile.name.replace(/\s+/g, '-')}" class="text-xs mt-1">${debridSpeedResultHtml}</div>
-                                        <div class="text-xs text-base-content/70">Type: ${profile.type || 'Unknown'}</div>
-                                        <div class="text-xs text-base-content/70">Expires: ${profile.expiration ? new Date(profile.expiration).toLocaleDateString() : 'Unknown'}</div>
-                                    </div>
-                                </div>
-                                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
-                                    <div class="stat">
-                                        <div class="stat-title text-xs">Library Size</div>
-                                        <div class="stat-value text-sm">${formatNumber(library.total || 0)}</div>
-                                    </div>
-                                    <div class="stat">
-                                        <div class="stat-title text-xs">Bad Torrents</div>
-                                        <div class="stat-value text-sm text-error">${formatNumber(library.bad || 0)}</div>
-                                    </div>
-                                    <div class="stat">
-                                        <div class="stat-title text-xs">Active Links</div>
-                                        <div class="stat-value text-sm text-success">${formatNumber(library.active_links || 0)}</div>
-                                    </div>
-                                    <div class="stat">
-                                        <div class="stat-title text-xs">Total Accounts</div>
-                                        <div class="stat-value text-sm text-info">${accounts.length}</div>
-                                    </div>
-                                </div>
-                    `;
-
-                    // Add accounts section if there are accounts
-                    if (accounts && accounts.length > 0) {
-                        html += `
-                            <div class="mt-4">
-                                <h4 class="font-semibold mb-2 text-sm">
-                                    <i class="bi bi-person-lines-fill text-primary"></i>
-                                    Accounts
-                                </h4>
-                                <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        `;
-
-                        accounts.forEach((account, index) => {
-                            const statusBadge = account.disabled ?
-                                '<span class="badge badge-error badge-xs">Disabled</span>' :
-                                '<span class="badge badge-success badge-xs">Active</span>';
-                            const inUseBadge = account.in_use ?
-                                '<span class="badge badge-info badge-xs">In Use</span>' :
-                                '';
-
-                            html += `
-                                <div class="card bg-base-100 compact">
-                                    <div class="card-body p-2">
-                                        <div class="flex justify-between items-start">
-                                            <div class="flex-1">
-                                                <div class="flex items-center gap-1">
-                                                    <h5 class="font-medium text-xs">Account #${account.order + 1}</h5>
-                                                    ${statusBadge}
-                                                    ${inUseBadge}
-                                                </div>
-                                                <p class="text-xs text-base-content/70">${account.username || '-'}</p>
-                                            </div>
-                                            <div class="text-right flex-shrink-0 ml-2">
-                                                <div class="text-xs text-base-content/60">Daily Usage: ${window.decypharrUtils.formatBytes(account.traffic_used || 0)}</div>
-                                                <div class="text-xs text-base-content/60">Expires: ${account.expiration ? new Date(account.expiration).toLocaleDateString() : 'Unknown'}</div>
-                                            </div>
-
-                                        </div>
-                                    </div>
-                                </div>
-                            `;
-                        });
-
-                        html += '</div></div>';
-                    }
-
-                    html += `
-                            </div>
+                // Generate initial speed result HTML from stored result
+                let debridSpeedResultHtml = '';
+                if (storedSpeedTest && !storedSpeedTest.error) {
+                    const speedMbps = storedSpeedTest.speed_mbps ? (storedSpeedTest.speed_mbps * 8).toFixed(1) : '';
+                    const latency = storedSpeedTest.latency_ms ? `${storedSpeedTest.latency_ms}ms` : '';
+                    const testedAt = storedSpeedTest.tested_at ? new Date(storedSpeedTest.tested_at).toLocaleTimeString() : '';
+                    debridSpeedResultHtml = `
+                        <div class="flex items-center gap-2 text-success">
+                            <i class="bi bi-check-circle"></i>
+                            ${latency ? `<span><strong>${latency}</strong> latency</span>` : ''}
+                            ${speedMbps ? `<span><strong>${speedMbps} Mbps</strong></span>` : ''}
                         </div>
+                        <div class="text-xs text-base-content/50">Tested: ${testedAt}</div>
                     `;
-                });
-            }
-
-            // Render usenet provider
-            if (hasUsenet) {
-                const pool = usenetData.pool || {};
-                const nntpProviders = usenetData.providers || [];
-
-                const maxConns = pool.max_connections || 0;
-                const active = pool.active || 0;
-                const idle = pool.idle || 0;
-                const totalCreated = pool.total_created || 0;
-
-                const activePercent = maxConns > 0 ? (active / maxConns) * 100 : 0;
-                const idlePercent = maxConns > 0 ? (idle / maxConns) * 100 : 0;
-                const utilizationPercent = maxConns > 0 ? (totalCreated / maxConns) * 100 : 0;
+                }
 
                 html += `
-                    <div class="card bg-base-200">
+                    <div class="card bg-base-200" id="debrid-card-${profile.name.replace(/\s+/g, '-')}">
                         <div class="card-body p-4">
-                            <div class="flex flex-col items-start gap-2 sm:flex-row sm:justify-between">
+                            <div class="flex flex-col items-start gap-3 sm:flex-row sm:justify-between">
                                 <div>
                                     <div class="flex items-center gap-2">
-                                        <h3 class="card-title text-lg">Usenet</h3>
-                                        <span class="badge badge-accent badge-sm">NNTP</span>
+                                        <h3 class="card-title text-lg">${profile.name || 'Unknown Service'}</h3>
+                                        <span class="badge badge-secondary badge-sm">Debrid</span>
                                     </div>
-                                    <p class="text-sm text-base-content/70">${nntpProviders.length} server(s) configured</p>
+                                    <p class="text-sm text-base-content/70">${profile.username || 'No username'}</p>
                                 </div>
                                 <div class="text-left sm:text-right">
-                                    <div class="text-sm text-base-content/70">${formatNumber(totalCreated)} / ${formatNumber(maxConns)} connections</div>
-                                </div>
-                            </div>
-
-                            <!-- Connection Pool Bar -->
-                            <div class="mt-4">
-                                <div class="flex justify-between items-center mb-2">
-                                    <span class="text-xs font-medium">Pool Utilization</span>
-                                    <span class="text-xs font-mono">${utilizationPercent.toFixed(1)}%</span>
-                                </div>
-                                <div class="w-full bg-base-300 rounded-full h-4 relative overflow-hidden">
-                                    <div class="absolute h-full bg-success transition-all duration-300"
-                                         style="width: ${activePercent}%"></div>
-                                    <div class="absolute h-full bg-primary/80 transition-all duration-300"
-                                         style="left: ${activePercent}%; width: ${idlePercent}%"></div>
-                                </div>
-                                <div class="flex gap-4 mt-2 text-xs flex-wrap">
-                                    <span class="flex items-center gap-1">
-                                        <span class="w-2 h-2 bg-success rounded"></span>
-                                        Active: ${active}
-                                    </span>
-                                    <span class="flex items-center gap-1">
-                                        <span class="w-2 h-2 bg-primary/80 rounded"></span>
-                                        Idle: ${idle}
-                                    </span>
-                                </div>
-                            </div>
-
-                            <!-- NNTP Servers -->
-                            <div class="mt-4">
-                                <h4 class="font-semibold mb-2 text-sm">
-                                    <i class="bi bi-server text-primary"></i>
-                                    NNTP Servers
-                                </h4>
-                                <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
-                `;
-
-                nntpProviders.forEach(provider => {
-                    const speedTest = provider.speed_test;
-                    let speedResultHtml = '';
-                    if (speedTest && speedTest.tested_at) {
-                        const testedAt = new Date(speedTest.tested_at).toLocaleTimeString();
-                        if (speedTest.error) {
-                            speedResultHtml = `<span class="text-error text-xs"><i class="bi bi-x-circle"></i> Error</span>`;
-                        } else {
-                            const speedStr = speedTest.speed_mbps > 0
-                                ? `${speedTest.speed_mbps.toFixed(1)} MB/s`
-                                : `${speedTest.latency_ms}ms`;
-                            speedResultHtml = `<span class="text-success text-xs"><i class="bi bi-check-circle"></i> ${speedStr}</span>`;
-                        }
-                    }
-
-                    html += `
-                        <div class="card bg-base-100 compact">
-                            <div class="card-body p-2">
-                                <div class="flex justify-between items-start">
-                                    <div>
-                                        <div class="flex items-center gap-1">
-                                            <span class="font-medium text-xs">${provider.host}</span>
-                                            <span class="badge ${provider.ssl ? 'badge-success' : 'badge-warning'} badge-xs">${provider.ssl ? 'SSL' : 'Plain'}</span>
-                                        </div>
-                                        <p class="text-xs text-base-content/70">${provider.username ? provider.username + ' · ' : ''}${provider.max_connections || 0} connections</p>
-                                    </div>
-                                    <div class="flex flex-col items-end gap-1">
-                                        ${speedResultHtml}
+                                    <div class="flex flex-wrap items-center gap-2 sm:justify-end">
                                         <button
-                                            class="btn btn-xs btn-ghost speed-test-btn"
-                                            data-provider="${provider.id || provider.host}"
-                                            title="Run Speed Test"
-                                            onclick="runSpeedTest('${provider.id || provider.host}');">
+                                            class="btn btn-xs btn-ghost debrid-speed-test-btn"
+                                            data-provider="${profile.name}"
+                                            onclick="runDebridSpeedTest('${profile.name}');">
                                             Test Speed
                                         </button>
+                                        <div class="text-sm font-mono">${formatNumber(profile.points || 0)} points</div>
+                                    </div>
+                                    <div id="debrid-speed-result-${profile.name.replace(/\s+/g, '-')}" class="text-xs mt-1">${debridSpeedResultHtml}</div>
+                                    <div class="text-xs text-base-content/70">Type: ${profile.type || 'Unknown'}</div>
+                                    <div class="text-xs text-base-content/70">Expires: ${profile.expiration ? new Date(profile.expiration).toLocaleDateString() : 'Unknown'}</div>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                                <div class="stat">
+                                    <div class="stat-title text-xs">Library Size</div>
+                                    <div class="stat-value text-sm">${formatNumber(library.total || 0)}</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-title text-xs">Bad Torrents</div>
+                                    <div class="stat-value text-sm text-error">${formatNumber(library.bad || 0)}</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-title text-xs">Active Links</div>
+                                    <div class="stat-value text-sm text-success">${formatNumber(library.active_links || 0)}</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-title text-xs">Total Accounts</div>
+                                    <div class="stat-value text-sm text-info">${accounts.length}</div>
+                                </div>
+                            </div>
+                `;
+
+                // Add accounts section if there are accounts
+                if (accounts && accounts.length > 0) {
+                    html += `
+                        <div class="mt-4">
+                            <h4 class="font-semibold mb-2 text-sm">
+                                <i class="bi bi-person-lines-fill text-primary"></i>
+                                Accounts
+                            </h4>
+                            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    `;
+
+                    accounts.forEach((account, index) => {
+                        const statusBadge = account.disabled ?
+                            '<span class="badge badge-error badge-xs">Disabled</span>' :
+                            '<span class="badge badge-success badge-xs">Active</span>';
+                        const inUseBadge = account.in_use ?
+                            '<span class="badge badge-info badge-xs">In Use</span>' :
+                            '';
+
+                        html += `
+                            <div class="card bg-base-100 compact">
+                                <div class="card-body p-2">
+                                    <div class="flex justify-between items-start">
+                                        <div class="flex-1">
+                                            <div class="flex items-center gap-1">
+                                                <h5 class="font-medium text-xs">Account #${account.order + 1}</h5>
+                                                ${statusBadge}
+                                                ${inUseBadge}
+                                            </div>
+                                            <p class="text-xs text-base-content/70">${account.username || '-'}</p>
+                                        </div>
+                                        <div class="text-right flex-shrink-0 ml-2">
+                                            <div class="text-xs text-base-content/60">Daily Usage: ${window.decypharrUtils.formatBytes(account.traffic_used || 0)}</div>
+                                            <div class="text-xs text-base-content/60">Expires: ${account.expiration ? new Date(account.expiration).toLocaleDateString() : 'Unknown'}</div>
+                                        </div>
+
                                     </div>
                                 </div>
-                                <div id="speed-result-${sanitizeProviderId(provider.id || provider.host)}" class="text-xs mt-1"></div>
                             </div>
-                        </div>
-                    `;
-                });
+                        `;
+                    });
+
+                    html += '</div></div>';
+                }
 
                 html += `
-                                </div>
-                            </div>
                         </div>
                     </div>
                 `;
-            }
+            });
 
             html += '</div>';
-            providersContent.innerHTML = html;
+            debridContent.innerHTML = html;
+        }
+
+        function updateUsenetProviders(usenetData) {
+            const usenetContent = document.getElementById('usenet-content');
+            const hasUsenet = usenetData && usenetData.providers && usenetData.providers.length > 0;
+
+            if (!hasUsenet) {
+                usenetContent.innerHTML = '<p class="text-base-content/70">No usenet providers configured.</p>';
+                return;
+            }
+
+            let html = '<div class="space-y-4">';
+
+            const pool = usenetData.pool || {};
+            const nntpProviders = usenetData.providers || [];
+
+            const maxConns = pool.max_connections || 0;
+            const active = pool.active || 0;
+            const idle = pool.idle || 0;
+            const totalCreated = pool.total_created || 0;
+
+            const activePercent = maxConns > 0 ? (active / maxConns) * 100 : 0;
+            const idlePercent = maxConns > 0 ? (idle / maxConns) * 100 : 0;
+            const utilizationPercent = maxConns > 0 ? (totalCreated / maxConns) * 100 : 0;
+
+            html += `
+                <div class="card bg-base-200">
+                    <div class="card-body p-4">
+                        <div class="flex flex-col items-start gap-2 sm:flex-row sm:justify-between">
+                            <div>
+                                <div class="flex items-center gap-2">
+                                    <h3 class="card-title text-lg">Usenet</h3>
+                                    <span class="badge badge-accent badge-sm">NNTP</span>
+                                </div>
+                                <p class="text-sm text-base-content/70">${nntpProviders.length} server(s) configured</p>
+                            </div>
+                            <div class="text-left sm:text-right">
+                                <div class="text-sm text-base-content/70">${formatNumber(totalCreated)} / ${formatNumber(maxConns)} connections</div>
+                            </div>
+                        </div>
+
+                        <!-- Connection Pool Bar -->
+                        <div class="mt-4">
+                            <div class="flex justify-between items-center mb-2">
+                                <span class="text-xs font-medium">Pool Utilization</span>
+                                <span class="text-xs font-mono">${utilizationPercent.toFixed(1)}%</span>
+                            </div>
+                            <div class="w-full bg-base-300 rounded-full h-4 relative overflow-hidden">
+                                <div class="absolute h-full bg-success transition-all duration-300"
+                                     style="width: ${activePercent}%"></div>
+                                <div class="absolute h-full bg-primary/80 transition-all duration-300"
+                                     style="left: ${activePercent}%; width: ${idlePercent}%"></div>
+                            </div>
+                            <div class="flex gap-4 mt-2 text-xs flex-wrap">
+                                <span class="flex items-center gap-1">
+                                    <span class="w-2 h-2 bg-success rounded"></span>
+                                    Active: ${active}
+                                </span>
+                                <span class="flex items-center gap-1">
+                                    <span class="w-2 h-2 bg-primary/80 rounded"></span>
+                                    Idle: ${idle}
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- NNTP Servers -->
+                        <div class="mt-4">
+                            <h4 class="font-semibold mb-2 text-sm">
+                                <i class="bi bi-server text-primary"></i>
+                                NNTP Servers
+                            </h4>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+            `;
+
+            nntpProviders.forEach(provider => {
+                const speedTest = provider.speed_test;
+                let speedResultHtml = '';
+                if (speedTest && speedTest.tested_at) {
+                    const testedAt = new Date(speedTest.tested_at).toLocaleTimeString();
+                    if (speedTest.error) {
+                        speedResultHtml = `<span class="text-error text-xs"><i class="bi bi-x-circle"></i> Error</span>`;
+                    } else {
+                        const speedStr = speedTest.speed_mbps > 0
+                            ? `${speedTest.speed_mbps.toFixed(1)} MB/s`
+                            : `${speedTest.latency_ms}ms`;
+                        speedResultHtml = `<span class="text-success text-xs"><i class="bi bi-check-circle"></i> ${speedStr}</span>`;
+                    }
+                }
+
+                html += `
+                    <div class="card bg-base-100 compact">
+                        <div class="card-body p-2">
+                            <div class="flex justify-between items-start">
+                                <div>
+                                    <div class="flex items-center gap-1">
+                                        <span class="font-medium text-xs">${provider.host}</span>
+                                        <span class="badge ${provider.ssl ? 'badge-success' : 'badge-warning'} badge-xs">${provider.ssl ? 'SSL' : 'Plain'}</span>
+                                    </div>
+                                    <p class="text-xs text-base-content/70">${provider.username ? provider.username + ' · ' : ''}${provider.max_connections || 0} connections</p>
+                                </div>
+                                <div class="flex flex-col items-end gap-1">
+                                    ${speedResultHtml}
+                                    <button
+                                        class="btn btn-xs btn-ghost speed-test-btn"
+                                        data-provider="${provider.id || provider.host}"
+                                        title="Run Speed Test"
+                                        onclick="runSpeedTest('${provider.id || provider.host}');">
+                                        Test Speed
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="speed-result-${sanitizeProviderId(provider.id || provider.host)}" class="text-xs mt-1"></div>
+                        </div>
+                    </div>
+                `;
+            });
+
+            html += `
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            html += renderPar2Stats(usenetData.par2_recovery);
+            html += '</div>';
+            usenetContent.innerHTML = html;
         }
 
         function formatUptime(seconds) {
@@ -1353,7 +1475,8 @@
             updateMountStats(stats.mount);
 
             // Unified providers (debrid + usenet)
-            updateProviders(stats.debrids, stats.usenet);
+            updateDebridProviders(stats.debrids);
+            updateUsenetProviders(stats.usenet);
 
             // Active streams
             updateActiveStreams(stats.active_streams);
