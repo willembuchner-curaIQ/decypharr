@@ -123,18 +123,22 @@ func TestLegacyNZBHydrationFailureClassification(t *testing.T) {
 		{name: "ineligible arr source", err: errLegacyNZBArrIneligible, permanent: true},
 		{name: "no par2", err: usenetpkg.ErrLegacyNZBNoPAR2, permanent: true},
 		{name: "identity mismatch", err: usenetpkg.ErrLegacyNZBIdentityMismatch, permanent: true},
-		{name: "download budget", err: recovery.ErrBudgetExceeded, permanent: true},
-		{name: "storage budget", err: recovery.ErrStorageBudget, permanent: true},
+		// Budget exhaustion is local capacity, not a property of the release,
+		// so it must stay retriable or a full store retires the whole backlog.
+		{name: "download budget", err: recovery.ErrBudgetExceeded, permanent: false},
+		{name: "storage budget", err: recovery.ErrStorageBudget, permanent: false},
 		{name: "layout unavailable", err: recovery.ErrLayoutUnavailable, permanent: true},
 		{name: "no recovery set", err: recovery.ErrNoRecoverySet, permanent: true},
 		{name: "article missing", err: &nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430}, permanent: true},
 		{
+			// A budget branch anywhere in the tree keeps the whole failure
+			// retriable, even beside a deterministic sibling.
 			name: "joined article and budget failure",
 			err: errors.Join(
 				&nntp.Error{Type: nntp.ErrorTypeArticleNotFound, Code: 430},
 				recovery.ErrBudgetExceeded,
 			),
-			permanent: true,
+			permanent: false,
 		},
 		{
 			name: "transient provider branch wins over layout fallback",
@@ -146,7 +150,7 @@ func TestLegacyNZBHydrationFailureClassification(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := legacyNZBHydrationFailurePermanent(test.err); got != test.permanent {
+			if got := legacyNZBHydrationFailurePersistent(test.err); got != test.permanent {
 				t.Fatalf("permanent = %t, want %t", got, test.permanent)
 			}
 			if got := legacyNZBHydrationFailureUsesArrBackoff(test.err); got != test.arrBackoff {

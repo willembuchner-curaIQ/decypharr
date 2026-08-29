@@ -268,6 +268,13 @@ func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (report NZBRepairR
 		result := batch.Articles[i]
 		if result.Err != nil {
 			report.FailedRanges++
+			u.logger.Debug().Err(result.Err).
+				Str("nzb_id", nzoID).
+				Str("message_id", target.segment.MessageID).
+				Uint32("raw_file", target.segment.RawFileKey).
+				Int64("raw_offset", target.segment.RawOffset).
+				Int64("raw_length", target.segment.RawLength).
+				Msg("PAR2 range recovery failed")
 			failure := fmt.Errorf("repair files %q article %s: %w", target.fileNames, target.segment.MessageID, result.Err)
 			failures = append(failures, failure)
 			for _, fileName := range target.fileNames {
@@ -278,6 +285,19 @@ func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (report NZBRepairR
 		}
 		if result.Bytes != int(target.segment.SegmentDataStart+target.segment.RawLength) {
 			report.FailedRanges++
+			// Recovery succeeded but the reconstruction does not match the
+			// stored provenance. That points at the segment map rather than at
+			// the parity, so record both sides to tell them apart.
+			u.logger.Debug().
+				Str("nzb_id", nzoID).
+				Str("message_id", target.segment.MessageID).
+				Uint32("raw_file", target.segment.RawFileKey).
+				Int64("raw_offset", target.segment.RawOffset).
+				Int64("raw_length", target.segment.RawLength).
+				Int64("segment_data_start", target.segment.SegmentDataStart).
+				Int("recovered_bytes", result.Bytes).
+				Int64("expected_bytes", target.segment.SegmentDataStart+target.segment.RawLength).
+				Msg("PAR2 range recovered the wrong length; provenance and parity disagree")
 			failure := fmt.Errorf("repair files %q article %s returned %d bytes", target.fileNames, target.segment.MessageID, result.Bytes)
 			failures = append(failures, failure)
 			for _, fileName := range target.fileNames {
@@ -293,6 +313,24 @@ func (u *Usenet) repairNZB(ctx context.Context, nzoID string) (report NZBRepairR
 	}
 	if batchErr != nil {
 		failures = append(failures, batchErr)
+	}
+	// PAR2 repair was silent before this: a run could report failed ranges with
+	// no record of why, which left the only real failure we ever saw
+	// undiagnosable. One line per NZB keeps that visible without echoing every
+	// range at info level.
+	if report.FailedRanges > 0 || report.RepairedRanges > 0 {
+		event := u.logger.Info()
+		if report.FailedRanges > 0 {
+			event = u.logger.Warn()
+		}
+		event.
+			Str("nzb_id", nzoID).
+			Int("ranges", report.RepairRanges).
+			Int("repaired", report.RepairedRanges).
+			Int("failed", report.FailedRanges).
+			Int("missing_articles", report.MissingArticles).
+			Int64("download_bytes", report.ModeledDownloadBytes).
+			Msg("PAR2 repair pass finished")
 	}
 	return report, errors.Join(failures...)
 }

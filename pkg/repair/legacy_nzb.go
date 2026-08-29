@@ -11,6 +11,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	usenetpkg "github.com/sirrobot01/decypharr/pkg/usenet"
+	usenetrecovery "github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 )
 
 var (
@@ -19,7 +20,16 @@ var (
 	errLegacyNZBArrIneligible = errors.New("legacy NZB Arr source is not eligible for repair")
 )
 
-func legacyNZBHydrationFailurePermanent(err error) bool {
+// legacyNZBHydrationFailurePersistent reports whether a hydration failure is a
+// property of the release itself rather than of the moment. Only those are
+// remembered on the entry health record; everything else retries on the next
+// run.
+//
+// Budget exhaustion is deliberately excluded. A full PAR2 store or a spent
+// download allowance says nothing about the NZB, and treating it as decisive
+// silently retired thousands of recoverable releases the first time the store
+// filled up.
+func legacyNZBHydrationFailurePersistent(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
@@ -27,6 +37,9 @@ func legacyNZBHydrationFailurePermanent(err error) bool {
 	// and a provenance fallback failure. Any genuinely transient branch wins
 	// over deterministic siblings such as the fallback layout error.
 	if legacyNZBErrorTreeAny(err, customerror.IsRetriableError) {
+		return false
+	}
+	if legacyNZBHydrationFailureOperational(err) {
 		return false
 	}
 	// Arr exposes response status on metadata-download errors. A timeout,
@@ -50,6 +63,36 @@ func legacyNZBHydrationFailurePermanent(err error) bool {
 		errors.Is(err, errLegacyNZBArrIneligible) ||
 		errors.Is(err, usenetpkg.ErrLegacyNZBIdentityMismatch) ||
 		errors.Is(err, usenetpkg.ErrLegacyNZBNoPAR2)
+}
+
+// legacyNZBHydrationFailureOperational reports a failure caused by exhausted
+// local capacity rather than by the release. These must stay retriable.
+func legacyNZBHydrationFailureOperational(err error) bool {
+	return errors.Is(err, usenetrecovery.ErrStorageBudget) ||
+		errors.Is(err, usenetrecovery.ErrBudgetExceeded) ||
+		errors.Is(err, usenetrecovery.ErrUnboundedTraffic)
+}
+
+// legacyNZBHydrationReason labels a persistent failure for the health record.
+func legacyNZBHydrationReason(err error) string {
+	switch {
+	case errors.Is(err, errLegacyNZBNoArrSource):
+		return "hydration_no_arr_source"
+	case errors.Is(err, errLegacyNZBArrIneligible):
+		return "hydration_arr_ineligible"
+	case errors.Is(err, arr.ErrNZBReacquireNoMatch):
+		return "hydration_release_not_found"
+	case errors.Is(err, arr.ErrNZBReacquireAmbiguous):
+		return "hydration_release_ambiguous"
+	case errors.Is(err, usenetpkg.ErrLegacyNZBNoPAR2):
+		return "hydration_no_par2"
+	case errors.Is(err, usenetpkg.ErrLegacyNZBIdentityMismatch):
+		return "hydration_identity_mismatch"
+	}
+	if reason, definitive := par2RepairFailureReason(err); definitive {
+		return reason
+	}
+	return "hydration_failed"
 }
 
 func legacyNZBHydrationFailureUsesArrBackoff(err error) bool {

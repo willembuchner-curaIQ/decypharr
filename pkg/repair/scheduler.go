@@ -26,7 +26,6 @@ func (r *Service) Start(ctx context.Context) error {
 
 	cfg := r.cfg()
 	if !cfg.Enabled {
-		r.legacyNZBHydrator.start(ctx)
 		r.logger.Info().Msg("Repair disabled in config")
 		return nil
 	}
@@ -71,13 +70,11 @@ func (r *Service) Start(ctx context.Context) error {
 		r.stopScheduled = true
 		r.logger.Info().Str("stop_schedule", stopSchedule).Msg("Repair sweep stop schedule registered")
 	}
-	r.legacyNZBHydrator.start(ctx)
 	return nil
 }
 
 // Stop cancels active repair work and removes its schedules.
 func (r *Service) Stop() {
-	r.legacyNZBHydrator.stop()
 	r.mu.Lock()
 	cancel := r.cancelRun
 	r.cancelRun = nil
@@ -192,9 +189,8 @@ func (r *Service) stopActiveRepairSweep() {
 func (r *Service) Status() Status {
 	cfg := r.cfg()
 	st := Status{
-		Enabled:            cfg.Enabled,
-		HealthCounts:       r.storage.CountEntryHealthByStatus(),
-		LegacyNZBHydration: r.legacyNZBHydrator.status(),
+		Enabled:      cfg.Enabled,
+		HealthCounts: r.storage.CountEntryHealthByStatus(),
 	}
 	if next := r.nextScheduledRun(); next != nil {
 		st.NextRunAt = next

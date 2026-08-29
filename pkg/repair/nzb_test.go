@@ -2,6 +2,7 @@ package repair
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 
@@ -9,7 +10,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	usenetpkg "github.com/sirrobot01/decypharr/pkg/usenet"
-	"github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 )
 
 type stubNZBRepairClient struct {
@@ -40,7 +40,7 @@ func (c stubNZBRepairClient) VerifyFile(ctx context.Context, nzbID, fileName str
 	return c.verify(ctx, nzbID, fileName)
 }
 
-func TestNZBProberEnqueuesLegacyNZBAndKeepsHealthyProbe(t *testing.T) {
+func TestNZBProberHydratesLegacyNZBBeforeProbing(t *testing.T) {
 	events := make([]string, 0, 4)
 	client := stubNZBRepairClient{
 		needsHydration: func(string) (bool, error) {
@@ -51,38 +51,36 @@ func TestNZBProberEnqueuesLegacyNZBAndKeepsHealthyProbe(t *testing.T) {
 			events = append(events, "probe")
 			return nil
 		},
-		canRecover: func(string) bool {
-			t.Fatal("legacy probe checked PAR2 before background hydration")
-			return false
-		},
+		canRecover: func(string) bool { return true },
 		repair: func(context.Context, string) (usenetpkg.NZBRepairReport, error) {
 			t.Fatal("healthy detect-only probe attempted repair")
 			return usenetpkg.NZBRepairReport{}, nil
 		},
 		verify: func(context.Context, string, string) error { return nil },
 	}
-	prober := newNZBProber(client, func(nzbID string, source nzbHydrationSource) legacyNZBHydrationDisposition {
+	prober := newNZBProber(client, func(_ context.Context, nzbID string, source nzbHydrationSource) error {
 		if nzbID != "legacy" || source.arrName != "Sonarr" {
-			t.Fatalf("enqueue(%q, %+v)", nzbID, source)
+			t.Fatalf("hydrate(%q, %+v)", nzbID, source)
 		}
-		events = append(events, "enqueue")
-		return legacyNZBHydrationPending
+		events = append(events, "hydrate")
+		return nil
 	}, zerolog.Nop())
 
 	result := prober.probe(t.Context(), nzbProbeRequest{
 		nzbID: "legacy", fileName: "movie.mkv", source: nzbHydrationSource{arrName: "Sonarr"},
 	})
-	if !result.healthy || result.broken || result.deferred {
+	if !result.healthy || result.broken || result.hydrationErr != nil {
 		t.Fatalf("result = %+v", result)
 	}
-	want := []string{"detect-legacy", "enqueue", "probe"}
+	// Hydration has to precede the probe, or the probe reads stale provenance.
+	want := []string{"detect-legacy", "hydrate", "probe"}
 	if !slices.Equal(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
 	}
 }
 
 func TestNZBProberSkipsHydrationForModernNZB(t *testing.T) {
-	enqueued := false
+	hydrated := false
 	client := stubNZBRepairClient{
 		needsHydration: func(string) (bool, error) { return false, nil },
 		checkFile:      func(context.Context, string, string) error { return nil },
@@ -92,20 +90,20 @@ func TestNZBProberSkipsHydrationForModernNZB(t *testing.T) {
 		},
 		verify: func(context.Context, string, string) error { return nil },
 	}
-	prober := newNZBProber(client, func(string, nzbHydrationSource) legacyNZBHydrationDisposition {
-		enqueued = true
-		return legacyNZBHydrationPending
+	prober := newNZBProber(client, func(context.Context, string, nzbHydrationSource) error {
+		hydrated = true
+		return nil
 	}, zerolog.Nop())
 
 	result := prober.probe(t.Context(), nzbProbeRequest{nzbID: "modern", fileName: "movie.mkv"})
-	if !result.healthy || enqueued {
-		t.Fatalf("result = %+v, enqueued = %t", result, enqueued)
+	if !result.healthy || hydrated {
+		t.Fatalf("result = %+v, hydrated = %t", result, hydrated)
 	}
 }
 
-func TestNZBProberDetectsLegacyNZBOnceAndRefreshesQueueSource(t *testing.T) {
-	detections := 0
-	enqueues := 0
+// A multi-file entry must hydrate its release once, not once per file.
+func TestNZBProberHydratesOncePerNZB(t *testing.T) {
+	detections, hydrations := 0, 0
 	client := stubNZBRepairClient{
 		needsHydration: func(string) (bool, error) {
 			detections++
@@ -118,91 +116,74 @@ func TestNZBProberDetectsLegacyNZBOnceAndRefreshesQueueSource(t *testing.T) {
 		},
 		verify: func(context.Context, string, string) error { return nil },
 	}
-	prober := newNZBProber(client, func(string, nzbHydrationSource) legacyNZBHydrationDisposition {
-		enqueues++
-		return legacyNZBHydrationPending
+	prober := newNZBProber(client, func(context.Context, string, nzbHydrationSource) error {
+		hydrations++
+		return nil
 	}, zerolog.Nop())
 
 	for _, fileName := range []string{"movie.mkv", "extras.mkv"} {
-		result := prober.probe(t.Context(), nzbProbeRequest{nzbID: "legacy", fileName: fileName})
-		if !result.healthy {
+		if result := prober.probe(t.Context(), nzbProbeRequest{nzbID: "legacy", fileName: fileName}); !result.healthy {
 			t.Fatalf("%s result = %+v", fileName, result)
 		}
 	}
-	if detections != 1 || enqueues != 2 {
-		t.Fatalf("detections = %d, enqueues = %d; want 1 detection and 2 source refreshes", detections, enqueues)
+	if detections != 1 || hydrations != 1 {
+		t.Fatalf("detections = %d, hydrations = %d; want 1 each", detections, hydrations)
 	}
 }
 
-func TestNZBProberDefersMissingLegacyNZBWhileHydrationIsPending(t *testing.T) {
+// Hydration failure must not hide a real fault: the probe still runs and the
+// file is reported broken, with the hydration cause carried for the entry.
+func TestNZBProberReportsMissingLegacyNZBWhenHydrationFails(t *testing.T) {
 	client := stubNZBRepairClient{
 		needsHydration: func(string) (bool, error) { return true, nil },
 		checkFile:      func(context.Context, string, string) error { return customerror.UsenetSegmentMissingError },
-		canRecover:     func(string) bool { return false },
+		canRecover: func(string) bool {
+			t.Fatal("attempted PAR2 recovery on an un-hydrated NZB")
+			return false
+		},
 		repair: func(context.Context, string) (usenetpkg.NZBRepairReport, error) {
 			return usenetpkg.NZBRepairReport{}, nil
 		},
 		verify: func(context.Context, string, string) error { return nil },
 	}
-	prober := newNZBProber(client, func(string, nzbHydrationSource) legacyNZBHydrationDisposition {
-		return legacyNZBHydrationPending
+	prober := newNZBProber(client, func(context.Context, string, nzbHydrationSource) error {
+		return errLegacyNZBNoArrSource
 	}, zerolog.Nop())
 
-	result := prober.probe(t.Context(), nzbProbeRequest{nzbID: "legacy", fileName: "movie.mkv"})
-	if !result.deferred || result.healthy || result.broken || result.reason != "legacy_hydration_pending" {
+	result := prober.probe(t.Context(), nzbProbeRequest{nzbID: "legacy", fileName: "movie.mkv", autoRepair: true})
+	if !result.broken || result.reason != "usenet_segment_missing" {
 		t.Fatalf("result = %+v", result)
+	}
+	if !errors.Is(result.hydrationErr, errLegacyNZBNoArrSource) {
+		t.Fatalf("hydration error = %v", result.hydrationErr)
 	}
 }
 
-func TestNZBProberTreatsMissingLegacyNZBAsBrokenWhenHydrationIsUnavailable(t *testing.T) {
-	client := stubNZBRepairClient{
-		needsHydration: func(string) (bool, error) { return true, nil },
-		checkFile:      func(context.Context, string, string) error { return customerror.UsenetSegmentMissingError },
-		canRecover:     func(string) bool { return false },
-		repair: func(context.Context, string) (usenetpkg.NZBRepairReport, error) {
-			return usenetpkg.NZBRepairReport{}, nil
-		},
-		verify: func(context.Context, string, string) error { return nil },
-	}
-	prober := newNZBProber(client, func(string, nzbHydrationSource) legacyNZBHydrationDisposition {
-		return legacyNZBHydrationUnavailable
-	}, zerolog.Nop())
-
-	result := prober.probe(t.Context(), nzbProbeRequest{nzbID: "legacy", fileName: "movie.mkv"})
-	if !result.broken || result.deferred || result.reason != "usenet_segment_missing" {
-		t.Fatalf("result = %+v", result)
-	}
-}
-
-func TestNZBProberDefersLegacyDeepAuditUntilHydrationFinishes(t *testing.T) {
+// After a successful hydration the same pass may go on to repair.
+func TestNZBProberRepairsAfterHydratingInPlace(t *testing.T) {
 	repaired := false
 	client := stubNZBRepairClient{
 		needsHydration: func(string) (bool, error) { return true, nil },
 		checkFile:      func(context.Context, string, string) error { return nil },
-		canRecover: func(string) bool {
-			t.Fatal("checked recovery before hydration")
-			return false
-		},
+		canRecover:     func(string) bool { return true },
 		repair: func(context.Context, string) (usenetpkg.NZBRepairReport, error) {
 			repaired = true
 			return usenetpkg.NZBRepairReport{}, nil
 		},
 		verify: func(context.Context, string, string) error { return nil },
 	}
-	prober := newNZBProber(client, func(string, nzbHydrationSource) legacyNZBHydrationDisposition {
-		return legacyNZBHydrationPending
-	}, zerolog.Nop())
+	prober := newNZBProber(client, func(context.Context, string, nzbHydrationSource) error { return nil }, zerolog.Nop())
 
 	result := prober.probe(t.Context(), nzbProbeRequest{
 		nzbID: "legacy", fileName: "movie.mkv", autoRepair: true, deepAudit: true,
 	})
-	if !result.deferred || result.healthy || result.broken || repaired {
+	if !repaired || result.broken {
 		t.Fatalf("result = %+v, repaired = %t", result, repaired)
 	}
 }
 
 func TestNZBProberDoesNotHydrateModernMissingNZB(t *testing.T) {
-	enqueued := false
+	hydrated := false
 	client := stubNZBRepairClient{
 		needsHydration: func(string) (bool, error) { return false, nil },
 		checkFile:      func(context.Context, string, string) error { return customerror.UsenetSegmentMissingError },
@@ -212,53 +193,26 @@ func TestNZBProberDoesNotHydrateModernMissingNZB(t *testing.T) {
 		},
 		verify: func(context.Context, string, string) error { return nil },
 	}
-	prober := newNZBProber(client, func(string, nzbHydrationSource) legacyNZBHydrationDisposition {
-		enqueued = true
-		return legacyNZBHydrationPending
+	prober := newNZBProber(client, func(context.Context, string, nzbHydrationSource) error {
+		hydrated = true
+		return nil
 	}, zerolog.Nop())
 
 	result := prober.probe(t.Context(), nzbProbeRequest{
 		nzbID: "modern", fileName: "movie.mkv", autoRepair: true,
 	})
-	if !result.broken || result.deferred || enqueued {
-		t.Fatalf("result = %+v, enqueued = %t", result, enqueued)
+	if !result.broken || hydrated {
+		t.Fatalf("result = %+v, hydrated = %t", result, hydrated)
 	}
 }
 
-func TestNZBProberQueuesUnexpectedLegacyManifestDuringDeepAudit(t *testing.T) {
-	enqueues := 0
-	client := stubNZBRepairClient{
-		needsHydration: func(string) (bool, error) { return false, nil },
-		checkFile:      func(context.Context, string, string) error { return nil },
-		canRecover:     func(string) bool { return true },
-		repair: func(context.Context, string) (usenetpkg.NZBRepairReport, error) {
-			return usenetpkg.NZBRepairReport{}, recovery.ErrLegacyManifestUnsupported
-		},
-		verify: func(context.Context, string, string) error { return nil },
-	}
-	prober := newNZBProber(client, func(string, nzbHydrationSource) legacyNZBHydrationDisposition {
-		enqueues++
-		return legacyNZBHydrationPending
-	}, zerolog.Nop())
-
-	result := prober.probe(t.Context(), nzbProbeRequest{
-		nzbID: "legacy", fileName: "movie.mkv", autoRepair: true, deepAudit: true,
-	})
-	if !result.deferred || result.broken || enqueues != 1 {
-		t.Fatalf("result = %+v, enqueues = %d", result, enqueues)
-	}
-}
-
-func TestRollupStatusKeepsDeferredLegacyEntryUnknown(t *testing.T) {
+func TestRollupStatusKeepsUnresolvedEntryUnknown(t *testing.T) {
 	results := []fileResult{
 		{name: "healthy.mkv", healthy: true},
-		{name: "legacy.mkv", deferred: true, reason: "legacy_hydration_pending"},
+		{name: "unresolved.mkv", deferred: true, reason: "usenet_probe_error"},
 	}
 	if got := rollupStatus(results); got != storage.HealthUnknown {
 		t.Fatalf("status = %q, want unknown", got)
-	}
-	if got := firstDeferredReason(results); got != "legacy_hydration_pending" {
-		t.Fatalf("deferred reason = %q", got)
 	}
 	results = append(results, fileResult{name: "broken.mkv", broken: true})
 	if got := rollupStatus(results); got != storage.HealthBroken {

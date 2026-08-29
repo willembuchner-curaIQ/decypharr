@@ -20,6 +20,10 @@ type fileResult struct {
 	deferred bool
 	reason   string
 	par2     *nzbRepairOutcome
+	// hydrationErr is set when this file's NZB still lacks PAR2 provenance
+	// after an in-place hydration attempt. It decides whether the entry
+	// remembers the failure and stops re-attempting on every run.
+	hydrationErr error
 }
 
 type par2ProbeStats struct {
@@ -96,6 +100,7 @@ func (r *Service) executeSweep(ctx context.Context, run *storage.RepairRun, opts
 		Int("par2_articles", run.Stats.PAR2ArticlesScanned).
 		Int("par2_missing", run.Stats.PAR2ArticlesMissing).
 		Int("par2_ranges_repaired", run.Stats.PAR2RangesRepaired).
+		Int("par2_ranges_failed", run.Stats.PAR2RangesFailed).
 		Msg("Sweep: completed")
 }
 
@@ -140,7 +145,7 @@ func (r *Service) probeAndHealCandidates(ctx context.Context, run *storage.Repai
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(max(1, r.workers()))
-	nzb := newNZBProber(r.usenet, r.enqueueLegacyNZBHydration, r.logger)
+	nzb := newNZBProber(r.usenet, r.hydrateBounded, r.logger)
 
 	for _, name := range names {
 		c := candidates[name]

@@ -21,6 +21,7 @@ class RepairManager {
         $('stopRunBtn')?.addEventListener('click', () => this.stopRun());
         $('fixBrokenBtn')?.addEventListener('click', () => this.fixBroken());
         $('clearStateBtn')?.addEventListener('click', () => this.openClearStateModal());
+        $('hydrateBtn')?.addEventListener('click', () => this.hydrateLegacyNZBs());
         $('viewBrokenBtn')?.addEventListener('click', () => this.openBrokenModal());
         $('refreshHistoryBtn')?.addEventListener('click', () => this.loadHistory());
         $('refreshBrokenBtn')?.addEventListener('click', () => this.loadBroken());
@@ -255,6 +256,23 @@ class RepairManager {
         }
     }
 
+    async hydrateLegacyNZBs() {
+        if (!confirm('Rebuild PAR2 recovery data for older NZBs?\n\nThis re-fetches each release from its Arr, so it can run for a while and will retry entries whose last attempt failed.')) return;
+        const btn = document.getElementById('hydrateBtn');
+        if (btn) btn.disabled = true;
+        try {
+            const res = await fetch(`${this.api}/repair/hydrate`, { method: 'POST' });
+            const body = await res.text();
+            if (!res.ok) throw new Error(body || `HTTP ${res.status}`);
+            this.toast('Hydration run started', 'success');
+            await this.loadStatus();
+        } catch (e) {
+            this.toast(`Hydration failed to start: ${e.message}`, 'error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
     async fixBroken() {
         if (!confirm('Send delete + re-search for every currently broken entry to its Arr?')) return;
         const btn = document.getElementById('fixBrokenBtn');
@@ -389,6 +407,8 @@ class RepairManager {
         this.updateBrokenCount(brokenCount);
         const fix = document.getElementById('fixBrokenBtn');
         if (fix) fix.disabled = !!status.active_run || brokenCount === 0;
+        const hydrate = document.getElementById('hydrateBtn');
+        if (hydrate) hydrate.disabled = !!status.active_run;
         const clear = document.getElementById('clearStateBtn');
         if (clear) clear.disabled = !!status.active_run;
         const view = document.getElementById('viewBrokenBtn');

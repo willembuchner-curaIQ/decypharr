@@ -713,6 +713,28 @@ func (s *Server) handleRepairStatus(w http.ResponseWriter, r *http.Request) {
 	utils.JSONResponse(w, svc.Status(), http.StatusOK)
 }
 
+// handleHydrateLegacyNZBs starts a repair run dedicated to restoring PAR2
+// provenance for legacy NZBs. Hydration is otherwise only attempted as part of
+// probing a candidate, so this is the manual escape hatch: it forces a retry of
+// entries whose previous attempt failed persistently.
+func (s *Server) handleHydrateLegacyNZBs(w http.ResponseWriter, r *http.Request) {
+	svc := s.manager.Repair()
+	if svc == nil {
+		http.Error(w, "Repair service not available", http.StatusServiceUnavailable)
+		return
+	}
+	id, err := svc.RunNow(repair.RunOptions{
+		IgnoreLastChecked: true,
+		ForceHydration:    true,
+		ProtocolScope:     string(config.ProtocolNZB),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	utils.JSONResponse(w, map[string]string{"run_id": id}, http.StatusOK)
+}
+
 func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IgnoreLastChecked bool   `json:"ignore_last_checked,omitempty"`

@@ -7,6 +7,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -35,7 +36,11 @@ func (r *Service) probeEntry(ctx context.Context, runID string, c *candidate, he
 	deepNZB := r.shouldDeepNZB(h.LastPAR2AuditAt, opts.DeepNZB, autoRepair, time.Now())
 
 	names := orderedFilenames(c.item)
-	results := r.probeFiles(ctx, c, names, nzb, opts, autoRepair, deepNZB)
+	// A hydration failure that will not resolve on its own is remembered, so
+	// sweeps stop re-attempting it. Forcing a retry is what the manual
+	// hydration request is for.
+	skipHydration := !opts.ForceHydration && !h.HydrationFailedAt.IsZero()
+	results := r.probeFiles(ctx, c, names, nzb, opts, autoRepair, deepNZB, skipHydration)
 	if autoRepair {
 		r.autoHealResults(ctx, results, heal)
 	}
@@ -106,9 +111,39 @@ func (r *Service) probeEntry(ctx context.Context, runID string, c *candidate, he
 	if completedAudit {
 		h.LastPAR2AuditAt = h.LastCheckedAt
 	}
+	applyHydrationOutcome(h, results)
 
 	r.saveHealth(h)
 	return h, par2Stats
+}
+
+// applyHydrationOutcome records a hydration failure that will not resolve on
+// its own, so later sweeps skip re-attempting it. A success, or a failure that
+// is merely operational (an exhausted budget, a timeout), clears the memory so
+// the entry is tried again.
+func applyHydrationOutcome(h *storage.EntryHealth, results []fileResult) {
+	var persistent error
+	attempted := false
+	for i := range results {
+		if results[i].protocol != config.ProtocolNZB {
+			continue
+		}
+		attempted = true
+		if err := results[i].hydrationErr; err != nil && legacyNZBHydrationFailurePersistent(err) {
+			persistent = err
+			break
+		}
+	}
+	if !attempted {
+		return
+	}
+	if persistent == nil {
+		h.HydrationFailedAt = time.Time{}
+		h.HydrationReason = ""
+		return
+	}
+	h.HydrationFailedAt = h.LastCheckedAt
+	h.HydrationReason = legacyNZBHydrationReason(persistent)
 }
 
 func firstDeferredReason(results []fileResult) string {
@@ -120,7 +155,7 @@ func firstDeferredReason(results []fileResult) string {
 	return ""
 }
 
-func (r *Service) probeFiles(ctx context.Context, c *candidate, names []string, nzb *nzbProber, opts RunOptions, autoRepair, deepNZB bool) []fileResult {
+func (r *Service) probeFiles(ctx context.Context, c *candidate, names []string, nzb *nzbProber, opts RunOptions, autoRepair, deepNZB, skipHydration bool) []fileResult {
 	results := make([]fileResult, len(names))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(repairFilesPerEntry)
@@ -130,7 +165,7 @@ func (r *Service) probeFiles(ctx context.Context, c *candidate, names []string, 
 				results[i] = fileResult{name: name, reason: "context_cancelled"}
 				return nil
 			}
-			results[i] = r.probeFile(gctx, c, name, nzb, opts, autoRepair, deepNZB)
+			results[i] = r.probeFile(gctx, c, name, nzb, opts, autoRepair, deepNZB, skipHydration)
 			return nil
 		})
 	}
@@ -138,7 +173,7 @@ func (r *Service) probeFiles(ctx context.Context, c *candidate, names []string, 
 	return results
 }
 
-func (r *Service) probeFile(ctx context.Context, c *candidate, name string, nzb *nzbProber, opts RunOptions, autoRepair, deepNZB bool) fileResult {
+func (r *Service) probeFile(ctx context.Context, c *candidate, name string, nzb *nzbProber, opts RunOptions, autoRepair, deepNZB, skipHydration bool) fileResult {
 	res := fileResult{name: name}
 	if c == nil || c.item == nil {
 		res.reason = "entry_not_found"
@@ -172,6 +207,7 @@ func (r *Service) probeFile(ctx context.Context, c *candidate, name string, nzb 
 			autoRepair:    autoRepair,
 			deepAudit:     deepNZB,
 			verifyContent: opts.VerifyContent != nil && *opts.VerifyContent,
+			skipHydration: skipHydration,
 		})
 	}
 	return r.probeTorrentFile(ctx, entry, file, name, res, opts)

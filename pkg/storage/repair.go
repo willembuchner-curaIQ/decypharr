@@ -246,6 +246,15 @@ type EntryHealth struct {
 	PAR2MissingArticles int             `json:"par2_missing_articles,omitempty"`
 	PAR2RepairedRanges  int             `json:"par2_repaired_ranges,omitempty"`
 
+	// HydrationFailedAt records the last time PAR2 hydration was attempted for
+	// this entry and failed for a reason that will not resolve on its own (no
+	// Arr association, release no longer obtainable, release carries no parity).
+	// Sweeps skip re-attempting those; a manual hydration request ignores it.
+	// Operational failures such as an exhausted storage budget are deliberately
+	// not recorded, so they retry on the next run.
+	HydrationFailedAt time.Time `json:"hydration_failed_at,omitzero"`
+	HydrationReason   string    `json:"hydration_reason,omitempty"`
+
 	Dirty       bool   `json:"dirty"`
 	DirtyReason string `json:"dirty_reason,omitempty"`
 

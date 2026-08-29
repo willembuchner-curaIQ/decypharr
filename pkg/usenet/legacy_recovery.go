@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/rs/zerolog"
+
 	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
@@ -238,7 +240,12 @@ func (u *Usenet) hydrateLegacyNZB(ctx context.Context, nzoID, sourceName string,
 		sourceName = legacy.Name + ".nzb"
 	}
 
-	prs := parser.NewParser(u.nntp, max(1, u.processingMaxConnections), u.logger.With().Str("component", "legacy-par2-hydration").Logger())
+	// Hydration replays whole legacy releases whose articles are often long
+	// gone, so the parser's per-group warnings are the expected case here rather
+	// than a signal, and at library scale they drowned out real events. The
+	// hydration counters on the repair status endpoint carry the outcome, so the
+	// parser runs silent.
+	prs := parser.NewParser(u.nntp, max(1, u.processingMaxConnections), zerolog.Nop())
 	preflight, err := prs.ParseRecoveryManifest(sourceName, content)
 	if err != nil {
 		return fmt.Errorf("parse reacquired NZB topology: %w", err)
@@ -305,13 +312,12 @@ func (u *Usenet) hydrateLegacyNZB(ctx context.Context, nzoID, sourceName string,
 		return fmt.Errorf("persist enriched PAR2 manifest: %w", err)
 	}
 
-	mapped := 0
 	if err := u.nzbStorage.UpdateNZB(nzoID, func(current *storage.NZB) error {
 		if err := validateLegacyLogicalTopology(legacy, current); err != nil {
 			return err
 		}
 		var applyErr error
-		mapped, applyErr = applyLegacySegmentOrigins(current, processed)
+		_, applyErr = applyLegacySegmentOrigins(current, processed)
 		return applyErr
 	}); err != nil {
 		return fmt.Errorf("persist hydrated NZB metadata: %w", err)
@@ -319,10 +325,6 @@ func (u *Usenet) hydrateLegacyNZB(ctx context.Context, nzoID, sourceName string,
 
 	committed = true
 	u.invalidateIdleNZBFileSystems(nzoID)
-	u.logger.Info().
-		Str("nzb_id", nzoID).
-		Int("mapped_segments", mapped).
-		Msg("Hydrated legacy NZB with PAR2 recovery provenance")
 	return nil
 }
 
