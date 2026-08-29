@@ -229,15 +229,13 @@ func (w *legacyNZBHydrationWorker) run(ctx context.Context, done chan struct{}) 
 			continue
 		}
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-slots }()
 			err := w.deps.hydrate(attemptCtx, attempt.nzbID, attempt.source)
 			cause := context.Cause(attemptCtx)
 			cleanup()
 			w.finishAttempt(*attempt, err, cause, time.Now())
-		}()
+		})
 	}
 }
 
