@@ -21,7 +21,6 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/version"
 	"github.com/sourcegraph/conc/iter"
-	"golang.org/x/crypto/bcrypt"
 )
 
 type mountCacheCleaner interface {
@@ -484,8 +483,9 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// Create response with API token info
 	type ConfigResponse struct {
 		*config.Config
-		APIToken     string `json:"api_token,omitempty"`
-		AuthUsername string `json:"auth_username,omitempty"`
+		APIToken      string `json:"api_token,omitempty"`
+		AuthUsername  string `json:"auth_username,omitempty"`
+		AuthTokenOnly bool   `json:"auth_token_only"`
 	}
 
 	response := &ConfigResponse{Config: cfg}
@@ -497,6 +497,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			response.APIToken = auth.APIToken
 		}
 		response.AuthUsername = auth.Username
+		response.AuthTokenOnly = auth.TokenOnly
 	}
 
 	utils.JSONResponse(w, response, http.StatusOK)
@@ -1072,6 +1073,7 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		Username        string `json:"username"`
 		Password        string `json:"password"`
 		ConfirmPassword string `json:"confirm_password"`
+		TokenOnly       bool   `json:"token_only"`
 	}
 	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1084,12 +1086,52 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		auth = &config.Auth{}
 	}
 
+	// Token-only: the API token becomes the sole credential. Any stored
+	// username and password are dropped so nothing else can authenticate.
+	if req.TokenOnly {
+		cfg.UseAuth = true
+		auth.Username = ""
+		auth.Password = ""
+		auth.TokenOnly = true
+		if err := cfg.SaveAuth(auth); err != nil {
+			s.logger.Error().Err(err).Msg("Failed to save auth config")
+			http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
+			return
+		}
+		// Save mints an API token when none exists yet.
+		if err := cfg.Save(); err != nil {
+			s.logger.Error().Err(err).Msg("Failed to save config")
+			http.Error(w, "Failed to save configuration", http.StatusInternalServerError)
+			return
+		}
+
+		token := ""
+		if saved := cfg.GetAuth(); saved != nil {
+			token = saved.APIToken
+		}
+		message := "Token-only authentication enabled"
+		if cfg.EnableWebdavAuth {
+			// WebDAV authenticates with the username and password only; it never
+			// accepts the API token, so it now has no credential to check.
+			s.logger.Warn().Msg("token-only auth enabled while WebDAV auth is on; WebDAV will reject every client")
+			message += ". WebDAV auth is still enabled but has no credential to accept — turn it off, or WebDAV clients will be rejected"
+		}
+		utils.JSONResponse(w, map[string]string{
+			"message": message,
+			"token":   token,
+		}, http.StatusOK)
+		return
+	}
+
 	// Check if trying to disable authentication (both empty)
 	if req.Username == "" && req.Password == "" {
-		// Disable authentication
+		// Disable authentication. The API token is cleared with the credentials
+		// so re-enabling auth later does not silently restore the old token.
 		cfg.UseAuth = false
 		auth.Username = ""
 		auth.Password = ""
+		auth.APIToken = ""
+		auth.TokenOnly = false
 		if err := cfg.SaveAuth(auth); err != nil {
 			s.logger.Error().Err(err).Msg("Failed to save auth config")
 			http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
@@ -1121,23 +1163,9 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hash the password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("Failed to hash password")
-		http.Error(w, "Failed to process password", http.StatusInternalServerError)
-		return
-	}
-
-	// Update auth settings
-	auth.Username = req.Username
-	auth.Password = string(hashedPassword)
-	cfg.UseAuth = true
-
-	// Save auth config
-	if err := cfg.SaveAuth(auth); err != nil {
+	if err := cfg.SetCredentials(req.Username, req.Password); err != nil {
 		s.logger.Error().Err(err).Msg("Failed to save auth config")
-		http.Error(w, "Failed to save authentication settings", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

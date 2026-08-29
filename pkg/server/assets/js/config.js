@@ -1876,6 +1876,14 @@ class ConfigManager {
         if (usernameField && config.auth_username) {
             usernameField.value = config.auth_username;
         }
+
+        const tokenOnlyField = document.getElementById('auth-token-only');
+        if (tokenOnlyField) {
+            tokenOnlyField.checked = !!config.auth_token_only;
+            if (typeof toggleTokenOnly === 'function') {
+                toggleTokenOnly();
+            }
+        }
     }
 
     // Virtual Folders Management

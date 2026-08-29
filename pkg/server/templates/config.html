@@ -412,6 +412,18 @@
                         <!-- Username/Password Section -->
                         <div class="space-y-4">
                             <h4 class="font-semibold text-base">Web Authentication</h4>
+                            <div>
+                                <label class="label cursor-pointer justify-start gap-3">
+                                    <input type="checkbox" class="checkbox checkbox-primary" id="auth-token-only"
+                                           onchange="toggleTokenOnly();">
+                                    <div>
+                                        <span class="label-text font-medium">Token-only authentication</span>
+                                        <div class="label-text-alt">No username or password. The API token below
+                                            becomes the only credential, and also logs you into this UI. WebDAV never
+                                            accepts the token, so leave WebDAV auth off in this mode.</div>
+                                    </div>
+                                </label>
+                            </div>
                             <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                                 <div>
                                     <label class="label">
@@ -2241,13 +2253,27 @@ fe80::/10</textarea>
         }
     }
 
+    function toggleTokenOnly() {
+        const tokenOnly = document.getElementById('auth-token-only').checked;
+        ['auth-username', 'auth-password', 'auth-password-confirm'].forEach((id) => {
+            const field = document.getElementById(id);
+            if (field) {
+                field.disabled = tokenOnly;
+                if (tokenOnly) {
+                    field.value = '';
+                }
+            }
+        });
+    }
+
     async function updateAuthSettings() {
+        const tokenOnly = document.getElementById('auth-token-only').checked;
         const username = document.getElementById('auth-username').value;
         const password = document.getElementById('auth-password').value;
         const confirmPassword = document.getElementById('auth-password-confirm').value;
         const updateBtn = document.getElementById('update-auth-btn');
 
-        if (password !== confirmPassword) {
+        if (!tokenOnly && password !== confirmPassword) {
             window.decypharrUtils.createToast('Passwords do not match', 'error');
             return false;
         }
@@ -2261,7 +2287,8 @@ fe80::/10</textarea>
                 body: JSON.stringify({
                     username: username,
                     password: password,
-                    confirm_password: confirmPassword
+                    confirm_password: confirmPassword,
+                    token_only: tokenOnly
                 })
             });
 
@@ -2272,6 +2299,10 @@ fe80::/10</textarea>
 
             const data = await response.json();
             window.decypharrUtils.createToast(data.message, 'success');
+
+            if (data.token) {
+                document.getElementById('api-token-display').value = data.token;
+            }
 
             // Clear password fields for security
             document.getElementById('auth-password').value = '';

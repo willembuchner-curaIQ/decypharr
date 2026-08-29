@@ -100,6 +100,7 @@ class SetupWizard {
     setupEventListeners() {
         document.getElementById('auth-next-btn').addEventListener('click', () => this.handleAuthNext());
         document.getElementById('skip-auth-btn').addEventListener('click', () => this.handleSkipAuth());
+        document.getElementById('token-only-btn').addEventListener('click', () => this.handleTokenOnlyAuth());
         document.getElementById('debrid-back-btn').addEventListener('click', () => this.goToStep(1));
         document.getElementById('debrid-next-btn').addEventListener('click', () => this.handleDebridNext());
         document.getElementById('skip-debrid-btn').addEventListener('click', () => this.handleSkipDebrid());
@@ -221,6 +222,13 @@ class SetupWizard {
 
     handleSkipAuth() {
         this.setupState.step1 = {skip_auth: true};
+        this.goToStep(2);
+    }
+
+    handleTokenOnlyAuth() {
+        // No username or password: the server mints an API token and returns it
+        // when setup completes.
+        this.setupState.step1 = {token_only: true};
         this.goToStep(2);
     }
 
@@ -418,6 +426,8 @@ class SetupWizard {
         const authOverview = document.getElementById('overview-auth');
         if (this.setupState.step1 && this.setupState.step1.skip_auth) {
             authOverview.textContent = 'Authentication disabled (skipped)';
+        } else if (this.setupState.step1 && this.setupState.step1.token_only) {
+            authOverview.textContent = 'API token only (no username or password)';
         } else if (this.setupState.step1 && this.setupState.step1.username) {
             authOverview.textContent = `Username: ${this.setupState.step1.username}`;
         } else {
@@ -511,6 +521,16 @@ class SetupWizard {
             }
 
             const data = await response.json();
+
+            if (data.api_token) {
+                // The token is the only credential in token-only mode, so it has
+                // to be shown before the redirect.
+                window.prompt(
+                    'Save your API token now. It is your only credential, and it is also your password on the login page.',
+                    data.api_token,
+                );
+            }
+
             window.decypharrUtils.createToast('Setup completed successfully! Redirecting...', 'success');
 
             setTimeout(() => {

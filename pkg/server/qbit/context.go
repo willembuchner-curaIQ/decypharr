@@ -158,7 +158,9 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 		}
 		a = arr.New(category, "", "", false, downloadUncached, "", string(arr.SourceAuto))
 	}
-	if (username == "" || password == "") && cfg.UseAuth {
+	// In token-only mode the arr sends the API token as the password and may
+	// leave the username empty.
+	if (username == "" || password == "") && cfg.UseAuth && !config.VerifyToken(password) {
 		return nil, fmt.Errorf("unauthorized: Host and token are required for authentication(you've enabled authentication)")
 	}
 
@@ -170,7 +172,7 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 
 	if !arrValidated && cfg.UseAuth {
 		// If arr validation failed, try to use user auth validation
-		if !config.VerifyAuth(username, password) {
+		if !config.VerifyAuth(username, password) && !config.VerifyToken(password) {
 			return nil, fmt.Errorf("unauthorized: invalid credentials")
 		}
 	}

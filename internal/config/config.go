@@ -200,6 +200,12 @@ type Auth struct {
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
 	APIToken string `json:"api_token,omitempty"`
+
+	// TokenOnly makes the API token the sole credential: there is no username
+	// or password, so registration stays closed and the login page accepts the
+	// token in place of a password. WebDAV never accepts the token, in either
+	// mode.
+	TokenOnly bool `json:"token_only,omitempty"`
 }
 
 // RepairSource selects where the health checker enumerates entries from.
@@ -388,8 +394,8 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// generateAPIToken creates a new random API token
-func generateAPIToken() (string, error) {
+// GenerateAPIToken creates a new random API token
+func GenerateAPIToken() (string, error) {
 	bytes := make([]byte, 32) // 256-bit token
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
@@ -469,8 +475,19 @@ func (c *Config) SaveAuth(auth *Auth) error {
 	return os.WriteFile(c.AuthFile(), data, 0644)
 }
 
+// NeedsAuth reports whether auth is enabled but no credential has been set up
+// yet. That is the only state in which registration is open.
 func (c *Config) NeedsAuth() bool {
-	return c.UseAuth && (c.Auth == nil || c.Auth.Username == "" || c.Auth.Password == "")
+	if !c.UseAuth {
+		return false
+	}
+	if c.Auth == nil {
+		return true
+	}
+	if c.Auth.TokenOnly {
+		return c.Auth.APIToken == ""
+	}
+	return c.Auth.Username == "" || c.Auth.Password == ""
 }
 
 // migrateQBitTorrentToManager migrates deprecated QBitTorrent config to Manager
@@ -687,7 +704,7 @@ func (c *Config) setDefaults() {
 			c.Auth = &Auth{}
 		}
 		if c.Auth.APIToken == "" {
-			if token, err := generateAPIToken(); err == nil {
+			if token, err := GenerateAPIToken(); err == nil {
 				c.Auth.APIToken = token
 				// Save the updated auth config
 				_ = c.SaveAuth(c.Auth)
