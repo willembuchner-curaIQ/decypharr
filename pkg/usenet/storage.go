@@ -206,6 +206,35 @@ func (s *NZBStorage) GetNZB(id string) (*storage.NZB, error) {
 	return decodeNZB(data)
 }
 
+// RecoveryOriginState reports the Arr category and whether the NZB still lacks
+// raw article provenance on any content segment. The legacy hydration scan asks
+// this of every stored NZB, so it avoids GetNZB: for v2 blobs it reads the
+// header and numeric columns only, never inflating the message-id region or
+// allocating a segment map. Legacy proto files fall back to a full decode.
+func (s *NZBStorage) RecoveryOriginState(id string) (category string, missing bool, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	path := s.metaFilePath(id)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, fmt.Errorf("nzb not found: %s", id)
+		}
+		return "", false, fmt.Errorf("failed to read NZB meta file: %w", err)
+	}
+
+	if isCodecV2(data) {
+		return decodeNZBV2RecoveryOriginState(data)
+	}
+
+	nzb, err := decodeNZB(data)
+	if err != nil {
+		return "", false, err
+	}
+	return nzb.Category, hasMissingRecoveryOrigins(nzb), nil
+}
+
 // GetNZBHeader retrieves an NZB without its segment map. It is far cheaper than
 // GetNZB for the common case of only needing scalar/file metadata (status,
 // path, file list). For legacy proto files it falls back to a full decode.

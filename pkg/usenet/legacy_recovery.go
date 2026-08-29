@@ -185,11 +185,11 @@ func (u *Usenet) NeedsPAR2Hydration(nzoID string) (bool, error) {
 		return false, errors.New("NZB id is empty")
 	}
 
-	nzb, err := u.nzbStorage.GetNZB(nzoID)
+	_, missing, err := u.nzbStorage.RecoveryOriginState(nzoID)
 	if err != nil {
 		return false, fmt.Errorf("load NZB metadata: %w", err)
 	}
-	return hasMissingRecoveryOrigins(nzb), nil
+	return missing, nil
 }
 
 // LegacyNZBIDs returns a stable snapshot of stored NZB identifiers for the
@@ -215,11 +215,7 @@ func (u *Usenet) LegacyNZBHydrationCandidate(nzoID string) (arrName string, need
 	if u == nil || u.nzbStorage == nil {
 		return "", false, errors.New("usenet NZB storage is unavailable")
 	}
-	nzb, err := u.nzbStorage.GetNZB(nzoID)
-	if err != nil {
-		return "", false, err
-	}
-	return nzb.Category, hasMissingRecoveryOrigins(nzb), nil
+	return u.nzbStorage.RecoveryOriginState(nzoID)
 }
 
 func (u *Usenet) hydrateLegacyNZB(ctx context.Context, nzoID, sourceName string, content []byte) (resultErr error) {
