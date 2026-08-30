@@ -3,6 +3,7 @@ package reacquire
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -219,7 +220,7 @@ func (i *Indexer) handle(ctx context.Context, request indexRequest) {
 	managed, err := i.catalog.ListManagedFiles(ctx, request.entryID)
 	if err == nil {
 		var stats matchStats
-		stats, err = i.reconcile(ctx, instance, request.entryID, managed)
+		stats, err = i.reconcile(ctx, instance, request, managed)
 		if err == nil && stats.matched() > 0 {
 			stats.fields(i.logger.Info()).
 				Str("arr", request.arrName).
@@ -256,7 +257,7 @@ func (i *Indexer) handleRefresh(ctx context.Context, request indexRequest) {
 			continue
 		}
 		started := time.Now()
-		stats, err := i.reconcile(ctx, instance, "", managed)
+		stats, err := i.reconcile(ctx, instance, indexRequest{}, managed)
 		if err != nil {
 			failed = true
 			i.logger.Warn().Err(err).Str("arr", instance.Name).Msg("Arr index reconciliation failed")
@@ -283,6 +284,66 @@ func (i *Indexer) handleRefresh(ctx context.Context, request indexRequest) {
 	}
 }
 
+// libraryFor reads the Arr files a reconcile matches against. A targeted index
+// narrows the read to the series or movies the entry was imported into: a full
+// Sonarr scan lists every series and then costs two requests per series, and it
+// used to run again on every backoff attempt.
+//
+// It widens to the whole library when history does not name the media, and on
+// the final attempt: history names the media a download was grabbed for, which
+// a manual import can move, and a targeted index must not give up on that
+// difference. The widened scan then runs once instead of on every attempt.
+func (i *Indexer) libraryFor(ctx context.Context, instance arr.Arr, request indexRequest, managed []ManagedFile) ([]arr.LibraryFile, error) {
+	if request.entryID != "" && request.attempt < len(targetedIndexBackoff) {
+		if mediaIDs := i.targetedMediaIDs(ctx, instance, managed); len(mediaIDs) > 0 {
+			library, err := i.arrs.LibraryFilesForMedia(ctx, instance.Name, mediaIDs)
+			if err == nil {
+				return library, nil
+			}
+			i.logger.Debug().Err(err).
+				Str("arr", instance.Name).
+				Str("entry_id", request.entryID).
+				Msg("Targeted Arr library read failed, falling back to a full scan")
+		}
+	}
+	return i.arrs.LibraryFiles(ctx, instance.Name)
+}
+
+// targetedMediaIDs resolves the series or movies an entry was imported into,
+// from the Arr history of the downloads that produced its managed files. It
+// returns nothing when the files carry no download ID or history no longer
+// holds the record, which sends the caller back to a full scan.
+func (i *Indexer) targetedMediaIDs(ctx context.Context, instance arr.Arr, managed []ManagedFile) []int {
+	var downloads []string
+	for _, file := range managed {
+		if file.DownloadID != "" && !slices.Contains(downloads, file.DownloadID) {
+			downloads = append(downloads, file.DownloadID)
+		}
+	}
+
+	var ids []int
+	for _, downloadID := range downloads {
+		records, err := i.arrs.DownloadHistory(ctx, instance.Name, downloadID, "")
+		if err != nil {
+			i.logger.Debug().Err(err).
+				Str("arr", instance.Name).
+				Str("download_id", downloadID).
+				Msg("Targeted Arr index could not read download history")
+			continue
+		}
+		for _, record := range records {
+			id := record.SeriesID
+			if instance.Type == arr.Radarr {
+				id = record.MovieID
+			}
+			if id > 0 && !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
+}
+
 // retryTargeted waits for the Arr to import the entry, then indexes it again.
 func (i *Indexer) retryTargeted(ctx context.Context, request indexRequest, stats matchStats) {
 	if ctx.Err() != nil {
@@ -304,8 +365,9 @@ func (i *Indexer) retryTargeted(ctx context.Context, request indexRequest, stats
 		Msg("Targeted Arr index gave up: no library file matched the entry")
 }
 
-func (i *Indexer) reconcile(ctx context.Context, instance arr.Arr, entryID string, managed []ManagedFile) (matchStats, error) {
-	library, err := i.arrs.LibraryFiles(ctx, instance.Name)
+func (i *Indexer) reconcile(ctx context.Context, instance arr.Arr, request indexRequest, managed []ManagedFile) (matchStats, error) {
+	entryID := request.entryID
+	library, err := i.libraryFor(ctx, instance, request, managed)
 	if err != nil {
 		return matchStats{}, err
 	}

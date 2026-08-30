@@ -168,15 +168,94 @@ func (s *Service) radarrLibraryFiles(ctx context.Context, instance Arr) ([]Libra
 
 	files := make([]LibraryFile, 0, len(movies))
 	for _, movie := range movies {
-		if movie.MovieFile.ID <= 0 || movie.MovieFile.Path == "" {
-			continue
+		if file, ok := movieLibraryFile(movie); ok {
+			files = append(files, file)
 		}
-		files = append(files, LibraryFile{
-			ArrFileID: movie.MovieFile.ID,
-			Path:      movie.MovieFile.Path,
-			Size:      movie.MovieFile.Size,
-			MovieID:   cmp.Or(movie.MovieFile.MovieID, movie.ID),
-		})
 	}
 	return files, nil
+}
+
+// movieLibraryFile reads the imported file off a Radarr movie. It reports false
+// when the movie has none.
+func movieLibraryFile(movie radarrMovie) (LibraryFile, bool) {
+	if movie.MovieFile.ID <= 0 || movie.MovieFile.Path == "" {
+		return LibraryFile{}, false
+	}
+	return LibraryFile{
+		ArrFileID: movie.MovieFile.ID,
+		Path:      movie.MovieFile.Path,
+		Size:      movie.MovieFile.Size,
+		MovieID:   cmp.Or(movie.MovieFile.MovieID, movie.ID),
+	}, true
+}
+
+// radarrMovieFiles reads the imported file of one movie. A movie the Arr no
+// longer has contributes nothing.
+func (s *Service) radarrMovieFiles(ctx context.Context, instance Arr, movieID int) ([]LibraryFile, error) {
+	var movie radarrMovie
+	endpoint := fmt.Sprintf("api/v3/movie/%d", movieID)
+	resp, err := s.get(ctx, instance, endpoint, &movie)
+	if err != nil {
+		return nil, fmt.Errorf("get radarr movie %d: %w", movieID, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if err := expectStatus(resp, http.StatusOK); err != nil {
+		return nil, fmt.Errorf("get radarr movie %d: %w", movieID, err)
+	}
+	if file, ok := movieLibraryFile(movie); ok {
+		return []LibraryFile{file}, nil
+	}
+	return nil, nil
+}
+
+// LibraryFilesForMedia enumerates the imported files of specific series or
+// movies. A targeted index only ever matches against the media an entry was
+// imported into, and a full Sonarr scan costs two requests per series in the
+// library — repeated on every backoff attempt.
+func (s *Service) LibraryFilesForMedia(ctx context.Context, name string, mediaIDs []int) ([]LibraryFile, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return nil, err
+	}
+	ids := slices.Clone(mediaIDs)
+	slices.Sort(ids)
+	ids = slices.Compact(ids)
+	ids = slices.DeleteFunc(ids, func(id int) bool { return id <= 0 })
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	var read func(context.Context, int) ([]LibraryFile, error)
+	switch instance.Type {
+	case Sonarr:
+		read = func(ctx context.Context, id int) ([]LibraryFile, error) {
+			return s.sonarrSeriesFiles(ctx, instance, id)
+		}
+	case Radarr:
+		read = func(ctx context.Context, id int) ([]LibraryFile, error) {
+			return s.radarrMovieFiles(ctx, instance, id)
+		}
+	default:
+		return nil, fmt.Errorf("%w: %s", ErrUnsupportedType, instance.Type)
+	}
+
+	byMedia := make([][]LibraryFile, len(ids))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(sonarrLibraryConcurrency)
+	for i, id := range ids {
+		group.Go(func() error {
+			files, err := read(groupCtx, id)
+			if err != nil {
+				return err
+			}
+			byMedia[i] = files
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return slices.Concat(byMedia...), nil
 }

@@ -13,8 +13,6 @@ import (
 	"strings"
 	"time"
 
-	json "github.com/bytedance/sonic"
-
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
@@ -122,7 +120,7 @@ func (ad *AllDebrid) doAccountRequest(account *account.Account, endpoint string,
 	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -157,7 +155,7 @@ func (ad *AllDebrid) doRequest(endpoint string, queryParams map[string]string, r
 	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -201,7 +199,7 @@ func (ad *AllDebrid) doPostFile(endpoint string, fileData []byte, result any) (*
 	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -524,7 +522,7 @@ func (ad *AllDebrid) restartTorrent(torrentID string) error {
 	}
 
 	var result restartMagnetResponse
-	if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := request.DecodeJSON(resp, &result); err != nil {
 		return fmt.Errorf("decode AllDebrid restart response: %w", err)
 	}
 	if result.Error != nil {
@@ -668,7 +666,7 @@ func (ad *AllDebrid) CheckFile(ctx context.Context, _, link string) error {
 	}
 
 	var data LinkInfosResponse
-	if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := request.DecodeJSON(resp, &data); err != nil {
 		return err
 	}
 	if data.Status != "success" {

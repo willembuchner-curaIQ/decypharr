@@ -78,10 +78,11 @@ func (s *Service) do(
 	// the body lifecycle is owned here.
 	defer request.DrainAndCloseResponse(resp)
 
-	// Decode straight from the body: a full Sonarr series list should not sit
-	// on the heap as raw bytes alongside the decoded value.
+	// Read the body before decoding rather than streaming off it: a full Sonarr
+	// series list costs quadratic allocation through a streaming decoder. See
+	// request.DecodeJSON.
 	if out != nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(out); err != nil && err != io.EOF {
+		if err := request.DecodeJSON(resp, out); err != nil && !errors.Is(err, io.EOF) {
 			return resp, fmt.Errorf("decode response: %w", err)
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
@@ -204,7 +205,7 @@ func TestReconcileBuildsIndexFromSymlinks(t *testing.T) {
 		managedRoot: filepath.Join(dir, "managed"),
 	}
 
-	stats, err := indexer.reconcile(t.Context(), instance, "", managed)
+	stats, err := indexer.reconcile(t.Context(), instance, indexRequest{}, managed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,9 +229,11 @@ func (c fixedManagedCatalog) ListManagedFiles(context.Context, string) ([]Manage
 
 type recordingBindingWriter struct {
 	replacement []Binding
+	upserts     []Binding
 }
 
-func (*recordingBindingWriter) UpsertBinding(Binding) error {
+func (w *recordingBindingWriter) UpsertBinding(binding Binding) error {
+	w.upserts = append(w.upserts, binding)
 	return nil
 }
 
@@ -403,5 +406,110 @@ func TestMatchLibraryFilesSeparatesUnknownEntryFromUnknownFile(t *testing.T) {
 	)
 	if stats.unknownFile != 1 || stats.unknownEntry != 1 {
 		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestReconcileTargetedReadsOnlyTheEntrysMovie(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "managed", "Movie.Release", "movie.mkv")
+	libraryPath := filepath.Join(dir, "library", "Movie.mkv")
+	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, libraryPath); err != nil {
+		t.Fatal(err)
+	}
+
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		paths = append(paths, request.URL.Path)
+		switch request.URL.Path {
+		case "/api/v3/history":
+			_, _ = fmt.Fprint(w, `{"page":1,"pageSize":100,"totalRecords":1,"records":[{"id":1,"downloadId":"download","eventType":"grabbed","movieId":9}]}`)
+		case "/api/v3/movie/9":
+			_, _ = fmt.Fprintf(w, `{"id":9,"movieFile":{"id":42,"movieId":9,"path":%q}}`, libraryPath)
+		default:
+			t.Errorf("unexpected request to %q", request.URL.Path)
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	instance := arr.Arr{Name: "radarr", Host: server.URL, Token: "secret", Type: arr.Radarr}
+	arrs := arr.New()
+	arrs.AddOrUpdate(instance)
+	writer := new(recordingBindingWriter)
+	managed := []ManagedFile{{
+		EntryID:     "entry",
+		EntryName:   "Movie Release",
+		EntryFolder: "Movie.Release",
+		FileID:      "file",
+		FileName:    "movie.mkv",
+		DownloadID:  "download",
+	}}
+	indexer := &Indexer{
+		arrs:        arrs,
+		catalog:     fixedManagedCatalog(managed),
+		writer:      writer,
+		managedRoot: filepath.Join(dir, "managed"),
+	}
+
+	request := indexRequest{arrName: "radarr", entryID: "entry"}
+	stats, err := indexer.reconcile(t.Context(), instance, request, managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.matched() != 1 {
+		t.Fatalf("stats = %#v", stats)
+	}
+	if len(writer.upserts) != 1 {
+		t.Fatalf("upserts = %#v", writer.upserts)
+	}
+	if slices.Contains(paths, "/api/v3/movie") {
+		t.Fatalf("listed the whole library: %v", paths)
+	}
+}
+
+func TestReconcileTargetedWidensOnTheFinalAttempt(t *testing.T) {
+	dir := t.TempDir()
+	libraryPath := filepath.Join(dir, "library", "Movie.mkv")
+
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		paths = append(paths, request.URL.Path)
+		if request.URL.Path != "/api/v3/movie" {
+			http.NotFound(w, request)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `[{"id":9,"movieFile":{"id":42,"path":%q}}]`, libraryPath)
+	}))
+	defer server.Close()
+
+	instance := arr.Arr{Name: "radarr", Host: server.URL, Token: "secret", Type: arr.Radarr}
+	arrs := arr.New()
+	arrs.AddOrUpdate(instance)
+	managed := []ManagedFile{{
+		EntryID:     "entry",
+		EntryFolder: "Movie.Release",
+		FileID:      "file",
+		FileName:    "movie.mkv",
+		DownloadID:  "download",
+	}}
+	indexer := &Indexer{
+		arrs:        arrs,
+		catalog:     fixedManagedCatalog(managed),
+		writer:      new(recordingBindingWriter),
+		managedRoot: filepath.Join(dir, "managed"),
+	}
+
+	request := indexRequest{arrName: "radarr", entryID: "entry", attempt: len(targetedIndexBackoff)}
+	if _, err := indexer.reconcile(t.Context(), instance, request, managed); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(paths, "/api/v3/movie") {
+		t.Fatalf("final attempt did not widen to a full scan: %v", paths)
+	}
+	if slices.Contains(paths, "/api/v3/history") {
+		t.Fatalf("final attempt still read history: %v", paths)
 	}
 }
