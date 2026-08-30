@@ -3,6 +3,7 @@ package arr
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/pkg/strm"
 )
 
 // LibraryFile is the Arr-side identity of an imported media file.
@@ -569,12 +571,14 @@ type libraryMatch struct {
 
 func matchLibraryFiles(library []LibraryFile, managed []ManagedFile) []libraryMatch {
 	byPath := make(map[string][]ManagedFile, len(managed))
+	byIdentity := make(map[entryFileKey]ManagedFile, len(managed))
 	bySize := make(map[int64][]ManagedFile)
 	for _, file := range managed {
 		if file.Path != "" {
 			path := cleanAbsolutePath(file.Path)
 			byPath[path] = append(byPath[path], file)
 		}
+		byIdentity[entryFileKey{entryID: file.EntryID, fileID: file.FileID}] = file
 		if file.Size > 0 {
 			bySize[file.Size] = append(bySize[file.Size], file)
 		}
@@ -582,6 +586,12 @@ func matchLibraryFiles(library []LibraryFile, managed []ManagedFile) []libraryMa
 
 	candidates := make([]libraryMatch, 0, min(len(library), len(managed)))
 	for _, file := range library {
+		if key, ok := strmIdentity(file.Path); ok {
+			if managedFile, found := byIdentity[key]; found {
+				candidates = append(candidates, libraryMatch{library: file, managed: managedFile})
+			}
+			continue
+		}
 		if target := symlinkTarget(file.Path); target != "" {
 			pathMatches := byPath[target]
 			if len(pathMatches) == 1 {
@@ -613,6 +623,33 @@ func matchLibraryFiles(library []LibraryFile, managed []ManagedFile) []libraryMa
 		}
 	}
 	return matches
+}
+
+// maxStrmRead bounds a .strm read; a canonical stream URL is far smaller.
+const maxStrmRead = 8 << 10
+
+// strmIdentity reads a .strm library file and returns the managed file it
+// points at. Decypharr writes its own signed stream URLs, so the identity is
+// exact; a .strm written by anything else does not parse and is skipped.
+func strmIdentity(path string) (entryFileKey, bool) {
+	if !strings.EqualFold(filepath.Ext(path), ".strm") {
+		return entryFileKey{}, false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return entryFileKey{}, true
+	}
+	defer func() { _ = file.Close() }()
+
+	content, err := io.ReadAll(io.LimitReader(file, maxStrmRead))
+	if err != nil {
+		return entryFileKey{}, true
+	}
+	entryID, fileID, ok := strm.ParseURL(string(content))
+	if !ok {
+		return entryFileKey{}, true
+	}
+	return entryFileKey{entryID: entryID, fileID: fileID}, true
 }
 
 func symlinkTarget(path string) string {

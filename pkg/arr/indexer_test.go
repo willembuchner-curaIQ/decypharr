@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sirrobot01/decypharr/pkg/strm"
 )
 
 func TestMatchLibraryFilesRequiresExactIdentity(t *testing.T) {
@@ -191,5 +193,36 @@ func TestCarryForwardBindingRequiresCurrentInstanceAndPath(t *testing.T) {
 	bindings := carryForwardBindings(instance, 2, nil, []Binding{old}, library, managed)
 	if len(bindings) != 1 || bindings[0].ArrInstanceFingerprint != instance.InstanceFingerprint() {
 		t.Fatalf("current binding was not carried forward: %#v", bindings)
+	}
+}
+
+func TestMatchLibraryFilesBindsStrmByIdentity(t *testing.T) {
+	dir := t.TempDir()
+	const (
+		entryID = "0123456789abcdef0123456789abcdef"
+		fileID  = "fedcba9876543210fedcba9876543210"
+	)
+	libraryPath := filepath.Join(dir, "Movie (2026).strm")
+	url := strm.FileURL("http://decypharr.test", "secret", entryID, fileID, "Movie.mkv")
+	if err := os.WriteFile(libraryPath, []byte(url), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	foreignPath := filepath.Join(dir, "Foreign.strm")
+	if err := os.WriteFile(foreignPath, []byte("http://example.com/other.mkv"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	matches := matchLibraryFiles(
+		[]LibraryFile{
+			{ArrFileID: 42, Path: libraryPath, Size: 120},
+			{ArrFileID: 43, Path: foreignPath, Size: 120},
+		},
+		[]ManagedFile{{EntryID: entryID, FileID: fileID, Path: "/downloads/Movie.mkv", Size: 1 << 30}},
+	)
+	if len(matches) != 1 || matches[0].library.ArrFileID != 42 {
+		t.Fatalf("matches = %#v, want only the Decypharr .strm", matches)
+	}
+	if matches[0].managed.EntryID != entryID || matches[0].managed.FileID != fileID {
+		t.Fatalf("managed identity = %#v", matches[0].managed)
 	}
 }
