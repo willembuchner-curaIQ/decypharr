@@ -93,7 +93,7 @@ func (r *Service) enumerateManagedCandidates(ctx context.Context) (map[string]*c
 	return candidates, nil
 }
 
-func (r *Service) filterDueCandidates(candidates map[string]*candidate, opts RunOptions, autoRepair bool) (map[string]*candidate, int) {
+func (r *Service) filterDueCandidates(candidates map[string]*candidate, opts RunOptions) (map[string]*candidate, int) {
 	if opts.IgnoreLastChecked {
 		return candidates, 0
 	}
@@ -104,10 +104,6 @@ func (r *Service) filterDueCandidates(candidates map[string]*candidate, opts Run
 	for name, candidate := range candidates {
 		health, _ := r.storage.GetEntryHealth(name)
 		if health == nil || health.IsDue(now, recheck) {
-			due[name] = candidate
-			continue
-		}
-		if autoRepair && opts.DeepNZB && (health.Protocol == config.ProtocolNZB || health.Protocol == "") {
 			due[name] = candidate
 			continue
 		}

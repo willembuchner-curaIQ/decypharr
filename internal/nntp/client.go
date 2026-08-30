@@ -711,18 +711,6 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 	return ErrAllProvidersFailed
 }
 
-// ExecuteBackgroundWithFailover runs one provider-failover operation through
-// the shared repair pool so background BODY traffic shares its connection cap
-// with availability scans.
-func (c *Client) ExecuteBackgroundWithFailover(ctx context.Context, fn func(conn *Connection) error) error {
-	if c.closed.Load() {
-		return errors.New("nntp client is closed")
-	}
-	return c.repairPool.execute(ctx, func(*Client) error {
-		return c.ExecuteWithFailover(ctx, fn)
-	})
-}
-
 // ErrAllProvidersFailed marks an error returned after ExecuteWithFailover
 // exhausted both its per-provider retries and provider failover; outer retry
 // loops should not multiply attempts on it.
@@ -1552,16 +1540,6 @@ func excludeForArticleNotFound(exclusions *providerExclusions, provider config.U
 // BatchStat checks the availability of many message IDs using NNTP STAT and
 // stops queued work after the first article is definitively missing.
 func (c *Client) BatchStat(ctx context.Context, messageIDs []string) (*BatchStatResult, error) {
-	return c.batchStat(ctx, messageIDs, true)
-}
-
-// BatchStatAll checks every message ID, including those queued after a missing
-// article is found. It shares the same bounded repair pool as BatchStat.
-func (c *Client) BatchStatAll(ctx context.Context, messageIDs []string) (*BatchStatResult, error) {
-	return c.batchStat(ctx, messageIDs, false)
-}
-
-func (c *Client) batchStat(ctx context.Context, messageIDs []string, stopOnMissing bool) (*BatchStatResult, error) {
 	if c.closed.Load() {
 		return nil, errors.New("nntp client is closed")
 	}
@@ -1569,11 +1547,7 @@ func (c *Client) batchStat(ctx context.Context, messageIDs []string, stopOnMissi
 		return &BatchStatResult{}, nil
 	}
 
-	workCtx := ctx
-	cancel := func() {}
-	if stopOnMissing {
-		workCtx, cancel = context.WithCancel(ctx)
-	}
+	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	// Per-chunk batch size is adaptive: we want enough chunks to keep
@@ -1640,12 +1614,10 @@ func (c *Client) batchStat(ctx context.Context, messageIDs []string, stopOnMissi
 			// Per-segment provider failover has already completed inside
 			// this chunk before we get here, so this never short-circuits
 			// failover.
-			if stopOnMissing {
-				for _, r := range results {
-					if !r.Available && IsArticleNotFoundError(r.Error) {
-						bailOnce.Do(cancel)
-						break
-					}
+			for _, r := range results {
+				if !r.Available && IsArticleNotFoundError(r.Error) {
+					bailOnce.Do(cancel)
+					break
 				}
 			}
 		})

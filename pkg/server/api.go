@@ -713,34 +713,11 @@ func (s *Server) handleRepairStatus(w http.ResponseWriter, r *http.Request) {
 	utils.JSONResponse(w, svc.Status(), http.StatusOK)
 }
 
-// handleHydrateLegacyNZBs starts a repair run dedicated to restoring PAR2
-// provenance for legacy NZBs. Hydration is otherwise only attempted as part of
-// probing a candidate, so this is the manual escape hatch: it forces a retry of
-// entries whose previous attempt failed persistently.
-func (s *Server) handleHydrateLegacyNZBs(w http.ResponseWriter, r *http.Request) {
-	svc := s.manager.Repair()
-	if svc == nil {
-		http.Error(w, "Repair service not available", http.StatusServiceUnavailable)
-		return
-	}
-	id, err := svc.RunNow(repair.RunOptions{
-		IgnoreLastChecked: true,
-		ForceHydration:    true,
-		ProtocolScope:     string(config.ProtocolNZB),
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	utils.JSONResponse(w, map[string]string{"run_id": id}, http.StatusOK)
-}
-
 func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IgnoreLastChecked bool   `json:"ignore_last_checked,omitempty"`
 		Force             bool   `json:"force,omitempty"`
 		AutoRepair        *bool  `json:"auto_repair,omitempty"`
-		DeepNZB           bool   `json:"deep_nzb,omitempty"`
 		UnrestrictLink    bool   `json:"unrestrict_link,omitempty"`
 		VerifyContent     *bool  `json:"verify_content,omitempty"`
 		Protocol          string `json:"protocol,omitempty"`
@@ -766,13 +743,6 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 		autoRepair = new(true)
 	case "0", "false", "no", "off":
 		autoRepair = new(false)
-	}
-	deepNZB := req.DeepNZB
-	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("deep_nzb"))) {
-	case "1", "true", "yes", "on":
-		deepNZB = true
-	case "0", "false", "no", "off":
-		deepNZB = false
 	}
 	unrestrictLink := req.UnrestrictLink
 	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("unrestrict_link"))) {
@@ -810,7 +780,6 @@ func (s *Server) handleRunRepair(w http.ResponseWriter, r *http.Request) {
 	id, err := svc.RunNow(repair.RunOptions{
 		IgnoreLastChecked: ignoreLastChecked,
 		AutoRepair:        autoRepair,
-		DeepNZB:           deepNZB,
 		UnrestrictLink:    unrestrictLink,
 		VerifyContent:     verifyContent,
 		ProtocolScope:     protocolScope,

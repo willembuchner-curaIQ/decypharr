@@ -32,11 +32,11 @@ type RepairPool struct {
 	once    sync.Once
 }
 
-// repairTask describes one bounded background operation.
+// repairTask describes one bounded STAT batch.
 type repairTask struct {
-	ctx  context.Context
-	run  func(*Client) ([]StatResult, error)
-	done func(results []StatResult, err error)
+	ctx        context.Context
+	messageIDs []string
+	done       func(results []StatResult, err error)
 }
 
 // errRepairPoolClosed is returned by Submit after Stop has been called.
@@ -136,43 +136,10 @@ func (p *RepairPool) Capacity() int {
 // an error and does NOT call done when the caller's ctx expires before a
 // worker takes the task, or when the pool has been stopped.
 func (p *RepairPool) Submit(ctx context.Context, msgIDs []string, done func([]StatResult, error)) error {
-	return p.submit(repairTask{
-		ctx: ctx,
-		run: func(c *Client) ([]StatResult, error) {
-			return c.batchStatAcrossProviders(ctx, msgIDs)
-		},
-		done: done,
-	})
-}
-
-func (p *RepairPool) execute(ctx context.Context, run func(*Client) error) error {
-	result := make(chan error, 1)
-	err := p.submit(repairTask{
-		ctx: ctx,
-		run: func(c *Client) ([]StatResult, error) {
-			return nil, run(c)
-		},
-		done: func(_ []StatResult, err error) {
-			result <- err
-		},
-	})
-	if err != nil {
-		return err
-	}
-	select {
-	case err := <-result:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-p.quit:
-		return errRepairPoolClosed
-	}
-}
-
-func (p *RepairPool) submit(task repairTask) error {
 	if p == nil {
 		return errRepairPoolClosed
 	}
+	task := repairTask{ctx: ctx, messageIDs: msgIDs, done: done}
 	// quit takes priority: once Stop closes it, refuse new work even if
 	// the buffered tasks channel still has room.
 	select {
@@ -183,8 +150,8 @@ func (p *RepairPool) submit(task repairTask) error {
 	select {
 	case p.tasks <- task:
 		return nil
-	case <-task.ctx.Done():
-		return task.ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-p.quit:
 		return errRepairPoolClosed
 	}
@@ -203,8 +170,8 @@ func (p *RepairPool) Stop() {
 	p.wg.Wait()
 }
 
-// worker runs queued operations until the pool stops. Its worker count is the
-// shared connection cap for STAT scans and background BODY traffic.
+// worker runs queued STAT batches until the pool stops. Its worker count is the
+// shared connection cap for availability scans.
 func (p *RepairPool) worker(c *Client) {
 	defer p.wg.Done()
 	for {
@@ -221,7 +188,7 @@ func (p *RepairPool) worker(c *Client) {
 				t.done(nil, err)
 				continue
 			}
-			results, err := t.run(c)
+			results, err := c.batchStatAcrossProviders(t.ctx, t.messageIDs)
 			t.done(results, err)
 		}
 	}

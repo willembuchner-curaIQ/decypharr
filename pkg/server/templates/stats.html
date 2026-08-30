@@ -1054,80 +1054,6 @@
             streamsContent.innerHTML = html;
         }
 
-        // PAR2 recovery counters, from Usenet.Stats()["par2_recovery"].
-        function renderPar2Stats(par2) {
-            if (!par2) {
-                return '';
-            }
-
-            const attempts = par2.repair_attempts || 0;
-            const successes = par2.repair_successes || 0;
-            const failures = par2.repair_failures || 0;
-            const successRate = attempts ? `${(successes / attempts * 100).toFixed(1)}%` : '-';
-            const store = par2.store || {};
-
-            const stat = (title, value, tone) =>
-                `<div class="stat">
-                    <div class="stat-title text-xs">${title}</div>
-                    <div class="stat-value text-sm ${tone || ''}">${value}</div>
-                </div>`;
-
-            // Only reasons that actually fired are worth the space.
-            const reasons = Object.entries(par2.failure_reasons || {})
-                .filter(([, count]) => count > 0)
-                .map(([reason, count]) =>
-                    `<span class="badge badge-ghost badge-sm">${reason.replace(/_/g, ' ')}: ${formatNumber(count)}</span>`)
-                .join('');
-
-            return `
-                <div class="card bg-base-200">
-                    <div class="card-body p-4">
-                        <div class="flex items-center gap-2">
-                            <h3 class="card-title text-lg">PAR2 Repair</h3>
-                            <span class="badge badge-warning badge-sm">alpha</span>
-                        </div>
-                        <p class="text-sm text-base-content/70">Rebuilds missing or corrupt articles from recovery data.</p>
-
-                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
-                            ${stat('Repair Attempts', formatNumber(attempts))}
-                            ${stat('Repaired', formatNumber(successes), 'text-success')}
-                            ${stat('Failed', formatNumber(failures), 'text-error')}
-                            ${stat('Success Rate', successRate, 'text-info')}
-                        </div>
-
-                        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-2">
-                            ${stat('Patch Hits', formatNumber(par2.patch_hits || 0))}
-                            ${stat('BODY Calls', formatNumber(par2.body_calls || 0))}
-                            ${stat('Recovery Downloaded', window.decypharrUtils.formatBytes(par2.recovery_payload_bytes || 0))}
-                            ${stat('Patches Written', window.decypharrUtils.formatBytes(par2.patch_bytes || 0))}
-                        </div>
-
-                        <div class="mt-4">
-                            <h4 class="font-semibold mb-2 text-sm">
-                                <i class="bi bi-hdd text-primary"></i>
-                                Recovery Store
-                            </h4>
-                            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                                ${stat('Entries', formatNumber(store.entries || 0))}
-                                ${stat('On Disk', window.decypharrUtils.formatBytes(store.disk_bytes || 0))}
-                                ${stat('Recovery Slices', formatNumber(store.recovery_slices || 0))}
-                                ${stat('Cached Patches', formatNumber(store.patches || 0))}
-                            </div>
-                        </div>
-
-                        ${reasons ? `
-                        <div class="mt-4">
-                            <h4 class="font-semibold mb-2 text-sm">
-                                <i class="bi bi-exclamation-triangle text-warning"></i>
-                                Failure Reasons
-                            </h4>
-                            <div class="flex flex-wrap gap-2">${reasons}</div>
-                        </div>` : ''}
-                    </div>
-                </div>
-            `;
-        }
-
         function updateDebridProviders(debrids) {
             const debridContent = document.getElementById('debrid-content');
 
@@ -1383,8 +1309,7 @@
                 </div>
             `;
 
-            html += renderPar2Stats(usenetData.par2_recovery);
-            html += '</div>';
+			html += '</div>';
             usenetContent.innerHTML = html;
         }
 

@@ -15,7 +15,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 	"github.com/sourcegraph/conc/iter"
 )
@@ -114,8 +113,6 @@ type RARParser struct {
 	manager       *nntp.Client
 	maxConcurrent int
 	logger        zerolog.Logger
-	recovery      reader.ArticleRecovery
-	recoveryNZBID string
 }
 
 // NewRARParser creates a new RAR parser
@@ -125,11 +122,6 @@ func NewRARParser(manager *nntp.Client, maxConcurrent int, logger zerolog.Logger
 		maxConcurrent: maxConcurrent,
 		logger:        logger.With().Str("component", "rar_parser").Logger(),
 	}
-}
-
-func (p *RARParser) setArticleRecovery(nzbID string, recovery reader.ArticleRecovery) {
-	p.recoveryNZBID = nzbID
-	p.recovery = recovery
 }
 
 func (p *RARParser) Process(ctx context.Context, group *FileGroup, password string) ([]*storage.NZBFile, error) {
@@ -266,7 +258,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	}
 
 	// Detect RAR version from first volume
-	firstStream := newRarReader(ctx, p.manager, []*types.Volume{volumes[0]}, withRARArticleRecovery(p.recoveryNZBID, p.recovery))
+	firstStream := newRarReader(ctx, p.manager, []*types.Volume{volumes[0]})
 	sig := make([]byte, 8)
 	if _, err := io.ReadFull(firstStream, sig); err != nil {
 		return nil, fmt.Errorf("failed to read RAR signature: %w", err)
@@ -311,7 +303,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		vol := input.vol
 
 		// Create stream reader for this specific volume
-		stream := newRarReader(ctx, p.manager, []*types.Volume{vol}, withRARArticleRecovery(p.recoveryNZBID, p.recovery))
+		stream := newRarReader(ctx, p.manager, []*types.Volume{vol})
 
 		// Skip signature (7 or 8 bytes depending on version)
 		sigSize := 8
@@ -1204,9 +1196,6 @@ func (p *RARParser) buildSegmentsForVolumePart(
 			Bytes:            bytesToRead,
 			SegmentDataStart: seg.SegmentDataStart + segmentDataStart, // Where to start reading within this NNTP segment
 			Group:            seg.Group,
-			RawFileKey:       seg.RawFileKey,
-			RawOffset:        seg.RawOffset + segmentDataStart,
-			RawLength:        bytesToRead,
 			// StartOffset/EndOffset left as 0 - will be set by caller
 		}
 
@@ -1296,9 +1285,6 @@ func sliceSegmentsForRangeSimple(
 			EndOffset:        outputPos + bytesToRead - 1, // End position in OUTPUT file
 			Group:            seg.Group,
 			SegmentDataStart: seg.SegmentDataStart + relStart, // Where to start reading within this NNTP segment
-			RawFileKey:       seg.RawFileKey,
-			RawOffset:        seg.RawOffset + relStart,
-			RawLength:        bytesToRead,
 		}
 
 		result = append(result, slicedSeg)

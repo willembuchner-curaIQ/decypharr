@@ -152,11 +152,10 @@ func notificationEventFor(status storage.RepairRunStatus) config.NotificationEve
 func discordContextFor(run *storage.RepairRun) string {
 	const dateFmt = "2006-01-02 15:04:05"
 	return fmt.Sprintf(
-		"\n**Run**: %s\n**Trigger**: %s\n**Source**: %s\n**Status**: %s\n**Started**: %s\n**Completed**: %s\n**Probed**: %d (broken: %d, repaired: %d)\n**PAR2**: %d articles scanned, %d missing, %d ranges patched\n",
+		"\n**Run**: %s\n**Trigger**: %s\n**Source**: %s\n**Status**: %s\n**Started**: %s\n**Completed**: %s\n**Probed**: %d (broken: %d, repaired: %d)\n",
 		run.ID, run.Trigger, run.Source, run.Status,
 		run.StartedAt.Format(dateFmt), run.CompletedAt.Format(dateFmt),
 		run.Stats.Probed, run.Stats.Broken, run.Stats.Repaired,
-		run.Stats.PAR2ArticlesScanned, run.Stats.PAR2ArticlesMissing, run.Stats.PAR2RangesRepaired,
 	)
 }
 

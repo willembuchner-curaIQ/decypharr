@@ -9,7 +9,6 @@ import (
 
 	"github.com/sirrobot01/decypharr/internal/crypto"
 	"github.com/sirrobot01/decypharr/internal/nntp"
-	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
 
@@ -25,21 +24,10 @@ type rarReader struct {
 	currentSegmentIndex  int
 	currentSegmentData   []byte
 	currentSegmentOffset int // Offset within current segment data
-	recovery             reader.ArticleRecovery
-	recoveryNZBID        string
 }
 
-type rarReaderOption func(*rarReader)
-
-func withRARArticleRecovery(nzbID string, recovery reader.ArticleRecovery) rarReaderOption {
-	return func(r *rarReader) {
-		r.recoveryNZBID = nzbID
-		r.recovery = recovery
-	}
-}
-
-func newRarReader(ctx context.Context, manager *nntp.Client, volumes []*types.Volume, options ...rarReaderOption) *rarReader {
-	r := &rarReader{
+func newRarReader(ctx context.Context, manager *nntp.Client, volumes []*types.Volume) *rarReader {
+	return &rarReader{
 		ctx:                 ctx,
 		manager:             manager,
 		volumes:             volumes,
@@ -47,12 +35,6 @@ func newRarReader(ctx context.Context, manager *nntp.Client, volumes []*types.Vo
 		currentVolumeIndex:  0,
 		currentSegmentIndex: 0,
 	}
-	for _, option := range options {
-		if option != nil {
-			option(r)
-		}
-	}
-	return r
 }
 
 // Read implements io.Reader
@@ -157,7 +139,7 @@ func (r *rarReader) loadNextSegment() error {
 
 		segment := volume.Segments[r.currentSegmentIndex]
 
-		data, err := fetchSegmentData(r.ctx, r.manager, r.recoveryNZBID, r.recovery, segment)
+		data, err := fetchSegmentData(r.ctx, r.manager, segment)
 		if err != nil {
 			return fmt.Errorf("failed to fetch segment: %w", err)
 		}

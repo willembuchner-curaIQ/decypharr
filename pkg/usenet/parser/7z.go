@@ -16,7 +16,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
-	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 )
 
 // SevenZParser parses 7z archives from NNTP segments
@@ -25,14 +24,6 @@ type SevenZParser struct {
 	maxConcurrent int
 	logger        zerolog.Logger
 	rarParser     *RARParser
-	recovery      reader.ArticleRecovery
-	recoveryNZBID string
-}
-
-func (p *SevenZParser) setArticleRecovery(nzbID string, recovery reader.ArticleRecovery) {
-	p.recoveryNZBID = nzbID
-	p.recovery = recovery
-	p.rarParser.setArticleRecovery(nzbID, recovery)
 }
 
 // NewSevenZParser creates a new 7z parser
@@ -66,11 +57,7 @@ func (p *SevenZParser) Process(ctx context.Context, group *FileGroup, password s
 		return nil, fmt.Errorf("no base segments built from group")
 	}
 
-	options := []fs.Option(nil)
-	if p.recovery != nil && p.recoveryNZBID != "" {
-		options = append(options, fs.WithArticleRecovery(p.recoveryNZBID, p.recovery))
-	}
-	usenetFS, err := fs.NewFS(ctx, p.manager, p.maxConcurrent, 0, volumes, p.logger, options...) // 0 prefetch for parsing
+	usenetFS, err := fs.NewFS(ctx, p.manager, p.maxConcurrent, 0, volumes, p.logger) // 0 prefetch for parsing
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
@@ -471,9 +458,6 @@ func sliceSegmentsForRange(
 				Bytes:            overlapEnd - overlapStart + 1,
 				SegmentDataStart: seg.SegmentDataStart + relStart,
 				Group:            seg.Group,
-				RawFileKey:       seg.RawFileKey,
-				RawOffset:        seg.RawOffset + relStart,
-				RawLength:        overlapEnd - overlapStart + 1,
 			}
 
 			result = append(result, slicedSeg)

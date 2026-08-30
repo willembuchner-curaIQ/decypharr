@@ -193,18 +193,40 @@ class ConfigManager {
     }
 
     populateRepairSettings(repair, arrs) {
-        // Always refresh the arrs multi-select so it tracks the latest *Arrs config.
-        const arrsSelect = document.getElementById('repair.arrs');
-        if (arrsSelect) {
+        // Always refresh the Arr choices so they track the latest *Arrs config.
+        const arrsGroup = document.getElementById('repair.arrs');
+        if (arrsGroup) {
             const wanted = new Set((repair && Array.isArray(repair.arrs)) ? repair.arrs : []);
-            arrsSelect.innerHTML = '';
+            arrsGroup.innerHTML = '';
+            let choiceCount = 0;
             for (const a of (arrs || [])) {
                 if (!a || !a.name) continue;
-                const opt = document.createElement('option');
-                opt.value = a.name;
-                opt.textContent = a.name;
-                if (wanted.has(a.name)) opt.selected = true;
-                arrsSelect.appendChild(opt);
+
+                const label = document.createElement('label');
+                label.className = 'flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 hover:bg-base-200';
+
+                const checkbox = document.createElement('input');
+                checkbox.className = 'checkbox checkbox-primary checkbox-sm';
+                checkbox.type = 'checkbox';
+                checkbox.name = 'repair.arrs[]';
+                checkbox.value = a.name;
+                checkbox.checked = wanted.has(a.name);
+
+                const name = document.createElement('span');
+                name.className = 'min-w-0 truncate text-sm';
+                name.textContent = a.name;
+
+                label.appendChild(checkbox);
+                label.appendChild(name);
+                arrsGroup.appendChild(label);
+                choiceCount++;
+            }
+
+            if (choiceCount === 0) {
+                const empty = document.createElement('p');
+                empty.className = 'px-3 py-2 text-sm opacity-60';
+                empty.textContent = 'No eligible Arrs configured.';
+                arrsGroup.appendChild(empty);
             }
         }
 
@@ -214,7 +236,6 @@ class ConfigManager {
         if ($('repair.source')) $('repair.source').value = repair.source || 'arr';
         if ($('repair.schedule')) $('repair.schedule').value = repair.schedule || '';
         if ($('repair.recheck_interval')) $('repair.recheck_interval').value = repair.recheck_interval || '';
-        if ($('repair.deep_nzb_interval')) $('repair.deep_nzb_interval').value = repair.deep_nzb_interval || '';
         if ($('repair.workers')) $('repair.workers').value = repair.workers || 5;
         if ($('repair.nntp_connection_percent')) $('repair.nntp_connection_percent').value = repair.nntp_connection_percent || 20;
         if ($('repair.strategy')) $('repair.strategy').value = repair.strategy || 'per_entry';
@@ -225,16 +246,17 @@ class ConfigManager {
 
     collectRepairConfig() {
         const $ = (id) => document.getElementById(id);
-        const arrsSelect = $('repair.arrs');
-        const arrs = arrsSelect
-            ? Array.from(arrsSelect.selectedOptions).map((o) => o.value).filter(Boolean)
+        const arrsGroup = $('repair.arrs');
+        const arrs = arrsGroup
+            ? Array.from(arrsGroup.querySelectorAll('input[type="checkbox"]:checked'))
+                .map((choice) => choice.value)
+                .filter(Boolean)
             : [];
         return {
             enabled: $('repair.enabled')?.checked || false,
             source: $('repair.source')?.value || 'arr',
             schedule: $('repair.schedule')?.value.trim() || '',
             recheck_interval: $('repair.recheck_interval')?.value.trim() || '',
-            deep_nzb_interval: $('repair.deep_nzb_interval')?.value.trim() || '',
             workers: parseInt($('repair.workers')?.value, 10) || 0,
             nntp_connection_percent: parseInt($('repair.nntp_connection_percent')?.value, 10) || 0,
             strategy: $('repair.strategy')?.value || 'per_entry',
@@ -1190,7 +1212,7 @@ class ConfigManager {
 
                         <div>
                             <label class="label" for="arr[${index}].selected_debrid">
-                                <span class="font-medium">Preferred Provider</span>
+                                <span class="font-medium">Preferred Provider(debrid)</span>
                             </label>
                             <select class="select w-full" name="arr[${index}].selected_debrid" id="arr[${index}].selected_debrid">
                                 <option value="">Auto Select</option>
@@ -1499,13 +1521,7 @@ class ConfigManager {
             availability_sample_percent: parseInt(document.querySelector('[name="usenet.availability_sample_percent"]')?.value) || 10,
             import_availability_sample_percent: parseInt(document.querySelector('[name="usenet.import_availability_sample_percent"]')?.value) || 1,
             disk_path: document.querySelector('[name="usenet.disk_path"]')?.value.trim() || "",
-            buffer_memory: document.querySelector('[name="usenet.buffer_memory"]')?.value || "",
-            par2: {
-                enabled: document.querySelector('[name="usenet.par2.enabled"]')?.checked ?? true,
-                max_download_percent: parseInt(document.querySelector('[name="usenet.par2.max_download_percent"]')?.value) || 10,
-                max_download_bytes: document.querySelector('[name="usenet.par2.max_download_bytes"]')?.value || "512MB",
-                max_storage: document.querySelector('[name="usenet.par2.max_storage"]')?.value || "8GB"
-            }
+			buffer_memory: document.querySelector('[name="usenet.buffer_memory"]')?.value || ""
         };
     }
 
@@ -2367,19 +2383,6 @@ class ConfigManager {
                     input.value = value;
                 }
             }
-        });
-
-        const par2 = usenet.par2 || {};
-        const par2Enabled = document.getElementsByName('usenet.par2.enabled')[0];
-        if (par2Enabled) par2Enabled.checked = par2.enabled !== false;
-        const par2Fields = {
-            'max_download_percent': par2.max_download_percent ?? 10,
-            'max_download_bytes': par2.max_download_bytes || '512MB',
-            'max_storage': par2.max_storage || '8GB'
-        };
-        Object.entries(par2Fields).forEach(([id, value]) => {
-            const input = document.getElementsByName(`usenet.par2.${id}`)[0];
-            if (input) input.value = value;
         });
     }
 

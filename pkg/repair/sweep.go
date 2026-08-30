@@ -19,20 +19,6 @@ type fileResult struct {
 	broken   bool
 	deferred bool
 	reason   string
-	par2     *nzbRepairOutcome
-	// hydrationErr is set when this file's NZB still lacks PAR2 provenance
-	// after an in-place hydration attempt. It decides whether the entry
-	// remembers the failure and stops re-attempting on every run.
-	hydrationErr error
-}
-
-type par2ProbeStats struct {
-	articles       int
-	missing        int
-	repairedRanges int
-	failedRanges   int
-	downloadBytes  int64
-	repairedNZBs   int
 }
 
 func (r *Service) executeSweep(ctx context.Context, run *storage.RepairRun, opts RunOptions, stopState *repairStopState) {
@@ -60,7 +46,7 @@ func (r *Service) executeSweep(ctx context.Context, run *storage.RepairRun, opts
 		return
 	}
 
-	due, skipped := r.filterDueCandidates(candidates, opts, autoRepair)
+	due, skipped := r.filterDueCandidates(candidates, opts)
 	candidates = nil
 	protocolScope := r.effectiveProtocolScope(opts)
 	due = r.filterCandidatesByProtocol(due, protocolScope)
@@ -97,10 +83,6 @@ func (r *Service) executeSweep(ctx context.Context, run *storage.RepairRun, opts
 		Int("healthy", run.Stats.Healthy).
 		Int("repaired", run.Stats.Repaired).
 		Int("repair_failed", run.Stats.RepairFailed).
-		Int("par2_articles", run.Stats.PAR2ArticlesScanned).
-		Int("par2_missing", run.Stats.PAR2ArticlesMissing).
-		Int("par2_ranges_repaired", run.Stats.PAR2RangesRepaired).
-		Int("par2_ranges_failed", run.Stats.PAR2RangesFailed).
 		Msg("Sweep: completed")
 }
 
@@ -145,7 +127,7 @@ func (r *Service) probeAndHealCandidates(ctx context.Context, run *storage.Repai
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(max(1, r.workers()))
-	nzb := newNZBProber(r.usenet, r.hydrateBounded, r.logger)
+	nzb := newNZBProber(r.usenet)
 
 	for _, name := range names {
 		c := candidates[name]
@@ -157,7 +139,7 @@ func (r *Service) probeAndHealCandidates(ctx context.Context, run *storage.Repai
 				return gctx.Err()
 			}
 
-			h, par2Stats := r.probeEntry(gctx, run.ID, c, heal, nzb, opts, autoRepair)
+			h := r.probeEntry(gctx, run.ID, c, heal, nzb, opts, autoRepair)
 			if h == nil {
 				c.item = nil
 				c.contentMap = nil
@@ -169,12 +151,6 @@ func (r *Service) probeAndHealCandidates(ctx context.Context, run *storage.Repai
 			}
 
 			runMu.Lock()
-			run.Stats.PAR2ArticlesScanned += par2Stats.articles
-			run.Stats.PAR2ArticlesMissing += par2Stats.missing
-			run.Stats.PAR2RangesRepaired += par2Stats.repairedRanges
-			run.Stats.PAR2RangesFailed += par2Stats.failedRanges
-			run.Stats.PAR2DownloadBytes += par2Stats.downloadBytes
-			run.Stats.Repaired += par2Stats.repairedNZBs
 			run.Stats.Probed++
 			switch h.Status {
 			case storage.HealthHealthy:

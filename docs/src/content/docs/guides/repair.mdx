@@ -20,7 +20,7 @@ Every entry has exactly one health record with one of these statuses:
 | `stale`       | Last check is older than `recheck_interval`.                   |
 | `unsupported` | The entry has no probe path on this protocol.                  |
 
-Each record also stores the file fingerprint, last-checked / last-OK / last-failed timestamps, the next-due time, PAR2 audit/patch counts, and the list of broken files (with their Arr IDs when the source is Arr).
+Each record also stores the file fingerprint, last-checked / last-OK / last-failed timestamps, the next-due time, and the list of broken files (with their Arr IDs when the source is Arr).
 
 When an entry's file set changes, its fingerprint is invalidated and the entry is marked **dirty**, forcing a re-probe on the next sweep.
 
@@ -52,7 +52,6 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
     "workers": 5,
     "strategy": "per_entry",
     "recheck_interval": "168h",
-    "deep_nzb_interval": "720h",
     "arrs": [],
     "auto_repair": true,
     "verify_content": false,
@@ -71,9 +70,8 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
 | `workers`                 | Number of concurrent probe workers.                                                      | `5`         |
 | `strategy`                | `per_entry` (stop after first broken file in an entry) or `per_file` (probe all files).  | `per_entry` |
 | `recheck_interval`        | How long a healthy entry's check stays fresh before it becomes a candidate again.        | `168h`      |
-| `deep_nzb_interval`       | Minimum age for a full distinct-article STAT audit when an NZB next receives its normal repair check. Use `0` to disable. | `720h` |
 | `arrs`                    | Optional filter when `source=arr`. Empty list means all eligible Arrs.                   | `[]`        |
-| `auto_repair`             | When `true`, brokens are repaired in the same sweep. When `false`, the sweep is detect-only. | `false` |
+| `auto_repair`             | When `true`, broken Arr-managed files are deleted through Arr and searched again. When `false`, the sweep is detect-only. | `false` |
 | `verify_content`          | During NZB probes, also read each media file's head through the streaming stack and check for a valid container signature. Finds files whose articles exist but were assembled wrong. Downloads one article per file probed. | `false` |
 | `notify_on_complete`      | Send a notification when a sweep finishes.                                               | `false`     |
 | `nntp_connection_percent` | Percentage of NNTP connections the probe is allowed to use. Avoids starving downloads.   | `20`        |
@@ -86,7 +84,7 @@ You can force a recheck on any one entry from the Browse UI or the API. This wor
 - The repair sweep is cancelled at the next firing of `stop_schedule`, mid-probe if necessary. Entries not yet probed are left as they were before this repair sweep (their existing health and `next_check_due_at` are untouched, so they're picked up again on the next scheduled run).
 - The run is recorded as `completed` (not `cancelled`), with `cancel_reason` noting it was stopped by schedule.
 - What happens to entries this repair sweep *did* manage to probe and found broken is controlled by `auto_repair`, same as any other repair sweep:
-  - `auto_repair: true` attempts bounded local PAR2 repair first, then uses Arr delete + re-search only for files that remain broken.
+  - `auto_repair: true` uses Arr delete + re-search for eligible broken files.
   - `auto_repair: false` leaves them recorded as broken without triggering Arr repair.
 
 #### Multi-day coverage
@@ -112,32 +110,26 @@ If a full repair sweep would take 2 days at 9 hours/day but `recheck_interval` i
 ### Sources
 
 - **`arr`** — walks Sonarr / Radarr media, resolves each item to an entry through the symlink target, and probes that entry. Broken files are enriched with Arr identifiers so repair can call `DeleteFiles` + `SearchMissing` directly.
-- **`managed`** — walks managed entries directly. Legacy NZBs first use a surviving local source; when that is gone, the entry's Arr category and NZB download ID are used to find the original grab history. Entries with neither source can still be health-checked, but cannot be prepared for PAR2 repair automatically.
+- **`managed`** — walks managed entries directly. Entries can be health-checked, but automatic replacement is available only for broken files that carry Arr identifiers.
 
 ## Workflow
 
 1. The cron tick (or a manual **Run Now**) opens a new run.
 2. Candidates are selected per the rules above.
 3. For each candidate, the entry is marked `repairing` and probed by a worker.
-4. At service startup, a background migration waits briefly and then scans stored NZBs at a paced rate for missing recovery provenance.
-5. The migration hydrates one NZB at a time, with at least one minute between items. It uses the surviving local NZB first; otherwise, Decypharr looks up the exact Arr grab by download ID, reacquires its NZB metadata, and validates the original message IDs before attaching raw origins and PAR2 data to the existing NZB ID.
-6. Arr metadata calls make one patient HTTP attempt. Transient failures use persisted, per-Arr exponential backoff from five minutes up to one hour, so a restart cannot recreate a request storm. Releases that cannot be matched safely are recorded as unavailable instead of being searched repeatedly.
-7. Starting any repair or recheck pauses the migration and cancels its in-flight request. Foreground probes never reacquire legacy NZBs inline. A sampled missing/corrupt file or requested deep audit that still needs hydration remains `unknown` with reason `legacy_hydration_pending`; it cannot trigger Arr deletion or re-search.
-8. Once prepared, NZB files receive the normal availability sample. With `auto_repair` enabled, a sampled hole, a due `deep_nzb_interval`, or a manual **Deep NZB audit** starts the exhaustive distinct-article STAT pass.
-9. Confirmed missing ranges are reconstructed with PAR2 under one NZB-wide traffic budget. Healthy articles are never BODY-downloaded by the audit, and repaired ranges are stored as narrow local patches.
-10. If hydration is definitively unavailable or PAR2 cannot cover a confirmed missing range, Arr delete + search remains the fallback. Connection and provider errors remain `unknown` and never trigger replacement.
-11. The entry's health and the run's PAR2 scanned/missing/repaired/failed/traffic counters are persisted live.
+4. NZB probes sample the configured percentage of distinct content articles. With `verify_content` enabled, they also read each media file's head and validate its container signature.
+5. Definitive missing or corrupt content marks the file broken. Connection and provider errors remain `unknown` and never trigger replacement.
+6. With `auto_repair` enabled, eligible broken files are deleted through Arr and a missing-item search is triggered.
+7. The entry health and run progress are persisted as the sweep proceeds.
 
-Legacy hydration is preparation rather than an automatic repair action, so `auto_repair: false` does not disable it. It also continues when the recurring sweep is disabled. Migration counts and the current item are available in `legacy_nzb_hydration` from `GET /api/repair/status`.
-
-Foreground playback and scheduled repair use the same patch store. A scheduled patch removes the first-play repair pause; a patch created mid-stream is reused by later scheduled audits. Background STAT and BODY work shares the configured `nntp_connection_percent` pool and is globally limited so active streams retain capacity.
+Background NNTP probes share the configured `nntp_connection_percent` pool so active streams retain capacity.
 
 A failure to persist a single entry's health update is logged but never aborts the sweep.
 
 ## Stop and disable
 
 - **Stop** cancels the active run. In-flight probes return at the next checkpoint, the run is marked `cancelled`, and entries that hadn't yet finished probing revert to their previous status.
-- **Disable** (`enabled=false`) cancels any in-flight run and unregisters the cron job. Per-entry health data is **kept**, so Browse badges stay meaningful and single-entry rechecks remain available. The paced legacy-NZB preparation worker remains independent of the recurring sweep.
+- **Disable** (`enabled=false`) cancels any in-flight run and unregisters the cron job. Per-entry health data is **kept**, so Browse badges stay meaningful and single-entry rechecks remain available.
 
 ## Singleton invariants
 

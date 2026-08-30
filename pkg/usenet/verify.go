@@ -130,8 +130,7 @@ func (u *Usenet) verifyNZBContent(ctx context.Context, nzb *storage.NZB) error {
 		if file.IsDeleted || len(file.Segments) == 0 || !utils.IsMediaFile(file.Name) {
 			continue
 		}
-		switch file.FileType {
-		case storage.NZBFileTypePar2, storage.NZBFileTypeIgnore:
+		if file.FileType == storage.NZBFileTypeIgnore {
 			continue
 		}
 		if ctx.Err() != nil {

@@ -39,10 +39,6 @@
                             title="Trigger Arr delete + re-search on currently broken entries">
                         <i class="bi bi-bandaid mr-1"></i>Fix broken
                     </button>
-                    <button id="hydrateBtn" class="btn btn-outline btn-sm w-full sm:w-auto"
-                            title="Rebuild PAR2 recovery data for older NZBs, including ones whose last attempt failed">
-                        <i class="bi bi-droplet-half mr-1"></i>Hydrate legacy NZBs
-                    </button>
                     <button id="clearStateBtn" class="btn btn-warning btn-outline btn-sm w-full sm:w-auto"
                             title="Clear persisted repair state locally">
                         <i class="bi bi-eraser mr-1"></i>Clear State
@@ -156,7 +152,6 @@
                         <th>Probed</th>
                         <th>Broken</th>
                         <th>Repaired</th>
-                        <th>PAR2 patches</th>
                         <th>Cleared</th>
                         <th>Duration</th>
                         <th>Error</th>
@@ -232,20 +227,10 @@
                 </label>
                 <label class="flex cursor-pointer items-start justify-between gap-3 px-4 py-4 hover:bg-base-200/60 sm:gap-4 sm:px-6">
                     <span class="flex gap-3">
-                        <i class="bi bi-search-heart text-lg text-primary mt-0.5"></i>
-                        <span>
-                            <span class="block font-medium">Deep NZB audit</span>
-                            <span class="block text-sm opacity-70">With Auto-repair enabled, STAT every distinct content article and PAR2-repair all confirmed holes. The audit uses STAT only; reconstruction downloads bounded recovery inputs as needed.</span>
-                        </span>
-                    </span>
-                    <input type="checkbox" class="toggle toggle-primary mt-1" id="runDeepNZB">
-                </label>
-                <label class="flex cursor-pointer items-start justify-between gap-3 px-4 py-4 hover:bg-base-200/60 sm:gap-4 sm:px-6">
-                    <span class="flex gap-3">
                         <i class="bi bi-bandaid text-lg text-error mt-0.5"></i>
                         <span>
                             <span class="block font-medium">Auto-repair</span>
-                            <span class="block text-sm opacity-70">Repair missing NZB articles with PAR2 first, then send anything still broken through Arr delete and search.</span>
+                            <span class="block text-sm opacity-70">Send broken files through Arr delete and replacement search.</span>
                         </span>
                     </span>
                     <input type="checkbox" class="toggle toggle-primary mt-1" id="runAutoRepair">

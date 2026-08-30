@@ -42,8 +42,8 @@ func (r *Service) RecheckEntry(ctx context.Context, entryName string, fix bool) 
 			r.attachArrContext(ctx, c)
 		}
 		heal := newErrorCache()
-		nzb := newNZBProber(r.usenet, r.hydrateBounded, r.logger)
-		final, _ := r.probeEntry(ctx, runID, c, heal, nzb, RunOptions{}, fix)
+		nzb := newNZBProber(r.usenet)
+		final := r.probeEntry(ctx, runID, c, heal, nzb, RunOptions{}, fix)
 		if final == nil {
 			return
 		}

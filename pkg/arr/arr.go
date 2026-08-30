@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"time"
 
 	json "github.com/bytedance/sonic"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -35,18 +34,6 @@ var sharedClient = sync.OnceValue(func() *request.Client {
 	return request.New(
 		request.WithTimeout(0),
 		request.WithMaxRetries(5),
-	)
-})
-
-// NZB reacquisition calls Sonarr/Radarr's interactive release-search endpoint,
-// which may legitimately take longer than an ordinary API call. The migration
-// worker owns retries and backoff, so this client makes one patient attempt
-// instead of multiplying load with six immediate attempts.
-var nzbReacquisitionClient = sync.OnceValue(func() *request.Client {
-	return request.New(
-		request.WithTimeout(3*time.Minute),
-		request.WithResponseHeaderTimeout(2*time.Minute),
-		request.WithMaxRetries(0),
 	)
 })
 
@@ -91,10 +78,6 @@ func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload a
 }
 
 func getSharedClient() *request.Client { return sharedClient() }
-
-func (a *Arr) requestNZBReacquisitionCtx(ctx context.Context, method, endpoint string, payload any, res any) (*http.Response, error) {
-	return a.requestCtx(ctx, nzbReacquisitionClient(), method, endpoint, payload, res)
-}
 
 func (a *Arr) requestCtx(ctx context.Context, client *request.Client, method, endpoint string, payload any, res any) (*http.Response, error) {
 	if a.Token == "" || a.Host == "" {

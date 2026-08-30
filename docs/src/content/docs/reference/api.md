@@ -109,9 +109,7 @@ Update the health-checker config (validates cron, workers, source).
 
 ### GET /api/repair/status
 
-Active run summary, last completed run, counts of entries by status, and the
-`legacy_nzb_hydration` background-migration snapshot (`running`, `paused`,
-`scan_complete`, queue counts, current NZB ID, and next attempt time).
+Active run summary, last completed run, and counts of entries by status.
 
 ### POST /api/repair/run
 
@@ -121,7 +119,6 @@ Trigger a sweep now. Optional JSON body fields:
 |-----------------------|---------|--------------------------------------------------------------------|
 | `ignore_last_checked` | boolean | Probe entries even when their last health check is still fresh.    |
 | `auto_repair`         | boolean | Override the configured auto-repair setting for this run.          |
-| `deep_nzb`            | boolean | Exhaustively STAT distinct NZB content articles and PAR2-repair confirmed missing ranges. Requires auto-repair. |
 | `unrestrict_link`     | boolean | For torrent entries, probe by generating an unrestricted link instead of calling the provider check endpoint. |
 | `verify_content`      | boolean | Override the configured `repair.verify_content` setting for this run. When on, NZB probes also read each media file's head through the streaming stack and check for a valid container signature. Finds files whose articles exist but were assembled wrong. Downloads one article per file probed. |
 | `protocol`            | string  | `all`, `torrent`, or `nzb`. Selects which protocols this run probes. |

@@ -41,8 +41,6 @@ type FS struct {
 	diskPath      string
 	retention     reader.Retention
 	scheduler     *reader.FetchScheduler
-	recovery      reader.ArticleRecovery
-	recoveryNZBID string
 	logger        zerolog.Logger
 }
 
@@ -55,15 +53,6 @@ func WithRetention(retention reader.Retention) Option {
 
 func WithFetchScheduler(scheduler *reader.FetchScheduler) Option {
 	return func(f *FS) { f.scheduler = scheduler }
-}
-
-// WithArticleRecovery attaches a bounded recovery engine to readers created
-// by this filesystem. nzbID scopes the engine's dedicated metadata store.
-func WithArticleRecovery(nzbID string, recovery reader.ArticleRecovery) Option {
-	return func(f *FS) {
-		f.recoveryNZBID = nzbID
-		f.recovery = recovery
-	}
 }
 
 // NewFS creates a new filesystem backed by the provided connection nntpClient.
@@ -241,8 +230,6 @@ func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, 
 	readerConfig.DiskPath = f.diskPath
 	readerConfig.Retention = f.retention
 	readerConfig.Scheduler = f.scheduler
-	readerConfig.Recovery = f.recovery
-	readerConfig.RecoveryNZBID = f.recoveryNZBID
 	readerOptions := []reader.Option{
 		reader.WithMaxConnections(readerConfig.MaxConnections),
 		reader.WithPrefetchAhead(readerConfig.PrefetchAhead),
@@ -250,10 +237,6 @@ func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, 
 		reader.WithRetention(readerConfig.Retention),
 		reader.WithFetchScheduler(readerConfig.Scheduler),
 	}
-	if readerConfig.Recovery != nil && readerConfig.RecoveryNZBID != "" {
-		readerOptions = append(readerOptions, reader.WithArticleRecovery(readerConfig.RecoveryNZBID, readerConfig.Recovery))
-	}
-
 	// Create the new streaming reader
 	var streamReader *reader.StreamingReader
 	var err error

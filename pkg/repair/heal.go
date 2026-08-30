@@ -10,6 +10,17 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
+func arrMediaID(kind arr.Type, content arr.ContentFile) int {
+	switch kind {
+	case arr.Sonarr:
+		return content.EpisodeId
+	case arr.Radarr:
+		return content.Id
+	default:
+		return 0
+	}
+}
+
 func (r *Service) repairBroken(ctx context.Context, run *storage.RepairRun, healths *xsync.Map[string, *storage.EntryHealth]) {
 	var statsMu sync.Mutex
 	healths.Range(func(name string, health *storage.EntryHealth) bool {

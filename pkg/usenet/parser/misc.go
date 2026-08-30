@@ -12,7 +12,6 @@ import (
 	"github.com/Tensai75/nzbparser"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
 
@@ -91,38 +90,6 @@ func fileMetaKey(file nzbparser.NzbFile) string {
 		return fmt.Sprintf("n:%d", file.Number)
 	}
 	return ""
-}
-
-func rawFileIdentity(file nzbparser.NzbFile) string {
-	firstMessageID := ""
-	if len(file.Segments) > 0 {
-		firstMessageID = file.Segments[0].Id
-	}
-	return file.Subject + "\x00" + firstMessageID
-}
-
-func (f *FileGroup) rawFileKey(file nzbparser.NzbFile) recovery.RawFileKey {
-	if f == nil {
-		return 0
-	}
-	if len(file.Segments) > 0 && f.rawArticleKeys != nil {
-		if key := f.rawArticleKeys[file.Segments[0].Id]; key != 0 {
-			return key
-		}
-	}
-	if f.rawFileKeys == nil {
-		return 0
-	}
-	return f.rawFileKeys[rawFileIdentity(file)]
-}
-
-func (f *FileGroup) rawFileKeyForSegment(file nzbparser.NzbFile, segment nzbparser.NzbSegment) recovery.RawFileKey {
-	if f != nil && f.rawArticleKeys != nil {
-		if key := f.rawArticleKeys[segment.Id]; key != 0 {
-			return key
-		}
-	}
-	return f.rawFileKey(file)
 }
 
 func getGroupsList(groups map[string]struct{}) []string {
@@ -208,7 +175,6 @@ func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64,
 	}
 
 	for idx, segment := range file.Segments {
-		rawFileKey := group.rawFileKeyForSegment(file, segment)
 		// A segment without a message id can never be fetched; it would also
 		// defeat the empty-slot duplicate check below.
 		if segment.Id == "" {
@@ -252,18 +218,6 @@ func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64,
 			return 0, nil
 		}
 
-		rawOffset := currentOffset
-		layoutConfidence := recovery.LayoutEstimated
-		if partMeta.partNumber > 0 && partMeta.partBegin > 0 && partMeta.segmentSize > 0 {
-			delta := int64(segment.Number) - partMeta.partNumber
-			candidate := partMeta.partBegin - 1 + delta*partMeta.segmentSize
-			if candidate >= 0 {
-				rawOffset = candidate
-			}
-			if partMeta.partNumber == int64(segment.Number) {
-				layoutConfidence = recovery.LayoutExact
-			}
-		}
 		seg := storage.NZBSegment{
 			Number:      segment.Number,
 			MessageID:   segment.Id,
@@ -271,9 +225,6 @@ func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64,
 			StartOffset: currentOffset,
 			EndOffset:   currentOffset + segSize - 1,
 			Group:       segmentGroup,
-			RawFileKey:  uint32(rawFileKey),
-			RawOffset:   rawOffset,
-			RawLength:   segSize,
 		}
 
 		// Normalize to the range base so 0- and 1-indexed numbering both map
@@ -284,7 +235,6 @@ func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64,
 			return 0, nil
 		}
 		nzbSegments[segIdx] = seg
-		group.manifest.UpdateArticleLayout(rawFileKey, segment.Number, rawOffset, segSize, layoutConfidence)
 		currentOffset += segSize
 	}
 	return currentOffset, nzbSegments

@@ -491,9 +491,8 @@ func (t *httpTransport) recover(ctx context.Context, err error, attempt int) err
 }
 
 // usenetTransport serves a session body by pulling directly from a usenet
-// FileHandle. Per-segment failover, zero-fill, and PAR2 handling live inside
-// the usenet client; recovery here only reopens the handle at the current
-// offset.
+// FileHandle. Per-segment failover and zero-fill handling live inside the
+// usenet client; retries here only reopen the handle at the current offset.
 type usenetTransport struct {
 	size     int64
 	openFile func(ctx context.Context) (DirectReader, error)

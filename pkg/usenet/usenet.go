@@ -1,7 +1,6 @@
 package usenet
 
 import (
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -25,9 +24,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
-	"github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -253,8 +250,6 @@ func (r *contextSectionReader) Read(p []byte) (int, error) {
 type Usenet struct {
 	nntp                     *nntp.Client
 	fetchScheduler           *reader.FetchScheduler
-	par2Store                *recovery.Store
-	par2Recovery             *recovery.Coordinator
 	logger                   zerolog.Logger
 	metadataDir              string
 	nzbStorage               *NZBStorage // File-based NZB metadata storage
@@ -265,9 +260,6 @@ type Usenet struct {
 	cleanupStop              chan struct{}
 	cleanupWg                sync.WaitGroup
 	closeOnce                sync.Once
-	repairFlights            singleflight.Group
-	legacyHydrationFlights   singleflight.Group
-	backgroundRepairSlots    chan struct{}
 
 	fs *xsync.Map[string, *fsEntry]
 }
@@ -362,42 +354,15 @@ func New() (*Usenet, error) {
 		processingMaxConns = maxConns
 	}
 
-	// PAR2 state is deliberately isolated from the logical NZB catalog. The
-	// raw manifest, parsed packets, downloaded recovery slices, and narrow
-	// repaired patches can therefore be reclaimed without rewriting the much
-	// larger streaming metadata records.
-	par2Store, err := recovery.Open(filepath.Join(config.GetMainPath(), "usenet", "par2.db"))
-	if err != nil {
-		_ = client.Close()
-		return nil, fmt.Errorf("open PAR2 recovery storage: %w", err)
-	}
-	par2Recovery, err := recovery.NewCoordinator(par2Store, client, recovery.Policy{
-		Enabled:            usenetConfig.PAR2.IsEnabled(),
-		MaxDownloadPercent: usenetConfig.PAR2.DownloadPercent(),
-		MaxDownloadBytes:   usenetConfig.PAR2.DownloadBytes(),
-		MaxStorageBytes:    usenetConfig.PAR2.StorageBytes(),
-	})
-	if err != nil {
-		_ = par2Store.Close()
-		_ = client.Close()
-		return nil, fmt.Errorf("create PAR2 recovery coordinator: %w", err)
-	}
-
 	prefetchSize, err := config.ParseSize(usenetConfig.ReadAhead)
 	if err != nil {
 		prefetchSize = 16 * 1024 * 1024 // Default to 16MB
 	}
 
-	backgroundRepairs := cfg.Repair.Workers
-	if backgroundRepairs <= 0 {
-		backgroundRepairs = 1
-	}
 	u := &Usenet{
 		nzbStorage:               nzbStorage,
 		nntp:                     client,
 		fetchScheduler:           reader.NewFetchScheduler(maxConns),
-		par2Store:                par2Store,
-		par2Recovery:             par2Recovery,
 		logger:                   _logger,
 		metadataDir:              metadataDir,
 		maxConnections:           maxConns,
@@ -406,7 +371,6 @@ func New() (*Usenet, error) {
 		fs:                       xsync.NewMap[string, *fsEntry](),
 		failedFiles:              xsync.NewMap[string, error](),
 		cleanupStop:              make(chan struct{}),
-		backgroundRepairSlots:    make(chan struct{}, min(backgroundRepairs, 2)),
 	}
 
 	// Start background cleanup for idle sessions
@@ -430,14 +394,6 @@ func (u *Usenet) createEntry(file *storage.NZBFile, prefetchSize int64, retentio
 
 	fsCtx := context.Background()
 
-	options := []fs.Option{
-		fs.WithRetention(retention),
-		fs.WithFetchScheduler(u.fetchScheduler),
-	}
-	if u.par2Recovery != nil && file.NzbID != "" {
-		options = append(options, fs.WithArticleRecovery(file.NzbID, u.par2Recovery))
-	}
-
 	usenetFS, err := fs.NewFS(
 		fsCtx,
 		u.nntp,
@@ -445,7 +401,8 @@ func (u *Usenet) createEntry(file *storage.NZBFile, prefetchSize int64, retentio
 		prefetchSize,
 		volumes,
 		u.logger,
-		options...,
+		fs.WithRetention(retention),
+		fs.WithFetchScheduler(u.fetchScheduler),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
@@ -571,34 +528,19 @@ func (u *Usenet) cleanupIdleFS() {
 
 // Parse processes an NZB for download/streaming (quick parse, defers archive extraction)
 func (u *Usenet) Parse(ctx context.Context, name string, content []byte, category string) (*storage.NZB, map[string]*parser.FileGroup, error) {
-	nzb, groups, _, err := u.ParseWithManifest(ctx, name, content, category)
-	return nzb, groups, err
-}
-
-// ParseWithManifest is the recovery-aware counterpart to Parse. The PAR2
-// coordinator persists the raw manifest independently of the logical NZB
-// metadata, while the return value remains available to callers that need it.
-func (u *Usenet) ParseWithManifest(ctx context.Context, name string, content []byte, category string) (*storage.NZB, map[string]*parser.FileGroup, *recovery.Manifest, error) {
-	return u.ParseWithIDAndManifest(ctx, "", name, content, category)
+	return u.ParseWithID(ctx, "", name, content, category)
 }
 
 // ParseWithID parses an NZB using a caller-provided ID. Supplying the ID lets
 // the manager expose a queued entry before the active-download worker starts.
 func (u *Usenet) ParseWithID(ctx context.Context, id, name string, content []byte, category string) (*storage.NZB, map[string]*parser.FileGroup, error) {
-	nzb, groups, _, err := u.ParseWithIDAndManifest(ctx, id, name, content, category)
-	return nzb, groups, err
-}
-
-// ParseWithIDAndManifest preserves every raw NZB file for future PAR2
-// persistence while retaining ParseWithID as a source-compatible wrapper.
-func (u *Usenet) ParseWithIDAndManifest(ctx context.Context, id, name string, content []byte, category string) (*storage.NZB, map[string]*parser.FileGroup, *recovery.Manifest, error) {
 	if len(content) == 0 {
-		return nil, nil, nil, fmt.Errorf("NZB content is empty")
+		return nil, nil, fmt.Errorf("NZB content is empty")
 	}
 
 	// Validate NZB content
 	if err := validateNZB(content); err != nil {
-		return nil, nil, nil, fmt.Errorf("invalid NZB content: %w", err)
+		return nil, nil, fmt.Errorf("invalid NZB content: %w", err)
 	}
 
 	// Create parser with the manager
@@ -607,34 +549,20 @@ func (u *Usenet) ParseWithIDAndManifest(ctx context.Context, id, name string, co
 	// Quick parse: defer archive extraction for async processing.
 	// Groups survive a stat failure so the caller can identify the
 	// dead post.
-	nzb, groups, manifest, err := prs.ParseWithManifest(ctx, name, content)
+	nzb, groups, err := prs.Parse(ctx, name, content)
 	if err != nil {
-		return nil, groups, manifest, err
+		return nil, groups, err
 	}
 	if id != "" {
 		nzb.ID = id
-		manifest.SetNZBID(id)
 	}
 
 	nzb.Category = category
 	nzb.Status = NZBStatusParsing
-	recoveryRegistered := false
-	if u.par2Recovery != nil && manifest != nil && manifest.HasPAR2() {
-		if err := u.par2Recovery.RegisterManifest(manifest); err != nil {
-			return nil, groups, manifest, fmt.Errorf("persist PAR2 recovery manifest: %w", err)
-		}
-		recoveryRegistered = true
-	}
-	cleanupRecovery := func() {
-		if recoveryRegistered && u.par2Recovery != nil {
-			_ = u.par2Recovery.DeleteNZB(nzb.ID)
-		}
-	}
 	// Save NZB file to disk
 	nzbPath, err := u.saveNZBFile(nzb.ID, content)
 	if err != nil {
-		cleanupRecovery()
-		return nil, nil, manifest, err
+		return nil, nil, err
 	}
 	nzb.Path = nzbPath
 
@@ -643,15 +571,13 @@ func (u *Usenet) ParseWithIDAndManifest(ctx context.Context, id, name string, co
 		// Don't leave the source file orphaned; an un-marked .nzb would be
 		// re-claimed by the refresh watcher on every scan.
 		_ = os.Remove(nzbPath)
-		cleanupRecovery()
-		return nil, nil, manifest, fmt.Errorf("failed to mark NZB as processing: %w", err)
+		return nil, nil, fmt.Errorf("failed to mark NZB as processing: %w", err)
 	}
 
 	if err := u.nzbStorage.AddNZB(nzb); err != nil {
 		_ = os.Remove(nzbPath + ".processing")
 		_ = os.Remove(nzbPath)
-		cleanupRecovery()
-		return nil, nil, manifest, fmt.Errorf("failed to save NZB to storage: %w", err)
+		return nil, nil, fmt.Errorf("failed to save NZB to storage: %w", err)
 	}
 
 	u.logger.Info().
@@ -659,7 +585,7 @@ func (u *Usenet) ParseWithIDAndManifest(ctx context.Context, id, name string, co
 		Str("name", nzb.Name).
 		Int("groups", len(groups)).
 		Msg("Successfully parsed NZB file")
-	return nzb, groups, manifest, nil
+	return nzb, groups, nil
 }
 
 // Process processes archive files in an NZB (full parse)
@@ -671,9 +597,6 @@ func (u *Usenet) Process(ctx context.Context, nzb *storage.NZB, groups map[strin
 
 	// Create parser with the manager
 	prs := parser.NewParser(u.nntp, u.processingMaxConnections, u.logger.With().Str("component", "parser").Logger())
-	if u.par2Recovery != nil {
-		prs.SetArticleRecovery(nzb.ID, u.par2Recovery)
-	}
 	// Process the groups (archives)
 	updatedNZB, err := prs.Process(ctx, nzb, groups)
 	if err != nil {
@@ -681,13 +604,6 @@ func (u *Usenet) Process(ctx context.Context, nzb *storage.NZB, groups map[strin
 		_ = u.markAsFailed(nzb, err)
 		return nzb, fmt.Errorf("failed to process NZB archives: %w", err)
 	}
-	if manifest := parser.ManifestFromGroups(groups); u.par2Recovery != nil && manifest != nil && manifest.HasPAR2() {
-		if err := u.par2Recovery.RegisterManifest(manifest); err != nil {
-			_ = u.markAsFailed(updatedNZB, err)
-			return updatedNZB, fmt.Errorf("persist enriched PAR2 recovery manifest: %w", err)
-		}
-	}
-
 	// Post-parse availability gate: probe a sample of each content file's
 	// segments before declaring the NZB complete. Segments can go missing
 	// between the original parse and now; without this gate they slip through
@@ -729,7 +645,7 @@ func (u *Usenet) Process(ctx context.Context, nzb *storage.NZB, groups map[strin
 // checkAvailability samples each content file's segments (via the same
 // repair-bank-gated BatchStat path as CheckFile) and returns an error if any
 // file is definitively unavailable — i.e. a sampled segment is missing on
-// every provider. Recovery/noise files (par2, ignore), deleted files, and
+// every provider. Ignored, deleted, and
 // segment-less entries are skipped so the gate fails only on genuinely missing
 // playable content. Connection-only failures are treated as non-fatal by
 // CheckFileAvailability, so they do not fail the NZB. It returns on the first
@@ -741,8 +657,7 @@ func (u *Usenet) checkNZBAvailability(ctx context.Context, nzb *storage.NZB) err
 		if file.IsDeleted || len(file.Segments) == 0 {
 			continue
 		}
-		switch file.FileType {
-		case storage.NZBFileTypePar2, storage.NZBFileTypeIgnore:
+		if file.FileType == storage.NZBFileTypeIgnore {
 			continue
 		}
 		if ctx.Err() != nil {
@@ -750,14 +665,6 @@ func (u *Usenet) checkNZBAvailability(ctx context.Context, nzb *storage.NZB) err
 			return nil
 		}
 		if err := u.CheckFileAvailability(ctx, file, samplePercent); err != nil {
-			if u.canRecoverWithPAR2(nzb.ID) {
-				u.logger.Warn().
-					Err(err).
-					Str("nzb_id", nzb.ID).
-					Str("file", file.Name).
-					Msg("Sampled article is missing; deferring bounded repair until the range is read")
-				continue
-			}
 			u.logger.Warn().
 				Err(err).
 				Str("nzb_id", nzb.ID).
@@ -786,20 +693,6 @@ func (u *Usenet) CheckFile(ctx context.Context, nzoID, filename string) error {
 	}
 	err = u.checkAvailability(ctx, filename, messageIDs)
 	return err
-}
-
-func (u *Usenet) canRecoverWithPAR2(nzbID string) bool {
-	if u == nil || u.par2Store == nil || !config.Get().Usenet.PAR2.IsEnabled() || nzbID == "" {
-		return false
-	}
-	manifest, err := u.par2Store.GetManifest(nzbID)
-	return err == nil && manifest.HasPAR2()
-}
-
-// CanRecoverWithPAR2 reports whether an NZB has a registered PAR2 manifest and
-// automatic recovery is enabled.
-func (u *Usenet) CanRecoverWithPAR2(nzbID string) bool {
-	return u.canRecoverWithPAR2(nzbID)
 }
 
 func (u *Usenet) CheckFileAvailability(ctx context.Context, file *storage.NZBFile, samplePercent int) error {
@@ -896,27 +789,12 @@ func (u *Usenet) Close() error {
 			u.fetchScheduler.Close()
 		}
 
-		// Reader tasks are gone now, so no repair can race the final manifest
-		// flush or the recovery database close.
-		if u.par2Recovery != nil {
-			if err := u.par2Recovery.Close(); err != nil {
-				closeErr = errors.Join(closeErr, err)
-				u.logger.Warn().Err(err).Msg("Failed to flush PAR2 recovery state")
-			}
-		}
 		if u.nntp != nil {
 			if err := u.nntp.Close(); err != nil {
 				closeErr = errors.Join(closeErr, err)
 				u.logger.Warn().Err(err).Msg("Failed to close NNTP client")
 			}
 		}
-		if u.par2Store != nil {
-			if err := u.par2Store.Close(); err != nil {
-				closeErr = errors.Join(closeErr, err)
-				u.logger.Warn().Err(err).Msg("Failed to close PAR2 recovery storage")
-			}
-		}
-
 		u.logger.Info().Msg("Usenet closed")
 	})
 	return closeErr
@@ -1284,9 +1162,6 @@ func (u *Usenet) Stats() map[string]any {
 	stats := u.nntp.Stats()
 	stats["readers"] = u.fs.Size()
 	stats["nzb_storage"] = u.nzbStorage.Stats()
-	if u.par2Recovery != nil {
-		stats["par2_recovery"] = u.par2Recovery.Stats()
-	}
 	return stats
 }
 
@@ -1361,64 +1236,6 @@ func (u *Usenet) saveNZBFile(id string, content []byte) (string, error) {
 	return path, nil
 }
 
-// nzbArchivePath locates the retained, compressed source for an NZB. The name
-// must not end in .nzb: ClaimNewNZBs treats any bare .nzb in the metadata
-// directory as an unmanaged import and would re-import the whole archive.
-func (u *Usenet) nzbArchivePath(id string) string {
-	if u.metadataDir == "" || id == "" {
-		return ""
-	}
-	return filepath.Join(u.metadataDir, id+".nzb.gz")
-}
-
-// archiveNZBSource keeps a compressed copy of the source NZB so PAR2 recovery
-// can recover the raw article layout and parity files without going back to an
-// indexer. It writes through a temporary file so an interrupted write cannot
-// leave a truncated archive that only fails much later, at hydration time.
-func (u *Usenet) archiveNZBSource(nzb *storage.NZB) error {
-	if nzb == nil || nzb.Path == "" {
-		return nil
-	}
-	path := u.nzbArchivePath(nzb.ID)
-	if path == "" {
-		return nil
-	}
-	content, err := os.ReadFile(nzb.Path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return fmt.Errorf("read NZB source: %w", err)
-	}
-
-	tmp := path + ".tmp"
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return fmt.Errorf("create NZB archive: %w", err)
-	}
-	writer := gzip.NewWriter(file)
-	if _, err := writer.Write(content); err != nil {
-		_ = writer.Close()
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("compress NZB archive: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		_ = file.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("flush NZB archive: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close NZB archive: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("commit NZB archive: %w", err)
-	}
-	return nil
-}
-
 // StageNZB persists a queued NZB before an active-download worker starts.
 func (u *Usenet) StageNZB(id string, content []byte) (string, error) {
 	if id == "" {
@@ -1452,20 +1269,7 @@ func (u *Usenet) markAsProcessing(nzb *storage.NZB) error {
 func (u *Usenet) markAsCompleted(nzb *storage.NZB) error {
 	nzb.Status = NZBStatusCompleted
 
-	// The .meta segment map alone is enough to stream a completed NZB, but it is
-	// not enough to repair one: PAR2 recovery needs the raw article layout and
-	// the parity files, and only the source NZB carries both. Treating the
-	// source as dead weight is what forced the legacy hydration migration to go
-	// back to the Arrs, so keep a compressed copy instead of deleting it. NZBs
-	// are highly repetitive XML and compress by roughly an order of magnitude.
-	//
-	// The archive deliberately does not keep the .nzb extension: the metadata
-	// directory watcher treats a bare .nzb as an unmanaged import, and would
-	// re-import every archived source on the next scan.
 	if nzb.Path != "" {
-		if err := u.archiveNZBSource(nzb); err != nil {
-			u.logger.Warn().Err(err).Str("path", nzb.Path).Msg("Failed to archive NZB source file after completion")
-		}
 		if err := os.Remove(nzb.Path); err != nil && !os.IsNotExist(err) {
 			u.logger.Warn().Err(err).Str("path", nzb.Path).Msg("Failed to delete NZB source file after completion")
 		}
@@ -1497,11 +1301,6 @@ func (u *Usenet) markAsFailed(nzb *storage.NZB, err error) error {
 			u.logger.Warn().Err(err).Str("path", nzb.Path).Msg("Failed to delete NZB file from disk after failure")
 		}
 	}
-	if u.par2Recovery != nil && nzb.ID != "" {
-		if err := u.par2Recovery.DeleteNZB(nzb.ID); err != nil {
-			u.logger.Warn().Err(err).Str("nzb_id", nzb.ID).Msg("Failed to delete PAR2 recovery state after NZB failure")
-		}
-	}
 	return nil
 }
 
@@ -1524,22 +1323,9 @@ func (u *Usenet) Delete(nzoID string) error {
 		_ = os.Remove(failedMarker)
 	}
 
-	// A completed NZB has no Path, so the retained source archive has to be
-	// removed by ID or it outlives every other trace of the NZB.
-	if archive := u.nzbArchivePath(nzoID); archive != "" {
-		if err := os.Remove(archive); err != nil && !os.IsNotExist(err) {
-			u.logger.Warn().Err(err).Str("path", archive).Msg("Failed to delete NZB source archive from disk")
-		}
-	}
-
 	// Delete from file-based storage
 	if err := u.nzbStorage.DeleteNZB(nzoID); err != nil {
 		return fmt.Errorf("failed to delete NZB from storage: %w", err)
-	}
-	if u.par2Recovery != nil {
-		if err := u.par2Recovery.DeleteNZB(nzoID); err != nil {
-			return fmt.Errorf("failed to delete PAR2 recovery state: %w", err)
-		}
 	}
 	return nil
 }

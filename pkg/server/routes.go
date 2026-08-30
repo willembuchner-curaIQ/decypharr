@@ -53,7 +53,6 @@ func (s *Server) WebRoutes() http.Handler {
 			r.Put("/repair/config", s.handleUpdateRepairConfig)
 			r.Get("/repair/status", s.handleRepairStatus)
 			r.Post("/repair/run", s.handleRunRepair)
-			r.Post("/repair/hydrate", s.handleHydrateLegacyNZBs)
 			r.Post("/repair/stop", s.handleStopRepair)
 			r.Post("/repair/recheck/media", s.handleRecheckMedia)
 			r.Post("/repair/fix", s.handleFixBroken)

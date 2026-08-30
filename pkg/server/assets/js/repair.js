@@ -21,7 +21,6 @@ class RepairManager {
         $('stopRunBtn')?.addEventListener('click', () => this.stopRun());
         $('fixBrokenBtn')?.addEventListener('click', () => this.fixBroken());
         $('clearStateBtn')?.addEventListener('click', () => this.openClearStateModal());
-        $('hydrateBtn')?.addEventListener('click', () => this.hydrateLegacyNZBs());
         $('viewBrokenBtn')?.addEventListener('click', () => this.openBrokenModal());
         $('refreshHistoryBtn')?.addEventListener('click', () => this.loadHistory());
         $('refreshBrokenBtn')?.addEventListener('click', () => this.loadBroken());
@@ -59,11 +58,9 @@ class RepairManager {
         const ignore = document.getElementById('runIgnoreLastChecked');
         const autoRepair = document.getElementById('runAutoRepair');
         const verifyContent = document.getElementById('runVerifyContent');
-        const deepNZB = document.getElementById('runDeepNZB');
         if (ignore) ignore.checked = false;
         if (autoRepair) autoRepair.checked = !!this.repairConfig.auto_repair;
         if (verifyContent) verifyContent.checked = !!this.repairConfig.verify_content;
-        if (deepNZB) deepNZB.checked = false;
         const protocol = document.getElementById('runProtocolAll');
         if (protocol) protocol.checked = true;
         if (typeof modal.showModal === 'function') {
@@ -226,7 +223,6 @@ class RepairManager {
             const ignoreLastChecked = !!document.getElementById('runIgnoreLastChecked')?.checked;
             const autoRepair = !!document.getElementById('runAutoRepair')?.checked;
             const verifyContent = !!document.getElementById('runVerifyContent')?.checked;
-            const deepNZB = !!document.getElementById('runDeepNZB')?.checked;
             const protocol = document.querySelector('input[name="runProtocol"]:checked')?.value || 'all';
             const res = await fetch(`${this.api}/repair/run`, {
                 method: 'POST',
@@ -234,7 +230,6 @@ class RepairManager {
                 body: JSON.stringify({
                     ignore_last_checked: ignoreLastChecked,
                     auto_repair: autoRepair,
-                    deep_nzb: deepNZB,
                     // One-off runs always probe torrents via link generation;
                     // the toggle was removed in favor of this default.
                     unrestrict_link: true,
@@ -251,23 +246,6 @@ class RepairManager {
             await this.loadStatus();
         } catch (e) {
             this.toast(`Run failed: ${e.message}`, 'error');
-        } finally {
-            if (btn) btn.disabled = false;
-        }
-    }
-
-    async hydrateLegacyNZBs() {
-        if (!confirm('Rebuild PAR2 recovery data for older NZBs?\n\nThis re-fetches each release from its Arr, so it can run for a while and will retry entries whose last attempt failed.')) return;
-        const btn = document.getElementById('hydrateBtn');
-        if (btn) btn.disabled = true;
-        try {
-            const res = await fetch(`${this.api}/repair/hydrate`, { method: 'POST' });
-            const body = await res.text();
-            if (!res.ok) throw new Error(body || `HTTP ${res.status}`);
-            this.toast('Hydration run started', 'success');
-            await this.loadStatus();
-        } catch (e) {
-            this.toast(`Hydration failed to start: ${e.message}`, 'error');
         } finally {
             if (btn) btn.disabled = false;
         }
@@ -407,8 +385,6 @@ class RepairManager {
         this.updateBrokenCount(brokenCount);
         const fix = document.getElementById('fixBrokenBtn');
         if (fix) fix.disabled = !!status.active_run || brokenCount === 0;
-        const hydrate = document.getElementById('hydrateBtn');
-        if (hydrate) hydrate.disabled = !!status.active_run;
         const clear = document.getElementById('clearStateBtn');
         if (clear) clear.disabled = !!status.active_run;
         const view = document.getElementById('viewBrokenBtn');
@@ -468,19 +444,13 @@ class RepairManager {
             ['broken', 'Broken'],
             ['repaired', 'Repaired'],
             ['cleared', 'Cleared'],
-            ['repair_failed', 'Repair fail'],
-            ['par2_articles_scanned', 'PAR2 scanned'],
-            ['par2_articles_missing', 'PAR2 missing'],
-            ['par2_ranges_repaired', 'PAR2 patches'],
-            ['par2_ranges_failed', 'PAR2 failed'],
-            ['par2_download_bytes', 'PAR2 traffic'],
+			['repair_failed', 'Repair fail'],
         ];
         container.innerHTML = '';
         for (const [k, label] of fields) {
-            if (k.startsWith('par2_') && stats[k] == null) continue;
-            const el = document.createElement('div');
-            el.className = 'bg-base-100 rounded p-2';
-            const value = k === 'par2_download_bytes' ? this.formatBytes(stats[k]) : (stats[k] ?? 0);
+			const el = document.createElement('div');
+			el.className = 'bg-base-100 rounded p-2';
+			const value = stats[k] ?? 0;
             el.innerHTML = `<div class="text-[10px] opacity-60 uppercase">${label}</div><div class="font-mono">${value}</div>`;
             container.appendChild(el);
         }
@@ -763,7 +733,6 @@ class RepairManager {
                 <td>${run.stats?.probed ?? 0}</td>
                 <td class="${run.stats?.broken ? 'text-error font-medium' : ''}">${run.stats?.broken ?? 0}</td>
                 <td class="${run.stats?.repaired ? 'text-success font-medium' : ''}">${run.stats?.repaired ?? 0}</td>
-                <td class="${run.stats?.par2_ranges_repaired ? 'text-success font-medium' : ''}">${run.stats?.par2_ranges_repaired ?? 0}</td>
                 <td class="${run.stats?.cleared ? 'text-warning font-medium' : ''}">${run.stats?.cleared ?? 0}</td>
                 <td>${duration}</td>
                 <td class="text-xs text-error">${run.error || ''}</td>

@@ -279,25 +279,15 @@ func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx, restarts i
 		}
 
 		var n int64
-		var metadata *nntp.YencMetadata
 		var err error
 		if decodeBuffer := writer.DecodeBuffer(); decodeBuffer != nil {
 			var decoded []byte
-			decoded, metadata, err = conn.DecodeBodyIntoWithMetadata(messageID, decodeBuffer)
+			decoded, err = conn.DecodeBodyInto(messageID, decodeBuffer)
 			if err == nil {
-				if sf.config.Recovery != nil {
-					sf.config.Recovery.ObserveArticle(downloadCtx, sf.config.RecoveryNZBID, *seg, decoded, metadata)
-				}
 				n, err = writer.Adopt(decoded)
 			}
 		} else {
-			n, metadata, err = conn.StreamBodyWithMetadata(messageID, writer)
-			if err == nil && sf.config.Recovery != nil {
-				// The disk writer has already consumed the pooled body by the
-				// time StreamBodyWithMetadata returns. The exact yEnc layout is
-				// still valuable and requires no second BODY request.
-				sf.config.Recovery.ObserveArticle(downloadCtx, sf.config.RecoveryNZBID, *seg, nil, metadata)
-			}
+			n, err = conn.StreamBody(messageID, writer)
 		}
 		if err != nil {
 			writer.Discard()
@@ -328,37 +318,6 @@ func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx, restarts i
 	})
 
 	if err != nil {
-		definitiveArticleFailure := nntp.IsArticleNotFoundError(err) || nntp.IsYencDecodeError(err)
-		if definitiveArticleFailure && ctx.Err() == nil && sf.ctx.Err() == nil && sf.config.Recovery != nil && seg.RawFileKey != 0 && sf.config.RecoveryNZBID != "" {
-			var recovered []byte
-			var repairErr error
-			if sourceAware, ok := sf.config.Recovery.(SourceAwareArticleRecovery); ok {
-				recovered, repairErr = sourceAware.RecoverArticleWithSource(ctx, sf.config.RecoveryNZBID, *seg, cacheArticleRangeSource{cache: sf.cache})
-			} else {
-				recovered, repairErr = sf.config.Recovery.RecoverArticle(ctx, sf.config.RecoveryNZBID, *seg)
-			}
-			if repairErr == nil {
-				writer := sf.cache.StreamWriter(segIdx)
-				if writer == nil {
-					repairErr = ErrCacheClosed
-				} else {
-					n, writeErr := writer.Adopt(recovered)
-					repairErr = writeErr
-					if repairErr == nil && n > 0 {
-						writer.Finalize()
-						sf.stats.Repairs.Add(1)
-						sf.stats.RepairBytes.Add(n)
-						return nil
-					}
-					writer.Discard()
-					if repairErr == nil {
-						repairErr = fmt.Errorf("PAR2 recovery produced no data")
-					}
-				}
-			}
-			sf.stats.RepairErrors.Add(1)
-			err = articleRecoveryError(err, repairErr)
-		}
 		sf.stats.DownloadErrors.Add(1)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			sf.cache.ReleaseFetching(segIdx)
@@ -370,13 +329,6 @@ func (sf *SegmentFetcher) doFetchAttempt(ctx context.Context, segIdx, restarts i
 
 	sf.stats.Downloads.Add(1)
 	return nil
-}
-
-// articleRecoveryError keeps both failures in the unwrap tree. Callers need
-// the original provider outcome for availability decisions and the recovery
-// outcome for policy/provenance classification.
-func articleRecoveryError(articleErr, recoveryErr error) error {
-	return fmt.Errorf("%w (PAR2 recovery: %w)", articleErr, recoveryErr)
 }
 
 func (sf *SegmentFetcher) markPrefetchQueued(segIdx int) bool {

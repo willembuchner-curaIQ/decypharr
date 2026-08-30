@@ -178,70 +178,14 @@ grabs a replacement release. The check reads one article per video file.
 
 The default empty `disk_path` keeps the bounded streaming window in memory. Set a path to enable disk-backed rewind buffering, and ensure that location has sufficient free space.
 
-## Repair
+## Health Checks and Replacement
 
-```json
-{
-  "usenet": {
-    "par2": {
-      "enabled": true,
-      "max_download_percent": 10,
-      "max_download_bytes": "512MB",
-      "max_storage": "8GB"
-    }
-  }
-}
-```
-
-PAR2 recovery is lazy. A normal article request first exhausts provider and
-backbone failover, including failures caused by invalid yEnc data or CRCs.
-Only then does Decypharr fetch the smallest usable PAR2 metadata file, the
-minimum-cost standard recovery-volume combination, and the exact
-source-article ranges required by the requested repair. It writes only the
-repaired range, not a second complete copy of the media or archive.
-
-Verified source ranges still present in the active memory or disk stream cache
-are reused before the network plan is priced, so they consume no repair
-traffic. They remain owned by the normal stream cache and are not duplicated
-in `par2.db`.
-
-The operation is rejected before source/recovery downloads when its modeled
-traffic would exceed the smaller of `max_download_percent` and
-`max_download_bytes`. The percentage has a hard ceiling of 25%. This makes the
-limit a safety boundary rather than an instruction to download the whole NZB.
-The initial base PAR2 metadata file may need to be fetched before the final
-cost can be calculated; it is itself checked against the same budget.
-
-Repair covers directly posted media and raw files backing stored RAR, 7z, and
-ZIP members. PAR2 protects those posted source files, not bytes after archive
-decompression. Recovery state lives in `{main_path}/usenet/par2.db` and is
-removed with its NZB.
-
-For an NZB imported before raw-origin tracking, a paced startup worker first
-looks for the original local NZB metadata. If it is gone and the item came
-through Sonarr or Radarr, Decypharr uses the grab history to find the same
-current release and reacquires only its NZB XML. It processes one NZB at a time,
-backs off per Arr after transient Arr metadata failures, backs off only the
-affected item after other operational failures, and pauses completely while a
-repair or recheck is running. Every stored content message ID must match uniquely
-before Decypharr attaches the PAR2 manifest to the existing NZB ID; parser or
-release drift aborts without changing the catalog. This does not download the
-complete post. Only bounded yEnc/archive metadata probes and the normal minimum
-PAR2 repair plan can use NNTP BODY traffic. A repair probe that encounters a
-damaged legacy item while hydration is pending leaves it `unknown`; it does not
-delete or re-search the item. Deterministic PAR2 budget, layout, mapping,
-corruption, and insufficient-recovery failures make hydration unavailable
-instead of scheduling an identical retry. If the release is definitively
-unavailable, has no PAR2, or cannot be matched exactly, a subsequently confirmed
-failure can use the existing Arr replacement workflow.
-
-During import, Decypharr must observe enough valid yEnc metadata to establish
-the exact byte layout of every protected source file it may repair. If no part
-of a source file survives, Decypharr refuses to guess its offsets or download
-the whole post. Automatic minimum-volume planning also requires the standard
-`.volSTART+COUNT.par2` naming scheme; an unusually named PAR2 file is used only
-when it is independently sufficient. In either case, try another NZB or
-provider rather than weakening the repair budget.
+The health checker samples NZB article availability and can optionally validate
+each media file's container signature. If a file is definitively broken and is
+linked to an Arr item, `auto_repair` deletes it through Arr and triggers a
+replacement search. Connection and provider errors remain inconclusive and do
+not trigger replacement. See the [Health Checker & Repair guide](../repair/) for
+configuration and API details.
 
 ## Arr Integration
 
@@ -271,8 +215,6 @@ See [Sabnzbd Integration](./sabnzbd/) for details.
 
 ### Incomplete Downloads
 
-- Keep `usenet.par2.enabled` set to `true` (the default)
-- Check logs for a repair traffic/storage budget rejection
 - Check provider retention (old files may be incomplete)
 - Try backup provider if available
 
@@ -300,13 +242,7 @@ Full Usenet config with optimal settings:
     "read_ahead": "32MB",
     "processing_timeout": "15m",
     "availability_sample_percent": 5,
-    "disk_path": "/cache/usenet",
-    "par2": {
-      "enabled": true,
-      "max_download_percent": 10,
-      "max_download_bytes": "512MB",
-      "max_storage": "8GB"
-    }
+    "disk_path": "/cache/usenet"
   }
 }
 ```

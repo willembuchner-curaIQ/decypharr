@@ -599,39 +599,23 @@ func (c *Connection) GetDecodedBodyWithMetadata(messageID string) ([]byte, *Yenc
 // pwrite plus an exclusive buffer-lock acquisition; segment readers only see
 // bytes after Finalize, so whole-article batching adds no visible latency.
 func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
-	n, _, err := c.StreamBodyWithMetadata(messageID, w)
-	return n, err
-}
-
-// StreamBodyWithMetadata is StreamBody plus the exact yEnc layout learned
-// while decoding. Recovery uses that layout to map logical reads back to the
-// PAR2-protected source file without issuing a second BODY request.
-func (c *Connection) StreamBodyWithMetadata(messageID string, w io.Writer) (int64, *YencMetadata, error) {
 	res, err := c.requestBody(messageID)
 	if err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	n, err := w.Write(res.Data)
-	meta := metadataFromResult(res.Meta, nil)
 	putBodyBuf(res.Data)
-	return int64(n), meta, err
+	return int64(n), err
 }
 
 // DecodeBodyInto verifies one yEnc article into storage supplied by the
 // caller. The returned slice belongs to the caller and may be retained.
 func (c *Connection) DecodeBodyInto(messageID string, dst []byte) ([]byte, error) {
-	decoded, _, err := c.DecodeBodyIntoWithMetadata(messageID, dst)
-	return decoded, err
-}
-
-// DecodeBodyIntoWithMetadata is DecodeBodyInto plus the yEnc file/range
-// metadata obtained from the same verified response.
-func (c *Connection) DecodeBodyIntoWithMetadata(messageID string, dst []byte) ([]byte, *YencMetadata, error) {
 	res, err := c.requestBodyBuffered(messageID, dst, false)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return res.Data, metadataFromResult(res.Meta, nil), nil
+	return res.Data, nil
 }
 
 // readDotBytes reads dot-terminated NNTP data using textproto.DotReader

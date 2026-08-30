@@ -7,8 +7,6 @@ import (
 	"github.com/Tensai75/nzbparser"
 	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
-	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 )
 
 const maxCorruptHeaderProbes = 4
@@ -42,7 +40,7 @@ func headerProbeOrder(count int) []int {
 	return result
 }
 
-// fetchFileHeaderPrefix finds one usable article within a raw file. Definitive
+// fetchFileHeaderPrefix finds one usable article within a posted file. Definitive
 // missing responses do not consume article bodies and therefore do not count
 // against the corruption-probe ceiling. A decoded-but-corrupt response does
 // consume bandwidth, so at most maxCorruptHeaderProbes are attempted.
@@ -100,61 +98,20 @@ func fetchFileHeader(ctx context.Context, manager *nntp.Client, file nzbparser.N
 	return fetchFileHeaderPrefix(ctx, manager, file, metadataOnly)
 }
 
-// setArticleRecovery attaches the same raw-article repair path used by normal
-// streaming. Archive header parsing must use it too: otherwise an NZB can be
-// repairable at playback time but fail before its logical files are created.
-func (p *NZBParser) SetArticleRecovery(nzbID string, recovery reader.ArticleRecovery) {
-	if p == nil {
-		return
-	}
-	p.recoveryNZBID = nzbID
-	p.recovery = recovery
-}
-
-func (p *NZBParser) fsOptions() []fs.Option {
-	if p == nil || p.recovery == nil || p.recoveryNZBID == "" {
-		return nil
-	}
-	return []fs.Option{fs.WithArticleRecovery(p.recoveryNZBID, p.recovery)}
-}
-
-// fetchSegmentData returns exactly the raw-file bytes described by segment.
-// Normal NNTP/backbone failover always runs first. Only a definitive failure
-// reaches PAR2, and both paths apply the same SegmentDataStart/Bytes window.
-func fetchSegmentData(
-	ctx context.Context,
-	manager *nntp.Client,
-	nzbID string,
-	recovery reader.ArticleRecovery,
-	segment storage.NZBSegment,
-) ([]byte, error) {
-	meta := reader.NewSegmentMeta(segment)
+// fetchSegmentData returns exactly the decoded bytes described by segment.
+func fetchSegmentData(ctx context.Context, manager *nntp.Client, segment storage.NZBSegment) ([]byte, error) {
 	var (
-		body     []byte
-		yencMeta *nntp.YencMetadata
+		body []byte
 	)
 	err := manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
-		decoded, metadata, fetchErr := conn.GetDecodedBodyWithMetadata(segment.MessageID)
+		decoded, fetchErr := conn.GetDecodedBody(segment.MessageID)
 		if fetchErr == nil {
 			body = decoded
-			yencMeta = metadata
 		}
 		return fetchErr
 	})
-	if err == nil {
-		if recovery != nil && nzbID != "" {
-			recovery.ObserveArticle(ctx, nzbID, meta, body, yencMeta)
-		}
-	} else {
-		definitiveArticleFailure := nntp.IsArticleNotFoundError(err) || nntp.IsYencDecodeError(err)
-		if !definitiveArticleFailure || recovery == nil || nzbID == "" || segment.RawFileKey == 0 {
-			return nil, err
-		}
-		repaired, repairErr := recovery.RecoverArticle(ctx, nzbID, meta)
-		if repairErr != nil {
-			return nil, fmt.Errorf("%w (PAR2 recovery: %v)", err, repairErr)
-		}
-		body = repaired
+	if err != nil {
+		return nil, err
 	}
 
 	start := segment.SegmentDataStart

@@ -250,7 +250,7 @@ Set `auto_repair: true` if:
 
 - You have stable providers.
 - You want fully automated operation.
-- You want missing NZB articles patched locally with PAR2 before unrecoverable files are replaced through Arr.
+- You want broken Arr-managed files automatically deleted and searched again through Arr.
 
 Set `auto_repair: false` if:
 

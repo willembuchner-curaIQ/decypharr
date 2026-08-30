@@ -27,84 +27,6 @@ type UsenetProvider struct {
 	Backup bool `json:"backup,omitempty"`
 }
 
-// PAR2Repair configures on-demand recovery of damaged Usenet articles. The
-// network budget is deliberately expressed both as a fraction of the NZB and
-// as an absolute cap: the lower value wins, so a small repair can never turn
-// into an accidental download of every surviving source article.
-type PAR2Repair struct {
-	// Enabled defaults to true when omitted. PAR2 traffic is only attempted
-	// after normal provider/backbone failover has definitively failed.
-	Enabled *bool `json:"enabled,omitempty"`
-
-	// MaxDownloadPercent limits extra source and recovery article traffic as a
-	// percentage of the NZB's posted size. Values above 25 are clamped.
-	MaxDownloadPercent int `json:"max_download_percent,omitempty"`
-
-	// MaxDownloadBytes is the absolute companion to MaxDownloadPercent.
-	// Empty or invalid values use 512MB.
-	MaxDownloadBytes string `json:"max_download_bytes,omitempty"`
-
-	// MaxStorage bounds the dedicated PAR2 metadata/recovery/patch store.
-	// Empty or invalid values use 8GB.
-	MaxStorage string `json:"max_storage,omitempty"`
-}
-
-const par2HardMaxDownloadPercent = 25
-
-func (p PAR2Repair) IsZero() bool {
-	return p.Enabled == nil && p.MaxDownloadPercent == 0 && p.MaxDownloadBytes == "" && p.MaxStorage == ""
-}
-
-// IsEnabled reports whether on-demand PAR2 repair is enabled. It is safe to
-// enable by default because repair remains dormant until ordinary failover is
-// exhausted and is always subject to the bounded-traffic policy.
-func (p PAR2Repair) IsEnabled() bool {
-	return p.Enabled == nil || *p.Enabled
-}
-
-func (p PAR2Repair) DownloadPercent() int {
-	if p.MaxDownloadPercent <= 0 {
-		return 10
-	}
-	if p.MaxDownloadPercent > par2HardMaxDownloadPercent {
-		return par2HardMaxDownloadPercent
-	}
-	return p.MaxDownloadPercent
-}
-
-func (p PAR2Repair) DownloadBytes() int64 {
-	if p.MaxDownloadBytes != "" {
-		if n, err := ParseSize(p.MaxDownloadBytes); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 512 << 20
-}
-
-func (p PAR2Repair) StorageBytes() int64 {
-	if p.MaxStorage != "" {
-		if n, err := ParseSize(p.MaxStorage); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 8 << 30
-}
-
-// ExtraDownloadBudget returns the maximum additional NNTP bytes a repair may
-// fetch. It never returns more than either configured bound.
-func (p PAR2Repair) ExtraDownloadBudget(nzbBytes int64) int64 {
-	if !p.IsEnabled() || nzbBytes <= 0 {
-		return 0
-	}
-	percent := int64(p.DownloadPercent())
-	percentBudget := nzbBytes/100*percent + nzbBytes%100*percent/100
-	absBudget := p.DownloadBytes()
-	if percentBudget < absBudget {
-		return percentBudget
-	}
-	return absBudget
-}
-
 // ID returns the canonical identity of a provider: host, port, and account.
 // Host alone is NOT unique — a dual-account setup (e.g. an unlimited and a
 // block account on the same server) legitimately lists the same host twice —
@@ -148,10 +70,6 @@ type Usenet struct {
 	// BufferMemory caps resident Usenet extents across open window-mode streams.
 	// Empty defaults to 512MB; "0" disables the cap.
 	BufferMemory string `json:"buffer_memory,omitempty"`
-
-	// PAR2 controls bounded, on-demand recovery for missing or corrupt source
-	// ranges. Recovery state lives in a separate store from the NZB catalog.
-	PAR2 PAR2Repair `json:"par2,omitzero"`
 }
 
 // BufferMemoryBytes resolves the usenet streaming-buffer RAM cap. Empty ->
@@ -173,7 +91,7 @@ func (u Usenet) UsesDiskBuffer() bool {
 }
 
 func (u Usenet) IsZero() bool {
-	return len(u.Providers) == 0 && u.MaxConnections == 0 && u.ProcessingMaxConnections == 0 && u.ReadAhead == "" && u.ProcessingTimeout == "" && !u.UsesDiskBuffer() && u.PAR2.IsZero()
+	return len(u.Providers) == 0 && u.MaxConnections == 0 && u.ProcessingMaxConnections == 0 && u.ReadAhead == "" && u.ProcessingTimeout == "" && !u.UsesDiskBuffer()
 }
 
 func (c *Config) updateUsenetConfig() {
@@ -216,18 +134,6 @@ func (c *Config) updateUsenetConfig() {
 		c.Usenet.ImportAvailabilitySamplePercent = 1
 	} else if c.Usenet.ImportAvailabilitySamplePercent > 100 {
 		c.Usenet.ImportAvailabilitySamplePercent = 100
-	}
-
-	if c.Usenet.PAR2.MaxDownloadPercent <= 0 {
-		c.Usenet.PAR2.MaxDownloadPercent = 10
-	} else if c.Usenet.PAR2.MaxDownloadPercent > par2HardMaxDownloadPercent {
-		c.Usenet.PAR2.MaxDownloadPercent = par2HardMaxDownloadPercent
-	}
-	if c.Usenet.PAR2.MaxDownloadBytes == "" {
-		c.Usenet.PAR2.MaxDownloadBytes = "512MB"
-	}
-	if c.Usenet.PAR2.MaxStorage == "" {
-		c.Usenet.PAR2.MaxStorage = "8GB"
 	}
 
 	for i, provider := range c.Usenet.Providers {
@@ -328,22 +234,6 @@ func (c *Config) applyUsenetEnvVars() {
 	}
 	if diskPath := getEnv("USENET__DISK_PATH"); diskPath != "" {
 		c.Usenet.DiskPath = diskPath
-	}
-
-	if enabled := getEnv("USENET__PAR2__ENABLED"); enabled != "" {
-		v := parseBool(enabled)
-		c.Usenet.PAR2.Enabled = &v
-	}
-	if percent := getEnv("USENET__PAR2__MAX_DOWNLOAD_PERCENT"); percent != "" {
-		if v, err := strconv.Atoi(percent); err == nil {
-			c.Usenet.PAR2.MaxDownloadPercent = v
-		}
-	}
-	if value := getEnv("USENET__PAR2__MAX_DOWNLOAD_BYTES"); value != "" {
-		c.Usenet.PAR2.MaxDownloadBytes = value
-	}
-	if value := getEnv("USENET__PAR2__MAX_STORAGE"); value != "" {
-		c.Usenet.PAR2.MaxStorage = value
 	}
 
 	// Usenet providers array

@@ -738,58 +738,6 @@
                                                     buffering to disk</span>
                                             </div>
                                         </div>
-
-                                        <!-- PAR2 Settings -->
-                                        <div class="mt-8 border-t border-base-300 pt-6">
-                                            <h4 class="text-lg font-semibold flex items-center gap-2">
-                                                <span class="badge badge-warning badge-sm">alpha</span>
-                                                <i class="bi bi-shield-check text-secondary"></i>PAR2 Settings
-                                            </h4>
-
-                                            <label class="label cursor-pointer justify-start gap-3 mt-3">
-                                                <input type="checkbox" class="checkbox checkbox-secondary checkbox-lg"
-                                                       name="usenet.par2.enabled" id="usenet.par2.enabled" checked>
-                                                <div>
-                                                    <span class="font-medium">Enable PAR2 Repair</span>
-                                                    <div class="label-text-alt">Repair missing or corrupt articles only
-                                                        after normal provider and backbone failover.</div>
-                                                </div>
-                                            </label>
-
-                                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
-                                                <div>
-                                                    <label class="label" for="usenet.par2.max_download_percent">
-                                                        <span class="font-medium">PAR2 Traffic Limit %</span>
-                                                    </label>
-                                                    <input type="number" class="input w-full"
-                                                           name="usenet.par2.max_download_percent"
-                                                           id="usenet.par2.max_download_percent" min="1" max="25"
-                                                           value="10">
-                                                    <span class="text-sm opacity-70">Extra repair traffic as a percentage of
-                                                        posted NZB bytes (hard maximum: 25%)</span>
-                                                </div>
-                                                <div>
-                                                    <label class="label" for="usenet.par2.max_download_bytes">
-                                                        <span class="font-medium">PAR2 Absolute Traffic Limit</span>
-                                                    </label>
-                                                    <input type="text" class="input w-full"
-                                                           name="usenet.par2.max_download_bytes"
-                                                           id="usenet.par2.max_download_bytes" value="512MB">
-                                                    <span class="text-sm opacity-70">Absolute extra-download cap; the smaller
-                                                        of this and the percentage limit wins</span>
-                                                </div>
-                                                <div>
-                                                    <label class="label" for="usenet.par2.max_storage">
-                                                        <span class="font-medium">PAR2 Storage Limit</span>
-                                                    </label>
-                                                    <input type="text" class="input w-full"
-                                                           name="usenet.par2.max_storage"
-                                                           id="usenet.par2.max_storage" value="8GB">
-                                                    <span class="text-sm opacity-70">Dedicated metadata, recovery-slice, and
-                                                        repaired-patch storage</span>
-                                                </div>
-                                            </div>
-                                        </div>
                                     </div>
                                 </div>
                     </div>
@@ -1721,15 +1669,19 @@ fe80::/10</textarea>
                                 </select>
                             </div>
 
-                            <div>
-                                <label class="label" for="repair.arrs">
-                                    <span class="font-medium">Arrs to include
-                                        <span class="opacity-60 font-normal">(empty = all eligible)</span>
-                                    </span>
-                                </label>
-                                <select class="select w-full" name="repair.arrs" id="repair.arrs" multiple
-                                        size="3"></select>
-                            </div>
+                            <fieldset>
+                                <legend class="label" id="repair-arrs-label">
+                                    <span class="font-medium">Arrs to include</span>
+                                </legend>
+                                <div class="max-h-36 min-h-12 overflow-y-auto rounded-box border border-base-300 bg-base-100 p-2"
+                                     id="repair.arrs" role="group" aria-labelledby="repair-arrs-label"
+                                     aria-describedby="repair-arrs-help">
+                                    <p class="px-3 py-2 text-sm opacity-60">No eligible Arrs configured.</p>
+                                </div>
+                                <p class="label-text-alt mt-1 opacity-70" id="repair-arrs-help">
+                                    Leave every Arr unchecked to include all eligible Arrs.
+                                </p>
+                            </fieldset>
 
                             <div>
                                 <label class="label" for="repair.schedule">
@@ -1756,15 +1708,6 @@ fe80::/10</textarea>
                                 </label>
                                 <input type="number" min="1" class="input w-full" name="repair.workers"
                                        id="repair.workers" value="50">
-                            </div>
-
-                            <div>
-                                <label class="label" for="repair.deep_nzb_interval">
-                                    <span class="font-medium">Deep NZB audit interval</span>
-                                </label>
-                                <input type="text" class="input w-full" name="repair.deep_nzb_interval"
-                                       id="repair.deep_nzb_interval" placeholder="720h">
-                                <span class="label-text-alt opacity-70">Minimum age for a full STAT audit during a normal repair check. Use 0 to disable periodic deep audits.</span>
                             </div>
 
                             <div>
@@ -1801,7 +1744,7 @@ fe80::/10</textarea>
                             <label class="label cursor-pointer justify-start gap-3">
                                 <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
                                        id="repair.auto_repair" name="repair.auto_repair">
-                                <span class="label-text font-medium" title="Missing NZB articles are repaired locally with PAR2 before Arr replacement is attempted.">Auto-repair when broken</span>
+                                <span class="label-text font-medium" title="Delete broken files through Arr and trigger a replacement search.">Auto-repair when broken</span>
                             </label>
                             <label class="label cursor-pointer justify-start gap-3"
                                    title="Read each media file's head and check for a valid container signature during NZB probes. Finds files whose articles exist but were assembled wrong. Downloads one article per file probed.">
@@ -1864,19 +1807,18 @@ fe80::/10</textarea>
 
                         <div class="divider text-sm opacity-60">Advice policy</div>
 
-                        <div>
-                            <label class="label" for="hearsay.advice_mode">
-                                <span class="font-medium">Mode</span>
-                            </label>
-                            <select class="select w-full" id="hearsay.advice_mode" name="hearsay.advice_mode">
-                                <option value="shadow">Shadow — measure only</option>
-                                <option value="active">Active — skip strongly denied adds</option>
-                            </select>
-                            <span class="label-text-alt opacity-70">Start in shadow mode, review accuracy on the Stats
+                        <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                            <div>
+                                <label class="label" for="hearsay.advice_mode">
+                                    <span class="font-medium">Mode</span>
+                                </label>
+                                <select class="select w-full" id="hearsay.advice_mode" name="hearsay.advice_mode">
+                                    <option value="shadow">Shadow — measure only</option>
+                                    <option value="active">Active — skip strongly denied adds</option>
+                                </select>
+                                <span class="label-text-alt opacity-70">Start in shadow mode, review accuracy on the Stats
                                 page, then opt into active decisions.</span>
-                        </div>
-
-                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                            </div>
                             <div>
                                 <label class="label" for="hearsay.min_support"><span class="font-medium">Minimum support</span></label>
                                 <input type="number" min="0" max="1" step="0.05" class="input w-full"
@@ -1892,11 +1834,6 @@ fe80::/10</textarea>
                                 <input type="number" min="1" step="1" class="input w-full"
                                        id="hearsay.min_sources" name="hearsay.min_sources" placeholder="1">
                             </div>
-                        </div>
-
-                        <div class="divider text-sm opacity-60">Network limits</div>
-
-                        <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
                             <div>
                                 <label class="label" for="hearsay.port">
                                     <span class="font-medium">Sharing port</span>
@@ -1924,9 +1861,6 @@ fe80::/10</textarea>
                                 <span class="label-text-alt opacity-70">How often Decypharr sends and receives
                                     updates.</span>
                             </div>
-                        </div>
-
-                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
                             <div>
                                 <label class="label" for="hearsay.max_storage_bytes">
                                     <span class="font-medium">Maximum relay storage</span>

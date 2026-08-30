@@ -17,7 +17,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
-	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
 
@@ -64,13 +63,6 @@ type ZIPParser struct {
 	manager       *nntp.Client
 	maxConcurrent int
 	logger        zerolog.Logger
-	recovery      reader.ArticleRecovery
-	recoveryNZBID string
-}
-
-func (p *ZIPParser) setArticleRecovery(nzbID string, recovery reader.ArticleRecovery) {
-	p.recoveryNZBID = nzbID
-	p.recovery = recovery
 }
 
 // NewZIPParser creates a new ZIP parser
@@ -221,7 +213,7 @@ func (p *ZIPParser) fetchVolumeEndSnippet(ctx context.Context, vol *types.Volume
 	}
 
 	fetch := func(segment storage.NZBSegment) ([]byte, error) {
-		return fetchSegmentData(ctx, p.manager, p.recoveryNZBID, p.recovery, segment)
+		return fetchSegmentData(ctx, p.manager, segment)
 	}
 
 	last := len(vol.Segments) - 1
@@ -497,11 +489,7 @@ func (p *ZIPParser) calculateZIPDataOffset(ctx context.Context, volumes []*types
 	headerOffset := file.LocalHeaderOffset
 
 	// Create a temporary FS to read the local header
-	options := []fs.Option(nil)
-	if p.recovery != nil && p.recoveryNZBID != "" {
-		options = append(options, fs.WithArticleRecovery(p.recoveryNZBID, p.recovery))
-	}
-	usenetFS, err := fs.NewFS(ctx, p.manager, p.maxConcurrent, 0, volumes, p.logger, options...) // 0 prefetch for parsing
+	usenetFS, err := fs.NewFS(ctx, p.manager, p.maxConcurrent, 0, volumes, p.logger) // 0 prefetch for parsing
 	if err != nil {
 		return 0, fmt.Errorf("failed to create FS: %w", err)
 	}

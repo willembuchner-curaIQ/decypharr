@@ -106,45 +106,6 @@ func (s *NZBStorage) AddNZB(nzb *storage.NZB) error {
 	return s.writeNZBLocked(nzb)
 }
 
-// UpdateNZB atomically loads and conditionally rewrites one NZB while holding
-// the same lock used by all catalog writes. The mutator receives an owned
-// decoded value; returning an error leaves the on-disk bytes untouched. This
-// is used by legacy provenance hydration so a long reacquisition/parser pass
-// cannot clobber status or topology changed by another goroutine meanwhile.
-func (s *NZBStorage) UpdateNZB(id string, mutate func(*storage.NZB) error) error {
-	if strings.TrimSpace(id) == "" {
-		return fmt.Errorf("NZB ID is required")
-	}
-	if mutate == nil {
-		return fmt.Errorf("NZB update function is required")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	path := s.metaFilePath(id)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("nzb not found: %s", id)
-		}
-		return fmt.Errorf("failed to read NZB meta file: %w", err)
-	}
-	nzb, err := decodeNZB(data)
-	if err != nil {
-		return fmt.Errorf("failed to decode NZB: %w", err)
-	}
-	if nzb.ID != id {
-		return fmt.Errorf("stored NZB ID %q does not match update key %q", nzb.ID, id)
-	}
-	if err := mutate(nzb); err != nil {
-		return err
-	}
-	if nzb.ID != id {
-		return fmt.Errorf("NZB update cannot change ID from %q to %q", id, nzb.ID)
-	}
-	return s.writeNZBLocked(nzb)
-}
-
 // writeNZBLocked persists an NZB and updates cached storage stats. Caller must
 // hold s.mu.
 func (s *NZBStorage) writeNZBLocked(nzb *storage.NZB) error {
@@ -204,35 +165,6 @@ func (s *NZBStorage) GetNZB(id string) (*storage.NZB, error) {
 	}
 
 	return decodeNZB(data)
-}
-
-// RecoveryOriginState reports the Arr category and whether the NZB still lacks
-// raw article provenance on any content segment. The legacy hydration scan asks
-// this of every stored NZB, so it avoids GetNZB: for v2 blobs it reads the
-// header and numeric columns only, never inflating the message-id region or
-// allocating a segment map. Legacy proto files fall back to a full decode.
-func (s *NZBStorage) RecoveryOriginState(id string) (category string, missing bool, err error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	path := s.metaFilePath(id)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", false, fmt.Errorf("nzb not found: %s", id)
-		}
-		return "", false, fmt.Errorf("failed to read NZB meta file: %w", err)
-	}
-
-	if isCodecV2(data) {
-		return decodeNZBV2RecoveryOriginState(data)
-	}
-
-	nzb, err := decodeNZB(data)
-	if err != nil {
-		return "", false, err
-	}
-	return nzb.Category, hasMissingRecoveryOrigins(nzb), nil
 }
 
 // GetNZBHeader retrieves an NZB without its segment map. It is far cheaper than

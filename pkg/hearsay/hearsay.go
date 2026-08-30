@@ -25,7 +25,6 @@ import (
 	hsusenet "github.com/sirrobot01/hearsay/usenet"
 
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 )
 
@@ -533,11 +532,7 @@ func (h zerologHandler) WithGroup(string) slog.Handler { return h }
 func NZBSubjectFromGroups(groups map[string]*parser.FileGroup) string {
 	var ids []string
 	for _, g := range groups {
-		// Par2 only: the library spec excludes those and nothing else,
-		// because "incidental" file classes like nfo or txt are local
-		// policy that another implementation cannot reproduce, and any
-		// disagreement yields a different subject for the same post.
-		if g == nil || g.Type == storage.NZBFileTypePar2 {
+		if g == nil {
 			continue
 		}
 		for i := range g.Files {

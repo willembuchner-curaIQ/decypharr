@@ -1,9 +1,7 @@
 package arr
 
 import (
-	"context"
 	"fmt"
-	"maps"
 	"net/http"
 	gourl "net/url"
 	"strconv"
@@ -80,14 +78,12 @@ type HistorySchema struct {
 }
 
 type HistoryRecord struct {
-	ID          int               `json:"id"`
-	DownloadID  string            `json:"downloadId"`
-	EventType   string            `json:"eventType"`
-	EpisodeID   int               `json:"episodeId,omitempty"`
-	SeriesID    int               `json:"seriesId,omitempty"`
-	MovieID     int               `json:"movieId,omitempty"`
-	SourceTitle string            `json:"sourceTitle,omitempty"`
-	Data        map[string]string `json:"data,omitempty"`
+	ID         int    `json:"id"`
+	DownloadID string `json:"downloadId"`
+	EventType  string `json:"eventType"`
+	EpisodeID  int    `json:"episodeId,omitempty"`
+	SeriesID   int    `json:"seriesId,omitempty"`
+	MovieID    int    `json:"movieId,omitempty"`
 }
 
 type QueueResponseScheme struct {
@@ -252,27 +248,15 @@ func (a *Arr) CleanupQueue() error {
 	return nil
 }
 
-// FindGrabHistory returns the complete most-recent "grabbed" history record
-// for an episode (Sonarr) or movie (Radarr). It returns (nil, nil) when no grab
-// record exists, such as after history trimming or a manual import.
-func (a *Arr) FindGrabHistory(mediaDBID int) (*HistoryRecord, error) {
-	return a.FindGrabHistoryCtx(context.Background(), mediaDBID)
-}
-
-// FindGrabHistoryCtx is FindGrabHistory with cancellation support.
-func (a *Arr) FindGrabHistoryCtx(ctx context.Context, mediaDBID int) (*HistoryRecord, error) {
-	return a.findGrabHistoryCtx(ctx, mediaDBID, false)
-}
-
-func (a *Arr) findGrabHistoryCtx(ctx context.Context, mediaDBID int, reacquisition bool) (*HistoryRecord, error) {
+// FindGrabHistoryID returns the ID and downloadId of the most recent "grabbed"
+// history record for the given episode (Sonarr) or movie (Radarr). Returns
+// (0, "", nil) when no grab record is found (e.g. history trimmed, manual import).
+func (a *Arr) FindGrabHistoryID(mediaDBID int) (int, string, error) {
 	if a == nil {
-		return nil, fmt.Errorf("arr not configured")
+		return 0, "", fmt.Errorf("arr not configured")
 	}
 	if mediaDBID <= 0 {
-		return nil, nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
+		return 0, "", nil
 	}
 
 	query := gourl.Values{}
@@ -288,83 +272,22 @@ func (a *Arr) findGrabHistoryCtx(ctx context.Context, mediaDBID int, reacquisiti
 	case Radarr:
 		query.Add("movieIds", strconv.Itoa(mediaDBID))
 	default:
-		return nil, nil
+		return 0, "", nil
 	}
 
 	var data HistorySchema
 	url := "api/v3/history?" + query.Encode()
-	request := a.RequestCtx
-	if reacquisition {
-		request = a.requestNZBReacquisitionCtx
-	}
-	resp, err := request(ctx, http.MethodGet, url, nil, &data)
+	resp, err := a.Request(http.MethodGet, url, nil, &data)
 	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, &NZBMetadataError{Stage: "history lookup", Status: resp.StatusCode}
-	}
-	if len(data.Records) == 0 {
-		return nil, nil
-	}
-	record := data.Records[0]
-	record.Data = maps.Clone(record.Data)
-	return &record, nil
-}
-
-// FindGrabHistoryByDownloadIDCtx finds the grab that created a download-client item.
-func (a *Arr) FindGrabHistoryByDownloadIDCtx(ctx context.Context, downloadID string) (*HistoryRecord, error) {
-	return a.findGrabHistoryByDownloadIDCtx(ctx, downloadID, false)
-}
-
-func (a *Arr) findGrabHistoryByDownloadIDCtx(ctx context.Context, downloadID string, reacquisition bool) (*HistoryRecord, error) {
-	if a == nil {
-		return nil, fmt.Errorf("arr not configured")
-	}
-	downloadID = strings.TrimSpace(downloadID)
-	if downloadID == "" {
-		return nil, nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	query := gourl.Values{}
-	query.Set("page", "1")
-	query.Set("pageSize", "50")
-	query.Set("sortKey", "date")
-	query.Set("sortDirection", "descending")
-	query.Set("eventType", "1")
-	query.Set("downloadId", downloadID)
-
-	var data HistorySchema
-	request := a.RequestCtx
-	if reacquisition {
-		request = a.requestNZBReacquisitionCtx
-	}
-	resp, err := request(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &data)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, &NZBMetadataError{Stage: "history lookup", Status: resp.StatusCode}
-	}
-	for _, record := range data.Records {
-		if !strings.EqualFold(strings.TrimSpace(record.DownloadID), downloadID) {
-			continue
-		}
-		record.Data = maps.Clone(record.Data)
-		return &record, nil
-	}
-	return nil, nil
-}
-
-// FindGrabHistoryID preserves the original ID-only API for existing callers.
-func (a *Arr) FindGrabHistoryID(mediaDBID int) (int, string, error) {
-	record, err := a.FindGrabHistory(mediaDBID)
-	if err != nil || record == nil {
 		return 0, "", err
 	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, "", fmt.Errorf("history lookup failed: %s", resp.Status)
+	}
+	if len(data.Records) == 0 {
+		return 0, "", nil
+	}
+	record := data.Records[0]
 	return record.ID, record.DownloadID, nil
 }
 

@@ -12,8 +12,7 @@ const (
 	NZBFileTypeRar      NZBFileType = "rar"     // RAR archives (.rar, .r00, .r01, etc.)
 	NZBFileTypeSevenZip NZBFileType = "7z"      // 7z archives (.7z, .001, .002, etc.)
 	NZBFileTypeZip      NZBFileType = "zip"     // ZIP archives (.zip, .z01, .z02, etc.)
-	NZBFileTypePar2     NZBFileType = "par2"    // PAR2 files (.par2)
-	NZBFileTypeIgnore   NZBFileType = "ignore"  // Files to ignore (.nfo, .txt,par2 etc.)
+	NZBFileTypeIgnore   NZBFileType = "ignore"  // Non-content files to ignore
 	NZBFileTypeUnknown  NZBFileType = "unknown" // Unknown file type
 )
 
@@ -53,7 +52,7 @@ type NZBFile struct {
 	StartOffset   int64        `json:"start_offset" msgpack:"start_offset"`
 	Segments      []NZBSegment `json:"segments" msgpack:"segments"`
 	Groups        []string     `json:"groups" msgpack:"groups"`
-	FileType      NZBFileType  `json:"archive_type,omitempty" msgpack:"archive_type,omitempty"` // Type of the file (media, rar, 7z, zip, par2, ignore, unknown)
+	FileType      NZBFileType  `json:"archive_type,omitempty" msgpack:"archive_type,omitempty"` // Type of the file (media, rar, 7z, zip, ignore, unknown)
 	Password      string       `json:"password,omitempty" msgpack:"password,omitempty"`
 	IsDeleted     bool         `json:"is_deleted" msgpack:"is_deleted"`
 	IsStored      bool         `json:"is_stored,omitempty" msgpack:"is_stored,omitempty"`           // True if stored without compression (seekable)
@@ -105,14 +104,11 @@ func (nzb *NZB) GetFiles() []NZBFile {
 type NZBSegment struct {
 	Number           int    `json:"number" msgpack:"number"`
 	MessageID        string `json:"message_id" msgpack:"message_id"`
-	Bytes            int64  `json:"bytes" msgpack:"bytes"`                                   // Size of data to read from this segment
-	StartOffset      int64  `json:"start_offset" msgpack:"start_offset"`                     // Position in the OUTPUT file where this segment's data goes
-	EndOffset        int64  `json:"end_offset" msgpack:"end_offset"`                         // End position in the OUTPUT file
-	Group            string `json:"group"`                                                   // Newsgroup
-	SegmentDataStart int64  `json:"segment_data_start" msgpack:"segment_data_start"`         // Offset within the decoded NNTP segment where reading should begin (for sliced reads)
-	RawFileKey       uint32 `json:"raw_file_key,omitempty" msgpack:"raw_file_key,omitempty"` // NZB-scoped recovery.RawFileKey (0 means unknown/legacy)
-	RawOffset        int64  `json:"raw_offset,omitempty" msgpack:"raw_offset,omitempty"`     // Offset within the PAR2-protected raw source file
-	RawLength        int64  `json:"raw_length,omitempty" msgpack:"raw_length,omitempty"`     // Bytes consumed from the raw source file
+	Bytes            int64  `json:"bytes" msgpack:"bytes"`                           // Size of data to read from this segment
+	StartOffset      int64  `json:"start_offset" msgpack:"start_offset"`             // Position in the OUTPUT file where this segment's data goes
+	EndOffset        int64  `json:"end_offset" msgpack:"end_offset"`                 // End position in the OUTPUT file
+	Group            string `json:"group"`                                           // Newsgroup
+	SegmentDataStart int64  `json:"segment_data_start" msgpack:"segment_data_start"` // Offset within the decoded NNTP segment where reading should begin (for sliced reads)
 }
 
 // ArchiveVolumeInfo holds metadata about archive volumes (internal parser use only)

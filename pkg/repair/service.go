@@ -34,11 +34,7 @@ type Status struct {
 type RunOptions struct {
 	IgnoreLastChecked bool
 	AutoRepair        *bool
-	DeepNZB           bool
 	UnrestrictLink    bool
-	// ForceHydration retries PAR2 hydration even for entries whose last attempt
-	// failed persistently. Only a manual request sets it.
-	ForceHydration bool
 	// VerifyContent additionally head-verifies each NZB media file through
 	// the serving stack (container-signature check). Catches files whose
 	// articles all exist but were assembled wrong — invisible to the default
@@ -57,13 +53,8 @@ const (
 	repairSchedulerTag     = "repair-sweep"
 	repairStopSchedulerTag = "repair-sweep-stop"
 	repairDefaultWorkers   = 5
-	// repairHydrationConcurrency caps concurrent in-place PAR2 hydrations for
-	// the whole service. Each one holds a parsed NZB and its article index, so
-	// this is the knob that bounds repair memory, not the worker count.
-	repairHydrationConcurrency = 5
-	repairDefaultRecheck       = 7 * 24 * time.Hour
-	repairDefaultDeepNZB       = 30 * 24 * time.Hour
-	repairHistoryRetained      = 100
+	repairDefaultRecheck   = 7 * 24 * time.Hour
+	repairHistoryRetained  = 100
 	// At most this many files probed concurrently within a single entry. The
 	// outer worker count comes from cfg.Repair.Workers.
 	repairFilesPerEntry    = 2
@@ -101,12 +92,6 @@ type Service struct {
 	hearsay       *hearsay.Service
 	logger        zerolog.Logger
 
-	// hydrationSlots bounds in-place PAR2 hydration across a whole run. Repair
-	// workers can be configured in the hundreds, and one hydration holds a
-	// parsed NZB plus its article index, so the bound has to live here rather
-	// than follow the worker count.
-	hydrationSlots chan struct{}
-
 	mu             sync.Mutex
 	parentCtx      context.Context
 	activeRunID    string
@@ -119,7 +104,7 @@ type Service struct {
 
 // New builds a repair service from its dependencies.
 func New(deps Dependencies) *Service {
-	service := &Service{
+	return &Service{
 		scheduler:     deps.Scheduler,
 		backend:       deps.Backend,
 		storage:       deps.Storage,
@@ -130,24 +115,6 @@ func New(deps Dependencies) *Service {
 		logger:        logger.New("repair"),
 		parentCtx:     context.Background(),
 	}
-	service.hydrationSlots = make(chan struct{}, repairHydrationConcurrency)
-	return service
-}
-
-// hydrateBounded runs one in-place hydration, waiting for a slot first. It is
-// the only path that performs hydration, so the semaphore caps concurrent NZB
-// parses regardless of how many repair workers are configured.
-func (r *Service) hydrateBounded(ctx context.Context, nzbID string, source nzbHydrationSource) error {
-	if r == nil || r.hydrationSlots == nil {
-		return r.hydrateLegacyNZB(ctx, nzbID, source)
-	}
-	select {
-	case r.hydrationSlots <- struct{}{}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	defer func() { <-r.hydrationSlots }()
-	return r.hydrateLegacyNZB(ctx, nzbID, source)
 }
 
 func (r *Service) cfg() config.RepairConfig { return config.Get().Repair }
@@ -202,30 +169,4 @@ func (r *Service) recheckInterval() time.Duration {
 		return repairDefaultRecheck
 	}
 	return d
-}
-
-func (r *Service) deepNZBInterval() time.Duration {
-	raw := strings.TrimSpace(r.cfg().DeepNZBInterval)
-	if raw == "0" {
-		return 0
-	}
-	if raw == "" {
-		return repairDefaultDeepNZB
-	}
-	d, err := utils.ParseDuration(raw)
-	if err != nil || d < 0 {
-		return repairDefaultDeepNZB
-	}
-	return d
-}
-
-func (r *Service) shouldDeepNZB(lastAudit time.Time, force, autoRepair bool, now time.Time) bool {
-	if !autoRepair {
-		return false
-	}
-	if force {
-		return true
-	}
-	interval := r.deepNZBInterval()
-	return interval > 0 && (lastAudit.IsZero() || now.Sub(lastAudit) >= interval)
 }

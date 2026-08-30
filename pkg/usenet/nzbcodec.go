@@ -164,28 +164,6 @@ func (r *byteReader) skip() error {
 	return nil
 }
 
-// skipVarints advances past n varints without decoding them. Every varint byte
-// but the last has the continuation bit set, so the terminator is the first
-// byte below 0x80. This holds for both signed and unsigned columns.
-func (r *byteReader) skipVarints(n int) error {
-	buf := r.buf
-	pos := r.pos
-	for range n {
-		for {
-			if pos >= len(buf) {
-				return fmt.Errorf("nzbcodec: varint column out of range")
-			}
-			b := buf[pos]
-			pos++
-			if b < 0x80 {
-				break
-			}
-		}
-	}
-	r.pos = pos
-	return nil
-}
-
 func (r *byteReader) boolean() (bool, error) {
 	if r.pos >= len(r.buf) {
 		return false, fmt.Errorf("nzbcodec: bool out of range")
@@ -346,26 +324,6 @@ func encodeSegments(nzb *storage.NZB) (segMeta, msgIDs []byte) {
 	}
 	for _, idx := range idxCol {
 		sw.uvarint(idx)
-	}
-
-	// Optional segment-origin extension. Keeping it at the end lets the v2
-	// decoder continue reading metadata written before PAR2 support; zero is
-	// reserved for legacy/unknown origins.
-	sw.uvarint(1) // extension version
-	for i := range nzb.Files {
-		for j := range nzb.Files[i].Segments {
-			sw.uvarint(uint64(nzb.Files[i].Segments[j].RawFileKey))
-		}
-	}
-	for i := range nzb.Files {
-		for j := range nzb.Files[i].Segments {
-			sw.varint(nzb.Files[i].Segments[j].RawOffset)
-		}
-	}
-	for i := range nzb.Files {
-		for j := range nzb.Files[i].Segments {
-			sw.varint(nzb.Files[i].Segments[j].RawLength)
-		}
 	}
 
 	// Message id region (its own buffer so a full decode retains only these
@@ -651,42 +609,6 @@ func decodeSegments(nzb *storage.NZB, counts []int, segMeta, msgIDs []byte) erro
 		segs[i].Group = groups[idx]
 	}
 
-	// Segment origins were added as a trailing v2 extension. Old v2 blobs end
-	// immediately after the group column and intentionally decode to zero
-	// origins, which the recovery layer reports as legacy metadata.
-	if r.pos < len(r.buf) {
-		extVersion, err := r.uvarint()
-		if err != nil {
-			return err
-		}
-		if extVersion != 1 {
-			return fmt.Errorf("nzbcodec: unsupported segment extension %d", extVersion)
-		}
-		for i := 0; i < total; i++ {
-			v, err := r.uvarint()
-			if err != nil {
-				return err
-			}
-			if v > math.MaxUint32 {
-				return fmt.Errorf("nzbcodec: raw file key %d out of range", v)
-			}
-			segs[i].RawFileKey = uint32(v)
-		}
-		for i := 0; i < total; i++ {
-			if segs[i].RawOffset, err = r.varint(); err != nil {
-				return err
-			}
-		}
-		for i := 0; i < total; i++ {
-			if segs[i].RawLength, err = r.varint(); err != nil {
-				return err
-			}
-		}
-		if r.pos != len(r.buf) {
-			return fmt.Errorf("nzbcodec: %d trailing segment metadata bytes", len(r.buf)-r.pos)
-		}
-	}
-
 	// Message ids alias the msgIDs buffer (no per-id allocation).
 	mr := &byteReader{buf: msgIDs}
 	for i := 0; i < total; i++ {
@@ -843,124 +765,4 @@ func readTime(r *byteReader) (time.Time, error) {
 		return time.Time{}, err
 	}
 	return time.Unix(sec, 0), nil
-}
-
-// decodeNZBV2RecoveryOriginState reports the Arr category and whether any
-// content segment still lacks raw article provenance, without materialising the
-// segment map.
-//
-// The legacy hydration scan asks this of every NZB in the library, and doing it
-// through a full decode dominated allocation: it inflated the message-id region
-// (the largest of the three) and built one NZBSegment per segment, purely to
-// read three numeric columns. This walks the numeric columns in place instead,
-// never touches the message ids, and allocates nothing per segment beyond a
-// one-byte content mask.
-func decodeNZBV2RecoveryOriginState(data []byte) (category string, missing bool, err error) {
-	hc, sc, _, err := splitRegions(data)
-	if err != nil {
-		return "", false, err
-	}
-	header, err := zstdDec.DecodeAll(hc, nil)
-	if err != nil {
-		return "", false, fmt.Errorf("nzbcodec: decompress header: %w", err)
-	}
-	nzb, counts, err := decodeHeader(header)
-	if err != nil {
-		return "", false, err
-	}
-	category = nzb.Category
-
-	// PAR2, ignored and deleted files carry no provenance of their own, so they
-	// must not force hydration. Mark only the segments that count.
-	total := 0
-	for _, c := range counts {
-		total += c
-	}
-	if total == 0 {
-		return category, false, nil
-	}
-	content := make([]bool, total)
-	found := false
-	off := 0
-	for i := range nzb.Files {
-		f := &nzb.Files[i]
-		keep := !f.IsDeleted && f.FileType != storage.NZBFileTypePar2 && f.FileType != storage.NZBFileTypeIgnore
-		if keep && counts[i] > 0 {
-			found = true
-			for j := off; j < off+counts[i]; j++ {
-				content[j] = true
-			}
-		}
-		off += counts[i]
-	}
-	if !found {
-		return category, false, nil
-	}
-
-	segMeta, err := zstdDec.DecodeAll(sc, nil)
-	if err != nil {
-		return "", false, fmt.Errorf("nzbcodec: decompress seg meta: %w", err)
-	}
-	r := &byteReader{buf: segMeta}
-
-	// Skip the group table and the six columns that precede the origins:
-	// Number, Bytes, StartOffset, EndOffset, SegmentDataStart (varint) and the
-	// group index (uvarint). Varints are variable width, so they have to be
-	// walked rather than seeked past.
-	nGroups, err := r.uvarint()
-	if err != nil {
-		return "", false, err
-	}
-	for range nGroups {
-		if err := r.skip(); err != nil {
-			return "", false, err
-		}
-	}
-	if err := r.skipVarints(6 * total); err != nil {
-		return "", false, err
-	}
-
-	// Origins are a trailing v2 extension. Blobs written before it ends here,
-	// and decode to zero origins, which is exactly the legacy case.
-	if r.pos >= len(r.buf) {
-		return category, true, nil
-	}
-	extVersion, err := r.uvarint()
-	if err != nil {
-		return "", false, err
-	}
-	if extVersion != 1 {
-		return "", false, fmt.Errorf("nzbcodec: unsupported segment extension %d", extVersion)
-	}
-
-	// Matches recoveryOriginCoverage: the first content segment without a
-	// complete origin settles it, so stop at the first hit.
-	for i := range total {
-		v, err := r.uvarint()
-		if err != nil {
-			return "", false, err
-		}
-		if content[i] && v == 0 {
-			return category, true, nil
-		}
-	}
-	for i := range total {
-		v, err := r.varint()
-		if err != nil {
-			return "", false, err
-		}
-		if content[i] && v < 0 {
-			return category, true, nil
-		}
-	}
-	for i := range total {
-		v, err := r.varint()
-		if err != nil {
-			return "", false, err
-		}
-		if content[i] && v <= 0 {
-			return category, true, nil
-		}
-	}
-	return category, false, nil
 }

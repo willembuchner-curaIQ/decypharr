@@ -18,8 +18,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/storage"
-	"github.com/sirrobot01/decypharr/pkg/usenet/fs/reader"
-	"github.com/sirrobot01/decypharr/pkg/usenet/recovery"
 	"github.com/sourcegraph/conc/iter"
 )
 
@@ -39,8 +37,6 @@ type NZBParser struct {
 	logger        zerolog.Logger
 	manager       *nntp.Client // Connection manager for parsing operations
 	maxConcurrent int          // Max concurrent connections
-	recovery      reader.ArticleRecovery
-	recoveryNZBID string
 }
 
 type fileAnalysisResult struct {
@@ -52,7 +48,6 @@ type fileAnalysisResult struct {
 
 type contentResult struct {
 	file           nzbparser.NzbFile
-	rawFileKey     recovery.RawFileKey
 	fileType       storage.NZBFileType
 	actualFilename string
 	fileSize       int64 // decoded size of the part (from yEnc), if available
@@ -75,9 +70,6 @@ type FileGroup struct {
 	Files          []nzbparser.NzbFile
 	metadata       *fileAnalysisResult
 	fileMeta       map[string]filePartMeta
-	rawFileKeys    map[string]recovery.RawFileKey
-	rawArticleKeys map[string]recovery.RawFileKey
-	manifest       *recovery.Manifest
 	Groups         map[string]struct{}
 }
 
@@ -120,25 +112,16 @@ var (
 	rarMainPattern       = regexp.MustCompile(`\.rar$`)
 	rarPartPattern       = regexp.MustCompile(`(?:\.r\d{2,3}|\.[s-y]\d{2})$`) // .r00..r999, then .s00 etc.; .zNN is ZIP
 	rarVolumePattern     = regexp.MustCompile(`\.part\d+\.rar$`)
-	ignoreExtensions     = []string{".sfv", ".nfo", ".jpg", ".png", ".txt", ".srt", ".idx", ".sub"}
+	ignoreExtensions     = []string{".sfv", ".nfo", ".jpg", ".png", ".txt", ".srt", ".idx", ".sub", ".par2"}
 	sevenZMainPattern    = regexp.MustCompile(`\.7z$`)
 	sevenZPartPattern    = regexp.MustCompile(`\.7z\.\d{3}$`)
 	zipPartPattern       = regexp.MustCompile(`\.z\d{2,3}$`)
 	extWithNumberPattern = regexp.MustCompile(`\.[^ "\.]*\.\d+$`)
-	volPar2Pattern       = regexp.MustCompile(`(?i)\.vol\d+\+\d+\.par2?$`)
 	partPattern          = regexp.MustCompile(`(?i)\.part\d+\.[^ "\.]*$`)
 	regularExtPattern    = regexp.MustCompile(`\.[^ "\.]*$`)
 )
 
 func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) (nzb *storage.NZB, groups map[string]*FileGroup, err error) {
-	nzb, groups, _, err = p.ParseWithManifest(ctx, filename, content)
-	return nzb, groups, err
-}
-
-// ParseWithManifest parses the NZB and also returns the complete raw-file
-// manifest needed by PAR2. Parse remains as a compatibility wrapper for
-// callers that do not yet persist recovery metadata.
-func (p *NZBParser) ParseWithManifest(ctx context.Context, filename string, content []byte) (nzb *storage.NZB, groups map[string]*FileGroup, manifest *recovery.Manifest, err error) {
 	// Recover from panics to prevent crashes
 	defer func() {
 		if r := recover(); r != nil {
@@ -147,17 +130,9 @@ func (p *NZBParser) ParseWithManifest(ctx context.Context, filename string, cont
 		}
 	}()
 
-	// Preserve the literal XML <file> entries before nzbparser merges duplicate
-	// subjects for its logical view.
-	rawManifestFiles, err := parseRawNZBFiles(content)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	// Parse the normalized logical view used by the existing grouping code.
 	raw, err := nzbparser.Parse(bytes.NewReader(content))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to parse NZB content: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse NZB content: %w", err)
 	}
 
 	// Create base NZB structure
@@ -169,43 +144,36 @@ func (p *NZBParser) ParseWithManifest(ctx context.Context, filename string, cont
 		Title:    raw.Meta["title"],
 		Password: raw.Meta["password"],
 	}
-	manifest = buildRawManifest(nzb.ID, nzb.Name, rawManifestFiles, p.detectFileType)
 	// Group files by base Name and type
-	fileGroups := p.groupFiles(ctx, raw.Files, manifest)
+	fileGroups := p.groupFiles(ctx, raw.Files)
 
 	if len(fileGroups) == 0 {
-		return nil, nil, manifest, fmt.Errorf("no valid file groups found in NZB")
+		return nil, nil, fmt.Errorf("no valid file groups found in NZB")
 	}
 
-	recoveryDeferred, err := p.probeContentAvailability(ctx, fileGroups, manifest, func(ctx context.Context, messageID string) error {
+	err = p.probeContentAvailability(ctx, fileGroups, func(ctx context.Context, messageID string) error {
 		return p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
 			_, _, statErr := conn.Stat(messageID)
 			return statErr
 		})
 	})
 	if err != nil {
-		return nil, fileGroups, manifest, err
-	}
-	if recoveryDeferred {
-		p.logger.Warn().
-			Str("nzb", nzb.Name).
-			Msg("All sampled content articles are missing; accepting NZB and deferring availability to PAR2 recovery")
+		return nil, fileGroups, err
 	}
 
-	return nzb, fileGroups, manifest, nil
+	return nzb, fileGroups, nil
 }
 
 type statArticleFunc func(context.Context, string) error
 
-// probeContentAvailability uses STAT only, so accepting a recoverable NZB
-// never downloads content or parity bytes during parsing. Missing articles are
-// tried across groups; operational NNTP errors still fail immediately.
+// probeContentAvailability tries one representative article from each content
+// group. Operational failures stop immediately; definitively missing articles
+// are accumulated so another group can still prove the post is available.
 func (p *NZBParser) probeContentAvailability(
 	ctx context.Context,
 	groups map[string]*FileGroup,
-	manifest *recovery.Manifest,
 	stat statArticleFunc,
-) (bool, error) {
+) error {
 	groupNames := make([]string, 0, len(groups))
 	for name := range groups {
 		groupNames = append(groupNames, name)
@@ -231,18 +199,15 @@ func (p *NZBParser) probeContentAvailability(
 				missing = append(missing, detail)
 				continue
 			}
-			return false, detail
+			return detail
 		}
-		return false, nil
+		return nil
 	}
 
 	if probed == 0 {
-		return false, fmt.Errorf("no segments available to stat in NZB")
+		return fmt.Errorf("no segments available to stat in NZB")
 	}
-	if len(missing) == probed && manifest.HasPAR2() {
-		return true, nil
-	}
-	return false, fmt.Errorf("%w: no sampled content article is available: %w", customerror.UsenetSegmentMissingError, errors.Join(missing...))
+	return fmt.Errorf("%w: no sampled content article is available: %w", customerror.UsenetSegmentMissingError, errors.Join(missing...))
 }
 
 func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[string]*FileGroup) (result *storage.NZB, err error) {
@@ -303,7 +268,7 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 	return nzb, nil
 }
 
-func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles, manifest *recovery.Manifest) map[string]*FileGroup {
+func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) map[string]*FileGroup {
 	// Assign XML document order as Number for files with uniform Number values.
 	// This preserves upload order for obfuscated archives where the subject
 	// line doesn't contain file number patterns like [X/Y].
@@ -327,16 +292,12 @@ func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles, ma
 	var allFiles []contentResult
 
 	for _, file := range files {
-		rawFileKey := rawFileKeyFor(manifest, file)
 		if len(file.Segments) == 0 {
 			continue
 		}
 
 		fileType := p.detectFileType(file.Filename)
-		updateManifestClassificationForFile(manifest, file, fileType, file.Filename)
-		if fileType == storage.NZBFileTypePar2 {
-			// PAR2 files are intentionally absent from the logical file groups,
-			// but remain fully represented in the raw recovery manifest.
+		if fileType == storage.NZBFileTypeIgnore {
 			continue
 		}
 
@@ -345,25 +306,22 @@ func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles, ma
 		} else {
 			allFiles = append(allFiles, contentResult{
 				file:           file,
-				rawFileKey:     rawFileKey,
 				fileType:       fileType,
 				actualFilename: file.Filename,
 			})
 		}
 	}
 
-	unknownResults := p.batchDetectContentTypes(ctx, unknownFiles, manifest)
+	unknownResults := p.batchDetectContentTypes(ctx, unknownFiles)
 
-	// Unknown raw files stay in the manifest even when they are not logical
-	// content. Only detected/supported types proceed to logical grouping.
+	// Only detected, supported content proceeds to logical grouping.
 	for _, result := range unknownResults {
-		updateManifestClassificationForFile(manifest, result.file, result.fileType, result.actualFilename)
-		if result.fileType != storage.NZBFileTypeUnknown && result.fileType != storage.NZBFileTypePar2 {
+		if result.fileType != storage.NZBFileTypeUnknown && result.fileType != storage.NZBFileTypeIgnore {
 			allFiles = append(allFiles, result)
 		}
 	}
 
-	groups := p.groupProcessedFiles(allFiles, manifest)
+	groups := p.groupProcessedFiles(allFiles)
 
 	// Merge obfuscated RAR groups - when subjects are random strings,
 	// each RAR volume gets its own group. This merges them back together.
@@ -409,9 +367,6 @@ func (p *NZBParser) mergeObfuscatedRarGroups(groups map[string]*FileGroup) map[s
 			Type:           storage.NZBFileTypeRar,
 			Files:          make([]nzbparser.NzbFile, 0, len(singleFileRarGroups)),
 			fileMeta:       make(map[string]filePartMeta),
-			rawFileKeys:    make(map[string]recovery.RawFileKey),
-			rawArticleKeys: make(map[string]recovery.RawFileKey),
-			manifest:       singleFileRarGroups[0].manifest,
 			Groups:         make(map[string]struct{}),
 		}
 
@@ -420,12 +375,6 @@ func (p *NZBParser) mergeObfuscatedRarGroups(groups map[string]*FileGroup) map[s
 			mergedGroup.Files = append(mergedGroup.Files, group.Files...)
 			for key, meta := range group.fileMeta {
 				mergedGroup.fileMeta[key] = meta
-			}
-			for identity, rawFileKey := range group.rawFileKeys {
-				mergedGroup.rawFileKeys[identity] = rawFileKey
-			}
-			for messageID, rawFileKey := range group.rawArticleKeys {
-				mergedGroup.rawArticleKeys[messageID] = rawFileKey
 			}
 			for g := range group.Groups {
 				mergedGroup.Groups[g] = struct{}{}
@@ -506,7 +455,7 @@ func likelyObfuscatedBase(name string) bool {
 }
 
 // Batch process unknown files in parallel
-func (p *NZBParser) batchDetectContentTypes(ctx context.Context, unknownFiles []nzbparser.NzbFile, manifest *recovery.Manifest) []contentResult {
+func (p *NZBParser) batchDetectContentTypes(ctx context.Context, unknownFiles []nzbparser.NzbFile) []contentResult {
 	if len(unknownFiles) == 0 {
 		return nil
 	}
@@ -527,7 +476,6 @@ func (p *NZBParser) batchDetectContentTypes(ctx context.Context, unknownFiles []
 				Msg("Failed to detect file type by content")
 		}
 
-		result.rawFileKey = rawFileKeyFor(manifest, *f)
 		return result
 	})
 
@@ -535,7 +483,7 @@ func (p *NZBParser) batchDetectContentTypes(ctx context.Context, unknownFiles []
 }
 
 // Group already processed files (fast)
-func (p *NZBParser) groupProcessedFiles(allFiles []contentResult, manifest *recovery.Manifest) map[string]*FileGroup {
+func (p *NZBParser) groupProcessedFiles(allFiles []contentResult) map[string]*FileGroup {
 	groups := make(map[string]*FileGroup)
 
 	for _, item := range allFiles {
@@ -566,9 +514,6 @@ func (p *NZBParser) groupProcessedFiles(allFiles []contentResult, manifest *reco
 				Type:           item.fileType,
 				Files:          []nzbparser.NzbFile{},
 				fileMeta:       make(map[string]filePartMeta),
-				rawFileKeys:    make(map[string]recovery.RawFileKey),
-				rawArticleKeys: make(map[string]recovery.RawFileKey),
-				manifest:       manifest,
 				Groups:         make(map[string]struct{}),
 			}
 			groups[groupKey] = group
@@ -587,14 +532,6 @@ func (p *NZBParser) groupProcessedFiles(allFiles []contentResult, manifest *reco
 		}
 
 		group.Files = append(group.Files, item.file)
-		if item.rawFileKey != 0 {
-			group.rawFileKeys[rawFileIdentity(item.file)] = item.rawFileKey
-		}
-		for _, segment := range item.file.Segments {
-			if key, ok := manifest.FindArticleKey(segment.Id); ok {
-				group.rawArticleKeys[segment.Id] = key
-			}
-		}
 		for _, g := range item.file.Groups {
 			group.Groups[g] = struct{}{}
 		}
@@ -619,13 +556,6 @@ func (p *NZBParser) groupProcessedFiles(allFiles []contentResult, manifest *reco
 					meta.partBegin = item.partBegin
 				}
 				group.fileMeta[metaKey] = meta
-				if item.segmentSize > 0 && item.partNumber > 0 {
-					offset := item.partBegin - 1
-					if offset < 0 {
-						offset = 0
-					}
-					manifest.UpdateArticleLayout(item.rawFileKey, int(item.partNumber), offset, item.segmentSize, recovery.LayoutExact)
-				}
 			}
 		}
 	}
@@ -640,11 +570,6 @@ func (p *NZBParser) getBaseFilename(filename string) string {
 
 	// First remove any quotes and trim spaces
 	cleaned := strings.Trim(filename, `" -`)
-
-	// Check for vol\d+\+\d+\.par2? (PAR2 Volume files)
-	if volPar2Pattern.MatchString(cleaned) {
-		return volPar2Pattern.ReplaceAllString(cleaned, "")
-	}
 
 	// Check for part\d+\.[^ "\.]* (part files like .part01.rar)
 
@@ -678,10 +603,6 @@ func (p *NZBParser) detectFileType(filename string) storage.NZBFileType {
 	// Check rar next
 	if p.isRarFile(lower) {
 		return storage.NZBFileTypeRar
-	}
-
-	if strings.HasSuffix(lower, ".par2") {
-		return storage.NZBFileTypePar2
 	}
 
 	// Check for 7z files
@@ -801,15 +722,12 @@ func (p *NZBParser) processFileGroup(ctx context.Context, group *FileGroup, pass
 		return wrapNZBFile(p.processMediaFile(group, password))
 	case storage.NZBFileTypeRar:
 		rarParser := NewRARParser(p.manager, p.maxConcurrent, p.logger)
-		rarParser.setArticleRecovery(p.recoveryNZBID, p.recovery)
 		return rarParser.Process(ctx, group, password)
 	case storage.NZBFileTypeSevenZip:
 		sevenZParser := NewSevenZParser(p.manager, p.maxConcurrent, p.logger)
-		sevenZParser.setArticleRecovery(p.recoveryNZBID, p.recovery)
 		return sevenZParser.Process(ctx, group, password)
 	case storage.NZBFileTypeZip:
 		zipParser := NewZIPParser(p.manager, p.maxConcurrent, p.logger)
-		zipParser.setArticleRecovery(p.recoveryNZBID, p.recovery)
 		return zipParser.Process(ctx, group, password)
 	default:
 		return nil, fmt.Errorf("unsupported file type: %v", group.Type)
@@ -950,24 +868,6 @@ func (p *NZBParser) recordFileMetadata(group *FileGroup, file nzbparser.NzbFile,
 		}
 		group.fileMeta[key] = meta
 	}
-	if data.Name != "" {
-		fileType := p.detectFileType(data.Name)
-		updateManifestClassificationForFile(group.manifest, file, fileType, data.Name)
-	}
-	if segmentSize > 0 && data.Part > 0 {
-		rawFileKey := group.rawFileKey(file)
-		for _, segment := range file.Segments {
-			if int64(segment.Number) == data.Part {
-				rawFileKey = group.rawFileKeyForSegment(file, segment)
-				break
-			}
-		}
-		offset := data.Begin - 1
-		if offset < 0 {
-			offset = 0
-		}
-		group.manifest.UpdateArticleLayout(rawFileKey, int(data.Part), offset, segmentSize, recovery.LayoutExact)
-	}
 }
 
 // Process regular media files
@@ -1014,8 +914,8 @@ func (p *NZBParser) processMediaFile(group *FileGroup, password string) *storage
 			return nil
 		}
 		// getNZBSegments describes offsets within one raw posted file. A
-		// logical media group can concatenate multiple raw files, so rebase only
-		// the logical output offsets while preserving each segment's raw origin.
+		// logical media group can concatenate multiple posted files, so rebase
+		// the logical output offsets for each appended file.
 		for i := range segments {
 			segments[i].StartOffset += currentOffset
 			segments[i].EndOffset += currentOffset
@@ -1087,10 +987,10 @@ func (p *NZBParser) detectFileTypeFromContent(data []byte) storage.NZBFileType {
 		return storage.NZBFileTypeUnknown
 	}
 
-	// Every PAR2 packet begins with this eight-byte magic. Checking content is
-	// essential for obfuscated parity filenames that have no .par2 extension.
+	// Parity data is not playable content, including when the filename is
+	// obfuscated, so never surface it as a streamable file.
 	if len(data) >= 8 && bytes.Equal(data[:8], []byte{'P', 'A', 'R', '2', 0, 'P', 'K', 'T'}) {
-		return storage.NZBFileTypePar2
+		return storage.NZBFileTypeIgnore
 	}
 
 	// Check for RAR signatures (both RAR 4.x and 5.x)
