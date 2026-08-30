@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
@@ -40,7 +41,7 @@ func TestListManagedFilesIgnoresEntryCategory(t *testing.T) {
 		}
 	}
 
-	catalog := managedArrCatalog{storage: store}
+	catalog := managedArrCatalog{storage: store, logger: zerolog.Nop()}
 	files, err := catalog.ListManagedFiles(t.Context(), "")
 	if err != nil {
 		t.Fatal(err)
@@ -55,5 +56,33 @@ func TestListManagedFilesIgnoresEntryCategory(t *testing.T) {
 	}
 	if len(one) != 1 || one[0].FileName != "synced.mkv" || one[0].FileSize != 200 {
 		t.Fatalf("targeted files = %#v", one)
+	}
+}
+
+// A file with no ID cannot be indexed or reacquired, so the scan must count it
+// rather than drop it silently.
+func TestEntryManagedFilesCountsSkips(t *testing.T) {
+	config.Reset()
+	config.SetConfigPath(t.TempDir())
+	t.Cleanup(config.Reset)
+
+	entry := &storage.Entry{
+		InfoHash: "aabbccddeeff00112233445566778899aabbccdd",
+		Name:     "Show.S01",
+		Files: map[string]*storage.File{
+			"kept.mkv":    {Name: "kept.mkv", Size: 100, ID: "id-1"},
+			"gone.mkv":    {Name: "gone.mkv", Size: 200, ID: "id-2", Deleted: true},
+			"no-id.mkv":   {Name: "no-id.mkv", Size: 300},
+			"missing.mkv": nil,
+		},
+	}
+
+	var skips catalogSkips
+	files := entryManagedFiles(entry, &skips)
+	if len(files) != 1 || files[0].FileName != "kept.mkv" {
+		t.Fatalf("files = %#v", files)
+	}
+	if skips.deleted != 1 || skips.noID != 1 {
+		t.Fatalf("skips = %#v", skips)
 	}
 }
