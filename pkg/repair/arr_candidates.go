@@ -79,6 +79,7 @@ func (r *Service) enumerateArrCandidates(ctx context.Context, cfg config.RepairC
 
 func (r *Service) collectArrMediaCandidates(ctx context.Context, a *arr.Arr, mediaID string) (map[string]*candidate, error) {
 	candidates := make(map[string]*candidate)
+	a = r.resolveArrType(ctx, a)
 	media, err := a.GetMedia(ctx, mediaID)
 	if err != nil {
 		return nil, err
@@ -189,11 +190,29 @@ func (r *Service) eligibleArrs(filter []string) []*arr.Arr {
 	return eligible
 }
 
+// resolveArrType narrows an instance the name and host could not identify, so
+// candidates are classified with the application the instance actually runs.
+func (r *Service) resolveArrType(ctx context.Context, a *arr.Arr) *arr.Arr {
+	if a == nil || r.arrs == nil || a.Type == arr.Sonarr || a.Type == arr.Radarr {
+		return a
+	}
+	kind, err := a.DetectType(ctx)
+	if err != nil {
+		r.logger.Debug().Err(err).Str("arr", a.Name).Msg("Sweep: could not detect arr type")
+		return a
+	}
+	if resolved := r.arrs.ResolveType(a.Name, kind); resolved != nil {
+		return resolved
+	}
+	return a
+}
+
 func (r *Service) attachArrContext(ctx context.Context, candidate *candidate) {
 	for _, a := range r.eligibleArrs(nil) {
 		if ctx.Err() != nil {
 			return
 		}
+		a = r.resolveArrType(ctx, a)
 		media, err := a.GetMedia(ctx, "")
 		if err != nil {
 			continue

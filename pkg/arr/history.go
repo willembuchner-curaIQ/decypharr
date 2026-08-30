@@ -1,11 +1,13 @@
 package arr
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	gourl "net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
@@ -78,12 +80,15 @@ type HistorySchema struct {
 }
 
 type HistoryRecord struct {
-	ID         int    `json:"id"`
-	DownloadID string `json:"downloadId"`
-	EventType  string `json:"eventType"`
-	EpisodeID  int    `json:"episodeId,omitempty"`
-	SeriesID   int    `json:"seriesId,omitempty"`
-	MovieID    int    `json:"movieId,omitempty"`
+	ID          int               `json:"id"`
+	DownloadID  string            `json:"downloadId"`
+	EventType   string            `json:"eventType"`
+	EpisodeID   int               `json:"episodeId,omitempty"`
+	SeriesID    int               `json:"seriesId,omitempty"`
+	MovieID     int               `json:"movieId,omitempty"`
+	SourceTitle string            `json:"sourceTitle,omitempty"`
+	Data        map[string]string `json:"data,omitempty"`
+	Date        time.Time         `json:"date,omitzero"`
 }
 
 type QueueResponseScheme struct {
@@ -295,21 +300,10 @@ func (a *Arr) FindGrabHistoryID(mediaDBID int) (int, string, error) {
 // the release in the arr and, if redownload is enabled, triggers a re-search
 // for whatever is currently missing from that grab's scope.
 func (a *Arr) MarkHistoryFailed(historyID int) error {
-	if a == nil {
-		return fmt.Errorf("arr not configured")
-	}
 	if historyID <= 0 {
 		return nil
 	}
-	url := fmt.Sprintf("api/v3/history/failed/%d", historyID)
-	resp, err := a.Request(http.MethodPost, url, nil, nil)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("history/failed %d: %s", historyID, resp.Status)
-	}
-	return nil
+	return a.MarkHistoryFailedCtx(context.Background(), historyID)
 }
 
 // removeQueueItems bulk-removes queue items from the arr. blocklist controls

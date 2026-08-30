@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/manager/link"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -41,7 +43,8 @@ const (
 // StreamReader is a resilient, seekable byte stream over one remote file.
 // All recovery (link refresh, backoff, reconnect-at-offset) happens inside
 // Read; consumers see either bytes or a typed error once recovery is
-// exhausted. A failed session is never poisoned: a later Read retries.
+// exhausted. Transient failures do not poison the session; confirmed
+// permanent content failures remain terminal.
 type StreamReader interface {
 	io.ReadCloser
 	io.Seeker
@@ -491,11 +494,14 @@ func (t *httpTransport) recover(ctx context.Context, err error, attempt int) err
 }
 
 // usenetTransport serves a session body by pulling directly from a usenet
-// FileHandle. Per-segment failover and zero-fill handling live inside the
-// usenet client; retries here only reopen the handle at the current offset.
+// FileHandle. Per-segment backbone failover lives inside the usenet client;
+// retries here only reopen recoverable handles at the current offset.
 type usenetTransport struct {
-	size     int64
-	openFile func(ctx context.Context) (DirectReader, error)
+	size              int64
+	openFile          func(ctx context.Context) (DirectReader, error)
+	onArticleNotFound func()
+	irrecoverable     atomic.Bool
+	notifyOnce        sync.Once
 }
 
 // DirectReader is a protocol-native random-access reader. The opener selects
@@ -515,10 +521,11 @@ const (
 )
 
 type usenetBody struct {
-	h    DirectReader
-	ctx  context.Context
-	pos  int64
-	size int64
+	h       DirectReader
+	ctx     context.Context
+	pos     int64
+	size    int64
+	onError func(error)
 }
 
 func (b *usenetBody) Read(p []byte) (int, error) {
@@ -530,6 +537,9 @@ func (b *usenetBody) Read(p []byte) (int, error) {
 	}
 	n, err := b.h.ReadAtContext(b.ctx, p, b.pos)
 	b.pos += int64(n)
+	if err != nil && b.onError != nil {
+		b.onError(err)
+	}
 	if err == nil && n == 0 {
 		err = io.ErrNoProgress
 	}
@@ -545,20 +555,51 @@ func (b *usenetBody) ReleaseCachedRange(off, length int64) {
 }
 
 func (t *usenetTransport) open(ctx context.Context, pos int64) (io.ReadCloser, error) {
+	if t.irrecoverable.Load() {
+		return nil, customerror.NewArticleNotFoundError(nil)
+	}
 	h, err := t.openFile(ctx)
 	if err != nil {
+		t.markArticleNotFound(err)
 		return nil, err
 	}
 	// Warm the read-ahead window from the starting offset (bounded inside).
 	h.Prefetch(ctx, pos, t.size-pos)
-	return &usenetBody{h: h, ctx: ctx, pos: pos, size: t.size}, nil
+	return &usenetBody{
+		h:    h,
+		ctx:  ctx,
+		pos:  pos,
+		size: t.size,
+		onError: func(err error) {
+			t.markArticleNotFound(err)
+		},
+	}, nil
 }
 
 func (t *usenetTransport) recover(ctx context.Context, err error, attempt int) error {
+	if t.markArticleNotFound(err) {
+		return err
+	}
+	if customErr, ok := errors.AsType[*customerror.Error](err); ok && customErr.IsPermanent() {
+		return err
+	}
 	if lerr := link.GetLinkError(err); lerr != nil && lerr.IsPermanent() {
 		return err
 	}
 	return sleepCtx(ctx, sessionBackoff(attempt))
+}
+
+func (t *usenetTransport) markArticleNotFound(err error) bool {
+	if !customerror.IsArticleNotFoundError(err) {
+		return false
+	}
+	t.irrecoverable.Store(true)
+	t.notifyOnce.Do(func() {
+		if t.onArticleNotFound != nil {
+			t.onArticleNotFound()
+		}
+	})
+	return true
 }
 
 // OpenStream opens a resilient, seekable session over one file of an entry and
@@ -574,7 +615,7 @@ func (m *Manager) OpenStreamWithRewindOwner(ctx context.Context, entry *storage.
 	if err != nil {
 		return nil, err
 	}
-	streamID := m.registerStream(entry.Name, filename, s.size, source, debrid, client)
+	streamID := m.registerStream(entry, filename, entry.Files[filename], source, debrid, client)
 	s.onRead = func(resumes int64) { m.touchStream(streamID, resumes) }
 	s.onClose = func() { m.unregisterStream(streamID) }
 	return s, nil
@@ -663,6 +704,9 @@ func (m *Manager) openSession(ctx context.Context, entry *storage.Entry, filenam
 			size: file.Size,
 			openFile: func(ctx context.Context) (DirectReader, error) {
 				return m.usenet.OpenFileWithRetention(ctx, nzoID, filename, retention)
+			},
+			onArticleNotFound: func() {
+				m.submitStreamReacquire(entry.InfoHash, file.ID)
 			},
 		}
 	} else {

@@ -45,8 +45,9 @@ func (a *Arr) GetMedia(ctx context.Context, mediaId string) ([]Content, error) {
 		// This is likely Radarr
 		return a.GetMovies(ctx, mediaId)
 	}
-	a.Type = Sonarr
-
+	// The type is not narrowed here: other goroutines read it, and it is part
+	// of the Arr binding identity. Callers resolve it through
+	// Storage.ResolveType before they classify results.
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("failed to get series: %s", resp.Status)
 	}

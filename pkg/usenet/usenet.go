@@ -849,6 +849,9 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 
 	// Check if file was marked as failed previously
 	if cause, ok := u.failedFiles.Load(fsKey(file.NzbID, file.Name)); ok {
+		if nntp.IsArticleNotFoundError(cause) || customerror.IsArticleNotFoundError(cause) {
+			return customerror.NewArticleNotFoundError(cause)
+		}
 		return customerror.NewSilentError(cause).Permanent()
 	}
 

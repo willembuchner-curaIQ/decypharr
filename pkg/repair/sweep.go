@@ -147,7 +147,7 @@ func (r *Service) probeAndHealCandidates(ctx context.Context, run *storage.Repai
 			}
 
 			if autoRepair && h.Status == storage.HealthBroken {
-				r.healBrokenEntry(gctx, run, &runMu, name, h)
+				r.healBrokenEntry(gctx, run, &runMu, h)
 			}
 
 			runMu.Lock()

@@ -119,6 +119,7 @@ func (d *Downloader) completeEntry(entry *storage.Entry) {
 	d.manager.strm.SyncEntryAsync(entry)
 	d.notifyCompleted(entry)
 	d.triggerArrRefresh(entry)
+	d.manager.ReindexArrEntry(entry.Category, entry.InfoHash)
 }
 
 func (d *Downloader) markAsCompleted(entry *storage.Entry) {

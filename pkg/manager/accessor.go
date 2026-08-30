@@ -50,6 +50,18 @@ func (m *Manager) Arr() *arr.Storage {
 	return m.arr
 }
 
+func (m *Manager) ArrService() *arr.Service {
+	return m.arrService
+}
+
+func (m *Manager) RefreshArrIndex() bool {
+	return m.arrIndexer != nil && m.arrIndexer.Refresh()
+}
+
+func (m *Manager) ReindexArrEntry(arrName, entryID string) bool {
+	return m.arrIndexer != nil && m.arrIndexer.ReindexEntry(arrName, entryID)
+}
+
 func (m *Manager) Queue() *Queue {
 	return m.queue
 }

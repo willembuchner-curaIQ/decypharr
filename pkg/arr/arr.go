@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,6 +37,25 @@ var sharedClient = sync.OnceValue(func() *request.Client {
 		request.WithMaxRetries(5),
 	)
 })
+
+var mutationClient = sync.OnceValue(func() *request.Client {
+	return request.New(
+		request.WithTimeout(0),
+		request.WithMaxRetries(0),
+	)
+})
+
+type arrRequestTransportError struct {
+	cause error
+}
+
+func (err *arrRequestTransportError) Error() string {
+	return err.cause.Error()
+}
+
+func (err *arrRequestTransportError) Unwrap() error {
+	return err.cause
+}
 
 const (
 	Sonarr  Type = "sonarr"
@@ -79,6 +99,12 @@ func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload a
 
 func getSharedClient() *request.Client { return sharedClient() }
 
+func getMutationClient() *request.Client { return mutationClient() }
+
+func (a *Arr) requestMutationCtx(ctx context.Context, method, endpoint string, payload any, res any) (*http.Response, error) {
+	return a.requestCtx(ctx, getMutationClient(), method, endpoint, payload, res)
+}
+
 func (a *Arr) requestCtx(ctx context.Context, client *request.Client, method, endpoint string, payload any, res any) (*http.Response, error) {
 	if a.Token == "" || a.Host == "" {
 		return nil, fmt.Errorf("arr not configured")
@@ -110,7 +136,7 @@ func (a *Arr) requestCtx(ctx context.Context, client *request.Client, method, en
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &arrRequestTransportError{cause: err}
 	}
 
 	// The body is fully consumed here. Callers only read status and headers,
@@ -131,6 +157,14 @@ func (a *Arr) requestCtx(ctx context.Context, client *request.Client, method, en
 	return resp, nil
 }
 
+func ambiguousMutationRequest(resp *http.Response, err error) bool {
+	if resp != nil {
+		return true
+	}
+	_, ok := errors.AsType[*arrRequestTransportError](err)
+	return ok
+}
+
 // Request is the no-context shim for legacy callers. Prefer RequestCtx for
 // any code path that should be cancellable (repair, etc.).
 func (a *Arr) Request(method, endpoint string, payload any, res any) (*http.Response, error) {
@@ -145,7 +179,10 @@ func (a *Arr) Validate() error {
 	if utils.ValidateURL(a.Host) != nil {
 		return fmt.Errorf("invalid arr host URL")
 	}
-	resp, err := a.Request("GET", "/api/v3/health", nil, nil)
+	var status struct {
+		AppName string `json:"appName"`
+	}
+	resp, err := a.Request("GET", "/api/v3/system/status", nil, &status)
 	if err != nil {
 		return err
 	}
@@ -153,16 +190,56 @@ func (a *Arr) Validate() error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("failed to validate arr %s: %s", a.Name, resp.Status)
 	}
+	// A fresh candidate is not shared yet, so the reported application name is
+	// safe to record here. It beats the name/host guess inferType makes.
+	if kind := typeFromAppName(status.AppName); kind != Others {
+		a.Type = kind
+	}
 	return nil
+}
+
+// DetectType asks the instance what application it runs. inferType only
+// matches "sonarr"/"radarr" in the name or host, so an instance called "tv4k"
+// is reported as Others until this resolves it.
+func (a *Arr) DetectType(ctx context.Context) (Type, error) {
+	var status struct {
+		AppName string `json:"appName"`
+	}
+	resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/system/status", nil, &status)
+	if err != nil {
+		return Others, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return Others, fmt.Errorf("failed to detect arr %s type: %s", a.Name, resp.Status)
+	}
+	return typeFromAppName(status.AppName), nil
+}
+
+func typeFromAppName(appName string) Type {
+	switch strings.ToLower(strings.TrimSpace(appName)) {
+	case "sonarr":
+		return Sonarr
+	case "radarr":
+		return Radarr
+	case "lidarr":
+		return Lidarr
+	case "readarr":
+		return Readarr
+	default:
+		return Others
+	}
 }
 
 type Storage struct {
 	arrs   *xsync.Map[string, *Arr]
 	logger zerolog.Logger
 	sg     singleflight.Group
+	mu     sync.RWMutex
 }
 
 func (s *Storage) Cleanup() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	s.arrs.Clear()
 }
 
@@ -194,14 +271,18 @@ func (s *Storage) AddOrUpdate(arr *Arr) {
 	if utils.ValidateURL(arr.Host) != nil {
 		return
 	}
+	s.mu.RLock()
 	s.arrs.Store(arr.Name, arr)
+	s.mu.RUnlock()
 }
 
 func (s *Storage) GetOrCreate(name string) *Arr {
 	if name == "" {
 		name = "uncategorized"
 	}
+	s.mu.RLock()
 	arr, exists := s.arrs.Load(name)
+	s.mu.RUnlock()
 	if !exists {
 		return New(name, "", "", false, nil, "", "manual")
 	}
@@ -209,6 +290,8 @@ func (s *Storage) GetOrCreate(name string) *Arr {
 }
 
 func (s *Storage) Get(name string) *Arr {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	a, ok := s.arrs.Load(name)
 	if !ok {
 		return nil
@@ -216,7 +299,25 @@ func (s *Storage) Get(name string) *Arr {
 	return a
 }
 
+// ResolveType records an application type discovered from a live instance. It
+// publishes a replacement instead of writing to the *Arr other goroutines
+// already read, because the type is part of the binding identity.
+func (s *Storage) ResolveType(name string, kind Type) *Arr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.arrs.Load(name)
+	if !ok || kind == Others || current.Type == kind {
+		return current
+	}
+	updated := *current
+	updated.Type = kind
+	s.arrs.Store(name, &updated)
+	return &updated
+}
+
 func (s *Storage) GetAll() []*Arr {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	arrs := make([]*Arr, 0, s.arrs.Size())
 	s.arrs.Range(func(key string, value *Arr) bool {
 		arrs = append(arrs, value)
@@ -235,6 +336,8 @@ func (s *Storage) SyncToConfig() []config.Arr {
 		arrConfigs[a.Name] = a
 	}
 
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	s.arrs.Range(func(name string, arr *Arr) bool {
 		exists, ok := arrConfigs[name]
 		if ok {
@@ -277,6 +380,8 @@ func (s *Storage) SyncFromConfig(arrs []config.Arr) {
 	}
 
 	// AddOrUpdate or update arrs from config
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.arrs.Range(func(name string, arr *Arr) bool {
 		if ac, ok := newMaps.Load(name); ok {
 			// Update existing arr with new config values.
@@ -296,6 +401,7 @@ func (s *Storage) SyncFromConfig(arrs []config.Arr) {
 
 func (s *Storage) Monitor() {
 	wg := sync.WaitGroup{}
+	s.mu.RLock()
 	wg.Add(s.arrs.Size())
 	s.arrs.Range(func(name string, arr *Arr) bool {
 		_, _, _ = s.sg.Do(fmt.Sprintf("cleanup_%s", arr.Name), func() (any, error) {
@@ -309,6 +415,7 @@ func (s *Storage) Monitor() {
 		})
 		return true
 	})
+	s.mu.RUnlock()
 	wg.Wait()
 }
 

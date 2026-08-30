@@ -1,0 +1,239 @@
+package arr
+
+import (
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"github.com/sirrobot01/appendstore"
+)
+
+var errBindingSnapshotPut = errors.New("binding snapshot put failed")
+
+type observedBindingStore struct {
+	bindingRepositoryStore
+	failNextPut bool
+	forEach     int
+	syncs       int
+}
+
+func (s *observedBindingStore) ForEach(yield func(string, []byte) error) error {
+	s.forEach++
+	return s.bindingRepositoryStore.ForEach(yield)
+}
+
+func (s *observedBindingStore) Put(key string, value []byte, options *appendstore.PutOptions) error {
+	if s.failNextPut {
+		s.failNextPut = false
+		return errBindingSnapshotPut
+	}
+	return s.bindingRepositoryStore.Put(key, value, options)
+}
+
+func (s *observedBindingStore) Sync() error {
+	s.syncs++
+	return s.bindingRepositoryStore.Sync()
+}
+
+func TestBindingRepositoryFailedSnapshotPutKeepsCommittedGeneration(t *testing.T) {
+	path := t.TempDir() + "/bindings.db"
+	repository := openTestBindingRepository(t, path)
+	original := repositoryTestBinding("radarr", "old-entry", "old-file", 1)
+	if err := repository.ReplaceArrGeneration("radarr", 1, []Binding{original}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &observedBindingStore{bindingRepositoryStore: repository.store, failNextPut: true}
+	repository.store = store
+	replacement := repositoryTestBinding("radarr", "new-entry", "new-file", 2)
+	if err := repository.ReplaceArrGeneration("radarr", 2, []Binding{replacement}); !errors.Is(err, errBindingSnapshotPut) {
+		t.Fatalf("ReplaceArrGeneration error = %v, want %v", err, errBindingSnapshotPut)
+	}
+	assertSingleRepositoryBinding(t, repository, original)
+	if store.syncs != 0 {
+		t.Fatalf("Sync calls after failed Put = %d, want 0", store.syncs)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repository = openTestBindingRepository(t, path)
+	t.Cleanup(func() { _ = repository.Close() })
+	assertSingleRepositoryBinding(t, repository, original)
+}
+
+func TestBindingRepositorySnapshotWriteIsDurable(t *testing.T) {
+	repository := openTestBindingRepository(t, t.TempDir()+"/bindings.db")
+	t.Cleanup(func() { _ = repository.Close() })
+	store := &observedBindingStore{bindingRepositoryStore: repository.store}
+	repository.store = store
+
+	binding := repositoryTestBinding("sonarr", "entry", "file", 4)
+	if err := repository.ReplaceArrGeneration("sonarr", 4, []Binding{binding}); err != nil {
+		t.Fatal(err)
+	}
+	if store.syncs != 1 {
+		t.Fatalf("Sync calls = %d, want 1", store.syncs)
+	}
+}
+
+func TestBindingRepositoryRejectsCorruptAuthoritativeSnapshot(t *testing.T) {
+	path := t.TempDir() + "/bindings.db"
+	repository := openTestBindingRepository(t, path)
+	t.Cleanup(func() { _ = repository.Close() })
+	legacy := repositoryTestBinding("radarr", "entry", "file", 1)
+	putLegacyBinding(t, repository.store, legacy)
+	if err := repository.store.Put(bindingSnapshotStoreKey("radarr"), []byte("{"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+	repository = openTestBindingRepository(t, path)
+
+	if _, err := repository.LoadAll(); err == nil {
+		t.Fatal("LoadAll accepted a corrupt authoritative snapshot")
+	}
+}
+
+func TestBindingRepositoryMigratesLegacyRowsOnMutation(t *testing.T) {
+	t.Run("save", func(t *testing.T) {
+		path := t.TempDir() + "/bindings.db"
+		repository := openTestBindingRepository(t, path)
+		first := repositoryTestBinding("sonarr", "entry-1", "file-1", 1)
+		second := repositoryTestBinding("sonarr", "entry-2", "file-2", 1)
+		putLegacyBinding(t, repository.store, first)
+		putLegacyBinding(t, repository.store, second)
+
+		bindings, err := repository.LoadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(bindings) != 2 {
+			t.Fatalf("legacy binding count = %d, want 2", len(bindings))
+		}
+		first.EntryFileName = "updated.mkv"
+		first.Generation = 2
+		if err := repository.Save(first); err != nil {
+			t.Fatal(err)
+		}
+
+		poisoned := first
+		poisoned.EntryFileName = "legacy-row-should-be-ignored.mkv"
+		poisoned.Generation = 99
+		putLegacyBinding(t, repository.store, poisoned)
+		if err := repository.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		repository = openTestBindingRepository(t, path)
+		t.Cleanup(func() { _ = repository.Close() })
+		bindings, err = repository.LoadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(bindings) != 2 {
+			t.Fatalf("migrated binding count = %d, want 2", len(bindings))
+		}
+		if bindings[0].EntryFileName != "updated.mkv" || bindings[0].Generation != 2 {
+			t.Fatalf("migrated binding = %#v", bindings[0])
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		path := t.TempDir() + "/bindings.db"
+		repository := openTestBindingRepository(t, path)
+		binding := repositoryTestBinding("radarr", "entry", "file", 1)
+		putLegacyBinding(t, repository.store, binding)
+		if err := repository.Delete(binding.EntryID, binding.EntryFileID); err != nil {
+			t.Fatal(err)
+		}
+		if err := repository.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		repository = openTestBindingRepository(t, path)
+		t.Cleanup(func() { _ = repository.Close() })
+		bindings, err := repository.LoadAll()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(bindings) != 0 {
+			t.Fatalf("bindings after migrated delete = %#v", bindings)
+		}
+	})
+}
+
+func TestBindingRepositoryCachesStateAcrossTargetedSaves(t *testing.T) {
+	repository := openTestBindingRepository(t, t.TempDir()+"/bindings.db")
+	t.Cleanup(func() { _ = repository.Close() })
+	store := &observedBindingStore{bindingRepositoryStore: repository.store}
+	repository.store = store
+
+	if _, err := repository.LoadAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Save(repositoryTestBinding("radarr", "entry-1", "file-1", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Save(repositoryTestBinding("radarr", "entry-2", "file-2", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if store.forEach != 1 {
+		t.Fatalf("ForEach calls = %d, want 1", store.forEach)
+	}
+	bindings, err := repository.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("binding count = %d, want 2", len(bindings))
+	}
+}
+
+func openTestBindingRepository(t *testing.T, path string) *BindingRepository {
+	t.Helper()
+	repository, err := OpenBindingRepository(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repository
+}
+
+func putLegacyBinding(t *testing.T, store bindingRepositoryStore, binding Binding) {
+	t.Helper()
+	data, err := json.Marshal(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(bindingStoreKey(binding.EntryID, binding.EntryFileID), data, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func repositoryTestBinding(arrName, entryID, fileID string, generation uint64) Binding {
+	return Binding{
+		ArrName:     arrName,
+		EntryID:     entryID,
+		EntryFileID: fileID,
+		Generation:  generation,
+	}
+}
+
+func assertSingleRepositoryBinding(t *testing.T, repository *BindingRepository, want Binding) {
+	t.Helper()
+	bindings, err := repository.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 || bindings[0].EntryID != want.EntryID ||
+		bindings[0].EntryFileID != want.EntryFileID || bindings[0].Generation != want.Generation {
+		t.Fatalf("bindings = %#v, want %#v", bindings, want)
+	}
+}

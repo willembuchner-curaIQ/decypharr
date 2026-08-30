@@ -10,6 +10,8 @@ import (
 	"syscall"
 )
 
+const usenetArticleNotFoundCode = "usenet_article_not_found"
+
 type Error struct {
 	err            error
 	silent         bool
@@ -140,6 +142,13 @@ func NewArticleNotFoundError(err error) *Error {
 		err = errors.New("article not found")
 	}
 	return (&Error{
-		err: err,
+		err:  err,
+		Code: usenetArticleNotFoundCode,
 	}).Permanent()
+}
+
+// IsArticleNotFoundError reports a confirmed permanent Usenet article failure.
+func IsArticleNotFoundError(err error) bool {
+	customErr, ok := errors.AsType[*Error](err)
+	return ok && customErr.Code == usenetArticleNotFoundCode && customErr.IsPermanent()
 }

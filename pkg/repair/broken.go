@@ -37,7 +37,7 @@ func (r *Service) collectBrokenHealths(names []string, requireArrFile bool) (*xs
 			}
 			hasArrFile := false
 			for _, bf := range h.BrokenFiles {
-				if bf.ArrName != "" && bf.ArrFileID != 0 {
+				if bf.ArrName != "" && bf.InfoHash != "" && bf.FileName != "" {
 					hasArrFile = true
 					break
 				}

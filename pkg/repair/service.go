@@ -57,10 +57,8 @@ const (
 	repairHistoryRetained  = 100
 	// At most this many files probed concurrently within a single entry. The
 	// outer worker count comes from cfg.Repair.Workers.
-	repairFilesPerEntry    = 2
-	repairStopDrainTimeout = 30 * time.Second
-	// repairStopFinalRepairTimeout bounds the Arr delete + re-search pass run
-	// when StopSchedule fires and auto-repair is enabled.
+	repairFilesPerEntry          = 2
+	repairStopDrainTimeout       = 30 * time.Second
 	repairStopFinalRepairTimeout = 5 * time.Minute
 )
 
@@ -71,11 +69,16 @@ type Backend interface {
 	DeleteEntry(string, bool) error
 }
 
+type Reacquirer interface {
+	Reacquire(arr.ReacquireRequest) (*arr.ReacquireJob, error)
+}
+
 type Dependencies struct {
 	Scheduler     gocron.Scheduler
 	Backend       Backend
 	Storage       *storage.Storage
 	Arrs          *arr.Storage
+	Reacquirer    Reacquirer
 	Usenet        *usenet.Usenet
 	Notifications *notifications.Service
 	Hearsay       *hearsay.Service
@@ -87,6 +90,7 @@ type Service struct {
 	backend       Backend
 	storage       *storage.Storage
 	arrs          *arr.Storage
+	reacquirer    Reacquirer
 	usenet        *usenet.Usenet
 	notifications *notifications.Service
 	hearsay       *hearsay.Service
@@ -109,6 +113,7 @@ func New(deps Dependencies) *Service {
 		backend:       deps.Backend,
 		storage:       deps.Storage,
 		arrs:          deps.Arrs,
+		reacquirer:    deps.Reacquirer,
 		usenet:        deps.Usenet,
 		notifications: deps.Notifications,
 		hearsay:       deps.Hearsay,

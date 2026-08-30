@@ -37,10 +37,16 @@ type Manager struct {
 	repair       *repair.Service
 	clients      *xsync.Map[string, debrid.Client]
 	arr          *arr.Storage
+	arrService   *arr.Service
+	arrIndexer   *arr.Indexer
 	logger       zerolog.Logger
 	ready        chan struct{}
 	readyOnce    sync.Once
 	streamClient *http.Client
+
+	arrRecoveryMu          sync.RWMutex
+	arrRecovery            ArrRecovery
+	reacquireNotifications sync.Map
 
 	// Migration jobs tracking
 	migrationJobs   *xsync.Map[string, *storage.SwitcherJob]
@@ -246,6 +252,7 @@ func (m *Manager) init() {
 	m.setMountPaths()
 
 	m.initEntryCache()
+	m.initArrServices()
 
 	// Initialize notifications service
 	m.Notifications = notifications.New(&m.config.Notifications, m.logger)
@@ -262,6 +269,7 @@ func (m *Manager) init() {
 		Backend:       m,
 		Storage:       m.storage,
 		Arrs:          m.arr,
+		Reacquirer:    m.arrService,
 		Usenet:        m.usenet,
 		Notifications: m.Notifications,
 		Hearsay:       m.hearsay,
@@ -269,6 +277,23 @@ func (m *Manager) init() {
 
 	// Initialize the unified active-download queue after all processors exist.
 	m.initJobQueue()
+}
+
+func (m *Manager) initArrServices() {
+	service, err := arr.NewService(arr.ServiceOptions{
+		Directory: filepath.Join(config.GetMainPath(), "db"),
+		Handler:   arr.NewReacquireHandler(m.arr, m),
+	})
+	if err != nil {
+		m.logger.Error().Err(err).Msg("Failed to initialize Arr reacquisition service")
+		m.arrService = nil
+		m.arrIndexer = nil
+		m.SetArrRecovery(nil)
+		return
+	}
+	m.arrService = service
+	m.arrIndexer = arr.NewIndexer(m.arr, managedArrCatalog{storage: m.storage}, service)
+	m.SetArrRecovery(service)
 }
 
 func (m *Manager) initUsenet() {
@@ -428,6 +453,17 @@ func (m *Manager) Start(ctx context.Context) error {
 	// run the migration process
 	m.migrate()
 
+	if m.arrService != nil {
+		if err := m.arrService.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start Arr reacquisition service: %w", err)
+		}
+	}
+	if m.arrIndexer != nil {
+		if err := m.arrIndexer.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start Arr indexer: %w", err)
+		}
+	}
+
 	go func() {
 		m.syncTorrents(ctx)
 		// Sync NZBs
@@ -486,6 +522,15 @@ func (m *Manager) Stop() error {
 	if m.repair != nil {
 		m.repair.Stop()
 	}
+	if m.arrIndexer != nil {
+		m.arrIndexer.Close()
+	}
+	if m.arrService != nil {
+		if err := m.arrService.Close(); err != nil {
+			m.logger.Warn().Err(err).Msg("Failed to close Arr reacquisition service")
+		}
+	}
+	m.SetArrRecovery(nil)
 
 	// Stop schedulers
 	if m.scheduler != nil {
