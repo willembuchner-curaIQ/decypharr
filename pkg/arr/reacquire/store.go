@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,11 +19,17 @@ import (
 
 const (
 	bindingAttributeArrName  = "arrName"
-	bindingSnapshotKeyPrefix = "arr-binding-snapshot:"
+	bindingManifestKeyPrefix = "arr-binding-manifest:"
+	bindingPageKeyPrefix     = "arr-binding-page:"
 	bindingDeltaKeyPrefix    = "arr-binding-delta:"
+	bindingSnapshotKeyPrefix = "arr-binding-snapshot:"
 	bindingSnapshotVersion   = 1
-	jobAttributeArrName      = "arrName"
-	jobAttributeStatus       = "status"
+	// bindingPageSize bounds one stored row. A library can hold hundreds of
+	// thousands of bindings, and a single row would be encoded, held, and
+	// written whole.
+	bindingPageSize     = 5000
+	jobAttributeArrName = "arrName"
+	jobAttributeStatus  = "status"
 )
 
 type bindingRepositoryStore interface {
@@ -33,10 +40,10 @@ type bindingRepositoryStore interface {
 	Close() error
 }
 
-// BindingRepository persists arr.Arr bindings as one snapshot per arr.Arr plus a delta
-// row per targeted change. A full reconciliation replaces the snapshot; single
-// upserts write one row, because a library can hold hundreds of thousands of
-// bindings and rewriting the snapshot per file does not scale.
+// BindingRepository persists bindings as a paged snapshot per Arr plus a delta
+// row per targeted change. A full reconciliation writes the pages and then a
+// manifest naming them, which is the commit point; single upserts write one
+// delta row, because rewriting the snapshot per file does not scale.
 type BindingRepository struct {
 	mu     sync.RWMutex
 	store  bindingRepositoryStore
@@ -44,6 +51,26 @@ type BindingRepository struct {
 	loaded bool
 }
 
+// bindingManifest names the pages that make up one Arr's committed snapshot.
+// It is written last, so a crash mid-write leaves the previous generation.
+type bindingManifest struct {
+	Version    int    `json:"version"`
+	ArrName    string `json:"arrName"`
+	Generation uint64 `json:"generation"`
+	Pages      int    `json:"pages"`
+	Bindings   int    `json:"bindings"`
+}
+
+type bindingPage struct {
+	Version    int       `json:"version"`
+	ArrName    string    `json:"arrName"`
+	Generation uint64    `json:"generation"`
+	Page       int       `json:"page"`
+	Bindings   []Binding `json:"bindings"`
+}
+
+// bindingSnapshot is the single-row format paged snapshots replaced. It is
+// still read so an index written by an older build survives an upgrade.
 type bindingSnapshot struct {
 	Version    int       `json:"version"`
 	ArrName    string    `json:"arrName"`
@@ -69,6 +96,14 @@ type bindingRepositoryState struct {
 	generations map[string]uint64
 	deltas      map[entryFileKey]struct{}
 	legacy      map[string]map[entryFileKey]struct{}
+	stored      map[string][]storedPage
+}
+
+// storedPage is one snapshot row on disk, kept so the generation that replaces
+// it can delete it.
+type storedPage struct {
+	key        string
+	generation uint64
 }
 
 func OpenBindingRepository(path string) (*BindingRepository, error) {
@@ -178,17 +213,10 @@ func (r *BindingRepository) ReplaceArrGeneration(arrName string, generation uint
 	if err := validateUniqueArrFiles(prepared); err != nil {
 		return err
 	}
-	sortBindings(prepared)
-	snapshot := bindingSnapshot{
-		Version:    bindingSnapshotVersion,
-		ArrName:    arrName,
-		Generation: generation,
-		Bindings:   prepared,
-	}
-	key := bindingSnapshotStoreKey(arrName)
-	if err := validateBindingSnapshot(key, snapshot); err != nil {
+	if err := validateUniqueManagedFiles(prepared); err != nil {
 		return fmt.Errorf("replace arr bindings: %w", err)
 	}
+	sortBindings(prepared)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -204,25 +232,61 @@ func (r *BindingRepository) ReplaceArrGeneration(arrName string, generation uint
 		}
 	}
 
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("encode arr binding snapshot: %w", err)
-	}
 	options := &appendstore.PutOptions{Attributes: map[string]string{
 		bindingAttributeArrName: arrName,
 		"generation":            strconv.FormatUint(generation, 10),
 	}}
-	if err := r.store.Put(key, data, options); err != nil {
-		return fmt.Errorf("persist arr binding snapshot: %w", err)
+	written := make([]storedPage, 0, len(prepared)/bindingPageSize+1)
+	index := 0
+	for chunk := range slices.Chunk(prepared, bindingPageSize) {
+		page := bindingPage{
+			Version:    bindingSnapshotVersion,
+			ArrName:    arrName,
+			Generation: generation,
+			Page:       index,
+			Bindings:   chunk,
+		}
+		data, err := json.Marshal(page)
+		if err != nil {
+			return fmt.Errorf("encode arr binding page: %w", err)
+		}
+		key := bindingPageStoreKey(arrName, generation, index)
+		if err := r.store.Put(key, data, options); err != nil {
+			return fmt.Errorf("persist arr binding page: %w", err)
+		}
+		written = append(written, storedPage{key: key, generation: generation})
+		index++
+	}
+	// The pages must be durable before the manifest names them, or a crash
+	// could leave a manifest pointing at a page that is not there.
+	if err := r.store.Sync(); err != nil {
+		r.invalidateLocked()
+		return fmt.Errorf("sync arr binding pages: %w", err)
+	}
+
+	manifest := bindingManifest{
+		Version:    bindingSnapshotVersion,
+		ArrName:    arrName,
+		Generation: generation,
+		Pages:      len(written),
+		Bindings:   len(prepared),
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("encode arr binding manifest: %w", err)
+	}
+	if err := r.store.Put(bindingManifestStoreKey(arrName), data, options); err != nil {
+		return fmt.Errorf("persist arr binding manifest: %w", err)
 	}
 	if err := r.store.Sync(); err != nil {
 		r.invalidateLocked()
-		return fmt.Errorf("sync arr binding snapshot: %w", err)
+		return fmt.Errorf("sync arr binding manifest: %w", err)
 	}
 
-	// The snapshot is authoritative from here on, so the rows it replaces are
-	// dropped. A crash in between leaves rows the generation guard ignores.
+	// The generation is committed from here on, so the rows it replaces are
+	// dropped. A crash in between leaves rows the loader ignores.
 	r.dropSupersededRowsLocked(state, arrName, prepared)
+	state.stored[arrName] = written
 	state.generations[arrName] = generation
 	return nil
 }
@@ -255,12 +319,35 @@ func (r *BindingRepository) invalidateLocked() {
 // authoritative for its arr.Arr, deltas written after it win per managed file, and
 // legacy rows only apply to an arr.Arr that has no snapshot yet.
 func (r *BindingRepository) scanLocked() ([]Binding, bindingRepositoryState, error) {
-	snapshots := make(map[string]bindingSnapshot)
+	manifests := make(map[string]bindingManifest)
+	pages := make(map[string][]bindingPage)
 	deltas := make(map[entryFileKey]bindingDelta)
 	legacy := make(map[string][]Binding)
+	stored := make(map[string][]storedPage)
+
 	if err := r.store.ForEach(func(key string, value []byte) error {
 		switch {
+		case strings.HasPrefix(key, bindingManifestKeyPrefix):
+			var manifest bindingManifest
+			if err := json.Unmarshal(value, &manifest); err != nil {
+				return fmt.Errorf("decode arr binding manifest %q: %w", key, err)
+			}
+			if err := validateBindingManifest(key, manifest); err != nil {
+				return fmt.Errorf("decode arr binding manifest %q: %w", key, err)
+			}
+			manifests[manifest.ArrName] = manifest
+		case strings.HasPrefix(key, bindingPageKeyPrefix):
+			var page bindingPage
+			if err := json.Unmarshal(value, &page); err != nil {
+				return fmt.Errorf("decode arr binding page %q: %w", key, err)
+			}
+			if err := validateBindingPage(key, page); err != nil {
+				return fmt.Errorf("decode arr binding page %q: %w", key, err)
+			}
+			pages[page.ArrName] = append(pages[page.ArrName], page)
+			stored[page.ArrName] = append(stored[page.ArrName], storedPage{key: key, generation: page.Generation})
 		case strings.HasPrefix(key, bindingSnapshotKeyPrefix):
+			// The single-row format an older build wrote.
 			var snapshot bindingSnapshot
 			if err := json.Unmarshal(value, &snapshot); err != nil {
 				return fmt.Errorf("decode arr binding snapshot %q: %w", key, err)
@@ -268,7 +355,13 @@ func (r *BindingRepository) scanLocked() ([]Binding, bindingRepositoryState, err
 			if err := validateBindingSnapshot(key, snapshot); err != nil {
 				return fmt.Errorf("decode arr binding snapshot %q: %w", key, err)
 			}
-			snapshots[snapshot.ArrName] = snapshot
+			pages[snapshot.ArrName] = append(pages[snapshot.ArrName], bindingPage{
+				Version:    snapshot.Version,
+				ArrName:    snapshot.ArrName,
+				Generation: snapshot.Generation,
+				Bindings:   snapshot.Bindings,
+			})
+			stored[snapshot.ArrName] = append(stored[snapshot.ArrName], storedPage{key: key, generation: snapshot.Generation})
 		case strings.HasPrefix(key, bindingDeltaKeyPrefix):
 			var delta bindingDelta
 			if err := json.Unmarshal(value, &delta); err != nil {
@@ -295,24 +388,40 @@ func (r *BindingRepository) scanLocked() ([]Binding, bindingRepositoryState, err
 
 	state := bindingRepositoryState{
 		owners:      make(map[entryFileKey]string),
-		generations: make(map[string]uint64, len(snapshots)),
+		generations: make(map[string]uint64, len(pages)),
 		deltas:      make(map[entryFileKey]struct{}, len(deltas)),
 		legacy:      make(map[string]map[entryFileKey]struct{}, len(legacy)),
+		stored:      stored,
 	}
-	merged := make(map[entryFileKey]Binding, len(deltas))
-	for arrName, snapshot := range snapshots {
-		state.generations[arrName] = snapshot.Generation
-		for _, binding := range snapshot.Bindings {
-			merged[entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}] = binding
+	merged := make(map[entryFileKey]Binding)
+	committed := make(map[string]uint64, len(pages))
+
+	for arrName, arrPages := range pages {
+		generation, ok := committedGeneration(arrName, manifests, arrPages)
+		if !ok {
+			// Pages with no manifest, or too few for the one on disk: an
+			// interrupted write, which the previous generation still covers.
+			continue
+		}
+		committed[arrName] = generation
+		state.generations[arrName] = generation
+		for _, page := range arrPages {
+			if page.Generation != generation {
+				continue
+			}
+			for _, binding := range page.Bindings {
+				merged[entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}] = binding
+			}
 		}
 	}
+
 	for arrName, bindings := range legacy {
 		keys := make(map[entryFileKey]struct{}, len(bindings))
 		for _, binding := range bindings {
 			keys[entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}] = struct{}{}
 		}
 		state.legacy[arrName] = keys
-		if _, superseded := snapshots[arrName]; superseded {
+		if _, superseded := committed[arrName]; superseded {
 			continue
 		}
 		for _, binding := range bindings {
@@ -321,10 +430,11 @@ func (r *BindingRepository) scanLocked() ([]Binding, bindingRepositoryState, err
 			state.generations[arrName] = max(state.generations[arrName], binding.Generation)
 		}
 	}
+
 	for key, delta := range deltas {
 		state.deltas[key] = struct{}{}
-		if delta.Generation < snapshots[delta.ArrName].Generation {
-			continue // superseded by a snapshot written after this delta
+		if delta.Generation < committed[delta.ArrName] {
+			continue // superseded by a generation written after this delta
 		}
 		if delta.Deleted {
 			delete(merged, key)
@@ -343,6 +453,37 @@ func (r *BindingRepository) scanLocked() ([]Binding, bindingRepositoryState, err
 		bindings = append(bindings, cloneBinding(binding))
 	}
 	return bindings, state, nil
+}
+
+// committedGeneration reports the newest generation whose pages are all on
+// disk. A manifest names how many pages its generation has; a snapshot an
+// older build wrote is a single page with no manifest.
+func committedGeneration(arrName string, manifests map[string]bindingManifest, pages []bindingPage) (uint64, bool) {
+	if manifest, ok := manifests[arrName]; ok {
+		found := 0
+		for _, page := range pages {
+			if page.Generation == manifest.Generation {
+				found++
+			}
+		}
+		if found != manifest.Pages {
+			return 0, false
+		}
+		return manifest.Generation, true
+	}
+
+	newest := uint64(0)
+	found := false
+	for _, page := range pages {
+		if page.Page != 0 {
+			continue // a paged generation is only valid with its manifest
+		}
+		if !found || page.Generation > newest {
+			newest = page.Generation
+			found = true
+		}
+	}
+	return newest, found
 }
 
 func (r *BindingRepository) persistDeltaLocked(delta bindingDelta) error {
@@ -369,13 +510,23 @@ func (r *BindingRepository) persistDeltaLocked(delta bindingDelta) error {
 
 // dropSupersededRowsLocked removes the delta and legacy rows a fresh snapshot
 // replaces. Failures are not fatal: the loader ignores stale rows.
+// dropSupersededRowsLocked removes the pages, deltas, and legacy rows a fresh
+// generation replaces. Failures are not fatal: the loader ignores stale rows.
 func (r *BindingRepository) dropSupersededRowsLocked(state *bindingRepositoryState, arrName string, bindings []Binding) {
+	for _, page := range state.stored[arrName] {
+		if err := r.store.Delete(page.key); err != nil {
+			continue
+		}
+	}
+	delete(state.stored, arrName)
+
 	for key := range state.legacy[arrName] {
 		if err := r.store.Delete(bindingStoreKey(key.entryID, key.fileID)); err == nil {
 			delete(state.owners, key)
 		}
 	}
 	delete(state.legacy, arrName)
+
 	for key := range state.deltas {
 		if state.owners[key] != arrName {
 			continue
@@ -401,6 +552,33 @@ func (r *BindingRepository) dropSupersededRowsLocked(state *bindingRepositorySta
 	}
 }
 
+func validateBindingManifest(key string, manifest bindingManifest) error {
+	switch {
+	case manifest.Version != bindingSnapshotVersion:
+		return fmt.Errorf("unsupported version %d", manifest.Version)
+	case manifest.ArrName == "":
+		return errors.New("arr name is required")
+	case key != bindingManifestStoreKey(manifest.ArrName):
+		return errors.New("manifest key does not match arr name")
+	case manifest.Pages < 0 || manifest.Bindings < 0:
+		return errors.New("manifest counts are negative")
+	default:
+		return nil
+	}
+}
+
+func validateBindingPage(key string, page bindingPage) error {
+	switch {
+	case page.Version != bindingSnapshotVersion:
+		return fmt.Errorf("unsupported version %d", page.Version)
+	case page.ArrName == "":
+		return errors.New("arr name is required")
+	case key != bindingPageStoreKey(page.ArrName, page.Generation, page.Page):
+		return errors.New("page key does not match its arr, generation, and index")
+	}
+	return validatePageBindings(page.ArrName, page.Generation, page.Bindings)
+}
+
 func validateBindingSnapshot(key string, snapshot bindingSnapshot) error {
 	switch {
 	case snapshot.Version != bindingSnapshotVersion:
@@ -410,22 +588,35 @@ func validateBindingSnapshot(key string, snapshot bindingSnapshot) error {
 	case key != bindingSnapshotStoreKey(snapshot.ArrName):
 		return errors.New("snapshot key does not match arr name")
 	}
-	seen := make(map[entryFileKey]struct{}, len(snapshot.Bindings))
-	for _, binding := range snapshot.Bindings {
+	if err := validatePageBindings(snapshot.ArrName, snapshot.Generation, snapshot.Bindings); err != nil {
+		return err
+	}
+	return validateUniqueManagedFiles(snapshot.Bindings)
+}
+
+func validatePageBindings(arrName string, generation uint64, bindings []Binding) error {
+	for _, binding := range bindings {
 		if err := binding.validate(); err != nil {
 			return err
 		}
-		if binding.ArrName != snapshot.ArrName {
+		if binding.ArrName != arrName {
 			return fmt.Errorf("binding belongs to arr %q", binding.ArrName)
 		}
-		if binding.Generation > snapshot.Generation {
-			return fmt.Errorf("binding generation %d exceeds snapshot generation %d", binding.Generation, snapshot.Generation)
+		if binding.Generation > generation {
+			return fmt.Errorf("binding generation %d exceeds generation %d", binding.Generation, generation)
 		}
-		bindingKey := entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}
-		if _, exists := seen[bindingKey]; exists {
+	}
+	return nil
+}
+
+func validateUniqueManagedFiles(bindings []Binding) error {
+	seen := make(map[entryFileKey]struct{}, len(bindings))
+	for _, binding := range bindings {
+		key := entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}
+		if _, exists := seen[key]; exists {
 			return fmt.Errorf("duplicate managed file %q/%q", binding.EntryID, binding.EntryFileID)
 		}
-		seen[bindingKey] = struct{}{}
+		seen[key] = struct{}{}
 	}
 	return nil
 }
@@ -483,8 +674,20 @@ func bindingDeltaStoreKey(entryID, fileID string) string {
 }
 
 func bindingSnapshotStoreKey(arrName string) string {
+	return bindingSnapshotKeyPrefix + arrNameHash(arrName)
+}
+
+func bindingManifestStoreKey(arrName string) string {
+	return bindingManifestKeyPrefix + arrNameHash(arrName)
+}
+
+func bindingPageStoreKey(arrName string, generation uint64, page int) string {
+	return fmt.Sprintf("%s%s:%d:%d", bindingPageKeyPrefix, arrNameHash(arrName), generation, page)
+}
+
+func arrNameHash(arrName string) string {
 	hash := sha256.Sum256([]byte(arrName))
-	return bindingSnapshotKeyPrefix + hex.EncodeToString(hash[:])
+	return hex.EncodeToString(hash[:])
 }
 
 func deleteStoreKey(store *appendstore.Store, key string) error {

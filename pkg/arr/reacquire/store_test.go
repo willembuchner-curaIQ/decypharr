@@ -3,6 +3,9 @@ package reacquire
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/sirrobot01/appendstore"
@@ -16,6 +19,8 @@ type observedBindingStore struct {
 	forEach     int
 	syncs       int
 	puts        []string
+	trace       []string
+	largestPut  int
 }
 
 func (s *observedBindingStore) ForEach(yield func(string, []byte) error) error {
@@ -29,11 +34,14 @@ func (s *observedBindingStore) Put(key string, value []byte, options *appendstor
 		return errBindingSnapshotPut
 	}
 	s.puts = append(s.puts, key)
+	s.trace = append(s.trace, "put "+key)
+	s.largestPut = max(s.largestPut, len(value))
 	return s.bindingRepositoryStore.Put(key, value, options)
 }
 
 func (s *observedBindingStore) Sync() error {
 	s.syncs++
+	s.trace = append(s.trace, "sync")
 	return s.bindingRepositoryStore.Sync()
 }
 
@@ -64,19 +72,105 @@ func TestBindingRepositoryFailedSnapshotPutKeepsCommittedGeneration(t *testing.T
 	assertSingleRepositoryBinding(t, repository, original)
 }
 
-func TestBindingRepositorySnapshotWriteIsDurable(t *testing.T) {
+func TestBindingRepositoryCommitsPagesBeforeTheManifest(t *testing.T) {
 	repository := openTestBindingRepository(t, t.TempDir()+"/bindings.db")
 	t.Cleanup(func() { _ = repository.Close() })
 	store := &observedBindingStore{bindingRepositoryStore: repository.store}
 	repository.store = store
 
-	binding := repositoryTestBinding("sonarr", "entry", "file", 4)
-	if err := repository.ReplaceArrGeneration("sonarr", 4, []Binding{binding}); err != nil {
+	bindings := make([]Binding, bindingPageSize+1)
+	for i := range bindings {
+		bindings[i] = repositoryTestBinding("sonarr", fmt.Sprintf("entry-%d", i), fmt.Sprintf("file-%d", i), 4)
+	}
+	if err := repository.ReplaceArrGeneration("sonarr", 4, bindings); err != nil {
 		t.Fatal(err)
 	}
-	if store.syncs != 1 {
-		t.Fatalf("Sync calls = %d, want 1", store.syncs)
+
+	manifest := "put " + bindingManifestStoreKey("sonarr")
+	manifestAt := slices.Index(store.trace, manifest)
+	if manifestAt < 0 {
+		t.Fatalf("trace = %v, want a manifest write", store.trace)
 	}
+	pages := 0
+	for _, event := range store.trace[:manifestAt] {
+		if strings.HasPrefix(event, "put "+bindingPageKeyPrefix) {
+			pages++
+		}
+	}
+	if pages != 2 {
+		t.Fatalf("pages written before the manifest = %d, want 2", pages)
+	}
+	// Every page must be durable before the manifest names it.
+	if store.trace[manifestAt-1] != "sync" {
+		t.Fatalf("trace = %v, want a sync before the manifest", store.trace)
+	}
+	if store.trace[len(store.trace)-1] != "sync" {
+		t.Fatalf("trace = %v, want the manifest synced", store.trace)
+	}
+}
+
+// A page is one row, so a large generation must not be one large write.
+func TestBindingRepositoryPagesLargeGenerations(t *testing.T) {
+	path := t.TempDir() + "/bindings.db"
+	repository := openTestBindingRepository(t, path)
+	bindings := make([]Binding, bindingPageSize*2+3)
+	for i := range bindings {
+		bindings[i] = repositoryTestBinding("radarr", fmt.Sprintf("entry-%d", i), fmt.Sprintf("file-%d", i), 1)
+	}
+	if err := repository.ReplaceArrGeneration("radarr", 1, bindings); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repository = openTestBindingRepository(t, path)
+	t.Cleanup(func() { _ = repository.Close() })
+	loaded, err := repository.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != len(bindings) {
+		t.Fatalf("loaded %d bindings, want %d", len(loaded), len(bindings))
+	}
+	if pages := len(repository.state.stored["radarr"]); pages != 3 {
+		t.Fatalf("stored pages = %d, want 3", pages)
+	}
+}
+
+// An interrupted write leaves pages with no manifest; the committed generation
+// must survive it.
+func TestBindingRepositoryIgnoresUncommittedPages(t *testing.T) {
+	path := t.TempDir() + "/bindings.db"
+	repository := openTestBindingRepository(t, path)
+	committed := repositoryTestBinding("sonarr", "entry-1", "file-1", 1)
+	if err := repository.ReplaceArrGeneration("sonarr", 1, []Binding{committed}); err != nil {
+		t.Fatal(err)
+	}
+
+	orphan := bindingPage{
+		Version:    bindingSnapshotVersion,
+		ArrName:    "sonarr",
+		Generation: 2,
+		Bindings:   []Binding{repositoryTestBinding("sonarr", "entry-2", "file-2", 2)},
+	}
+	data, err := json.Marshal(orphan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.store.Put(bindingPageStoreKey("sonarr", 2, 0), data, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.store.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repository = openTestBindingRepository(t, path)
+	t.Cleanup(func() { _ = repository.Close() })
+	assertSingleRepositoryBinding(t, repository, committed)
 }
 
 func TestBindingRepositoryRejectsCorruptAuthoritativeSnapshot(t *testing.T) {
