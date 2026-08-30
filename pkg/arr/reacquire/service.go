@@ -161,16 +161,8 @@ func (s *Service) Lookup(entryID, fileID string) (Binding, bool) {
 	return s.index.Lookup(entryID, fileID)
 }
 
-func (s *Service) Bindings() []Binding {
-	return s.index.All()
-}
-
 func (s *Service) BindingsByArr(arrName string) []Binding {
 	return s.index.ByArr(arrName)
-}
-
-func (s *Service) BindingsByDownload(arrName, downloadID string) []Binding {
-	return s.index.ByDownloadID(arrName, downloadID)
 }
 
 func (s *Service) UpsertBinding(binding Binding) error {
@@ -223,18 +215,6 @@ func newestBindingRows(bindings []Binding) []Binding {
 	}
 	sortBindings(result)
 	return result
-}
-
-func (s *Service) ObserveBinding(binding Binding) error {
-	release, err := s.beginOperation()
-	if err != nil {
-		return err
-	}
-	defer release()
-	if err := binding.validate(); err != nil {
-		return fmt.Errorf("observe arr binding: %w", err)
-	}
-	return s.completeWaitingJobs(binding)
 }
 
 func (s *Service) ReplaceArrGeneration(arrName string, generation uint64, bindings []Binding) error {

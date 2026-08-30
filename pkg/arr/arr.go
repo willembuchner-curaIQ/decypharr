@@ -234,7 +234,10 @@ type Storage struct {
 	arrs   *xsync.Map[string, *Arr]
 	logger zerolog.Logger
 	sg     singleflight.Group
-	mu     sync.RWMutex
+	// mu guards the arrs pointer, which SyncFromConfig replaces wholesale. The
+	// map itself is concurrent, so readers and writers of its entries only need
+	// the read lock.
+	mu sync.RWMutex
 }
 
 func (s *Storage) Cleanup() {
@@ -303,16 +306,17 @@ func (s *Storage) Get(name string) *Arr {
 // publishes a replacement instead of writing to the *Arr other goroutines
 // already read, because the type is part of the binding identity.
 func (s *Storage) ResolveType(name string, kind Type) *Arr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	current, ok := s.arrs.Load(name)
-	if !ok || kind == Others || current.Type == kind {
-		return current
-	}
-	updated := *current
-	updated.Type = kind
-	s.arrs.Store(name, &updated)
-	return &updated
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	resolved, _ := s.arrs.Compute(name, func(current *Arr, loaded bool) (*Arr, xsync.ComputeOp) {
+		if !loaded || kind == Others || current.Type == kind {
+			return current, xsync.CancelOp
+		}
+		updated := *current
+		updated.Type = kind
+		return &updated, xsync.UpdateOp
+	})
+	return resolved
 }
 
 func (s *Storage) GetAll() []*Arr {
