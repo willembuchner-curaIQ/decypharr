@@ -45,22 +45,19 @@
                 </svg>
             </div>
             <ul class="menu menu-sm dropdown-content mt-3 z-[1] p-2 shadow-lg bg-base-100 rounded-box w-52 border border-base-300">
-                <li><a href="{{.URLBase}}" class="{{if eq .Page " index"}}menu-active{{end}}">
+                <li><a href="{{.URLBase}}" class="{{if eq .Page "index"}}menu-active{{end}}">
                     <i class="bi bi-grid-3x3-gap text-primary"></i>Dashboard
                     </a></li>
-                <li><a href="{{.URLBase}}download" class="{{if eq .Page " download"}}menu-active{{end}}">
+                <li><a href="{{.URLBase}}download" class="{{if eq .Page "download"}}menu-active{{end}}">
                     <i class="bi bi-cloud-download text-secondary"></i>Download
                     </a></li>
-                <li><a href="{{.URLBase}}browse" class="{{if eq .Page " browse"}}menu-active{{end}}">
+                <li><a href="{{.URLBase}}browse" class="{{if eq .Page "browse"}}menu-active{{end}}">
                     <i class="bi bi-folder2-open text-primary"></i>Browse
                     </a></li>
-                <li><a href="{{.URLBase}}repair" class="{{if eq .Page " repair"}}menu-active{{end}}">
+                <li><a href="{{.URLBase}}repair" class="{{if or (eq .Page "repair") (eq .Page "reacquire")}}menu-active{{end}}">
                     <i class="bi bi-wrench-adjustable text-accent"></i>Repair
                     </a></li>
-                <li><a href="{{.URLBase}}reacquire" class="{{if eq .Page " reacquire"}}menu-active{{end}}">
-                    <i class="bi bi-arrow-repeat text-secondary"></i>Reacquire
-                    </a></li>
-                <li><a href="{{.URLBase}}settings" class="{{if eq .Page " config"}}menu-active{{end}}">
+                <li><a href="{{.URLBase}}settings" class="{{if eq .Page "config"}}menu-active{{end}}">
                     <i class="bi bi-gear text-info"></i>Settings
                     </a></li>
                 <li><a href="{{.URLBase}}logs" target="_blank">
@@ -76,32 +73,27 @@
 
     <div class="navbar-center hidden lg:flex">
         <ul class="menu menu-horizontal px-1 gap-1">
-            <li><a href="{{.URLBase}}" class="{{if eq .Page " index"}}menu-active{{end}} tooltip tooltip-bottom"
+            <li><a href="{{.URLBase}}" class="{{if eq .Page "index"}}menu-active{{end}} tooltip tooltip-bottom"
                 data-tip="Dashboard">
                 <i class="bi bi-grid-3x3-gap"></i>
                 <span class="hidden xl:inline">Dashboard</span>
                 </a></li>
-            <li><a href="{{.URLBase}}download" class="{{if eq .Page " download"}}menu-active{{end}} tooltip
+            <li><a href="{{.URLBase}}download" class="{{if eq .Page "download"}}menu-active{{end}} tooltip
                 tooltip-bottom" data-tip="Add Downloads">
                 <i class="bi bi-cloud-download"></i>
                 <span class="hidden xl:inline">Download</span>
                 </a></li>
-            <li><a href="{{.URLBase}}browse" class="{{if eq .Page " browse"}}menu-active{{end}} tooltip tooltip-bottom"
+            <li><a href="{{.URLBase}}browse" class="{{if eq .Page "browse"}}menu-active{{end}} tooltip tooltip-bottom"
                 data-tip="Browse Torrents">
                 <i class="bi bi-folder2-open"></i>
                 <span class="hidden xl:inline">Browse</span>
                 </a></li>
-            <li><a href="{{.URLBase}}repair" class="{{if eq .Page " repair"}}menu-active{{end}} tooltip tooltip-bottom"
+            <li><a href="{{.URLBase}}repair" class="{{if or (eq .Page "repair") (eq .Page "reacquire")}}menu-active{{end}} tooltip tooltip-bottom"
                 data-tip="Repair Media">
                 <i class="bi bi-wrench-adjustable"></i>
                 <span class="hidden xl:inline">Repair</span>
                 </a></li>
-            <li><a href="{{.URLBase}}reacquire" class="{{if eq .Page " reacquire"}}menu-active{{end}} tooltip
-                tooltip-bottom" data-tip="Arr Reacquisition">
-                <i class="bi bi-arrow-repeat"></i>
-                <span class="hidden xl:inline">Reacquire</span>
-                </a></li>
-            <li><a href="{{.URLBase}}settings" class="{{if eq .Page " config"}}menu-active{{end}} tooltip
+            <li><a href="{{.URLBase}}settings" class="{{if eq .Page "config"}}menu-active{{end}} tooltip
                 tooltip-bottom" data-tip="Settings">
                 <i class="bi bi-gear"></i>
                 <span class="hidden xl:inline">Settings</span>

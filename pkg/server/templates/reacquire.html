@@ -1,5 +1,7 @@
 {{ define "reacquire" }}
 <div class="space-y-6">
+    {{ template "repair_tabs" . }}
+
     {{ if .SetupError }}
     <div role="alert" class="alert alert-warning">
         <i class="bi bi-exclamation-triangle text-xl"></i>
