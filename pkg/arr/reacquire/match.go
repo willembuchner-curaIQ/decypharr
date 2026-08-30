@@ -1,7 +1,6 @@
 package reacquire
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,11 +8,7 @@ import (
 	"time"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
-	"github.com/sirrobot01/decypharr/pkg/strm"
 )
-
-// maxStrmRead bounds a .strm read; a canonical stream URL is far smaller.
-const maxStrmRead = 8 << 10
 
 func bindingsFromMatches(instance arr.Arr, generation uint64, matches []libraryMatch) []Binding {
 	bindings := make([]Binding, 0, len(matches))
@@ -228,28 +223,56 @@ type libraryMatch struct {
 	managed ManagedFile
 }
 
-// strmIdentity reads a .strm library file and returns the managed file it
-// points at. Decypharr writes its own signed stream URLs, so the identity is
-// exact; a .strm written by anything else does not parse and is skipped.
-func strmIdentity(path string) (entryFileKey, bool) {
-	if !strings.EqualFold(filepath.Ext(path), ".strm") {
-		return entryFileKey{}, false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return entryFileKey{}, true
-	}
-	defer func() { _ = file.Close() }()
+type targetFileKey struct {
+	folder string
+	name   string
+}
 
-	content, err := io.ReadAll(io.LimitReader(file, maxStrmRead))
-	if err != nil {
-		return entryFileKey{}, true
+func matchLibraryFiles(library []arr.LibraryFile, managed []ManagedFile) []libraryMatch {
+	managedByTarget := make(map[targetFileKey][]ManagedFile, len(managed))
+	for _, file := range managed {
+		if file.EntryFolder == "" || file.FileName == "" {
+			continue
+		}
+		key := targetFileKey{
+			folder: filepath.Clean(file.EntryFolder),
+			name:   filepath.Clean(file.FileName),
+		}
+		managedByTarget[key] = append(managedByTarget[key], file)
 	}
-	entryID, fileID, ok := strm.ParseURL(string(content))
-	if !ok {
-		return entryFileKey{}, true
+
+	candidates := make([]libraryMatch, 0, min(len(library), len(managed)))
+	for _, libraryFile := range library {
+		target := symlinkTarget(libraryFile.Path)
+		if target == "" {
+			continue
+		}
+		directory, name := filepath.Split(target)
+		key := targetFileKey{
+			folder: filepath.Base(filepath.Clean(directory)),
+			name:   filepath.Clean(name),
+		}
+		managedFiles := managedByTarget[key]
+		if len(managedFiles) == 1 {
+			candidates = append(candidates, libraryMatch{library: libraryFile, managed: managedFiles[0]})
+		}
 	}
-	return entryFileKey{entryID: entryID, fileID: fileID}, true
+
+	managedUses := make(map[entryFileKey]int, len(candidates))
+	arrFileUses := make(map[int]int, len(candidates))
+	for _, candidate := range candidates {
+		managedUses[entryFileKey{entryID: candidate.managed.EntryID, fileID: candidate.managed.FileID}]++
+		arrFileUses[candidate.library.ArrFileID]++
+	}
+
+	matches := candidates[:0]
+	for _, candidate := range candidates {
+		managedKey := entryFileKey{entryID: candidate.managed.EntryID, fileID: candidate.managed.FileID}
+		if managedUses[managedKey] == 1 && arrFileUses[candidate.library.ArrFileID] == 1 {
+			matches = append(matches, candidate)
+		}
+	}
+	return matches
 }
 
 func symlinkTarget(path string) string {
@@ -265,26 +288,6 @@ func symlinkTarget(path string) string {
 		target = filepath.Join(filepath.Dir(path), target)
 	}
 	return cleanAbsolutePath(target)
-}
-
-func sameFileCandidate(libraryPath string, candidates []ManagedFile) (ManagedFile, bool) {
-	libraryInfo, err := os.Stat(libraryPath)
-	if err != nil {
-		return ManagedFile{}, false
-	}
-	var match ManagedFile
-	found := false
-	for _, candidate := range candidates {
-		managedInfo, err := os.Stat(candidate.Path)
-		if err == nil && os.SameFile(libraryInfo, managedInfo) {
-			if found {
-				return ManagedFile{}, false
-			}
-			match = candidate
-			found = true
-		}
-	}
-	return match, found
 }
 
 func cleanAbsolutePath(path string) string {

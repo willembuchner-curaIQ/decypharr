@@ -1,232 +1,140 @@
 package reacquire
 
 import (
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
-
-	"github.com/sirrobot01/decypharr/pkg/strm"
 )
 
-func TestMatchLibraryFilesRequiresExactIdentity(t *testing.T) {
+func TestMatchLibraryFilesBySymlinkTarget(t *testing.T) {
 	dir := t.TempDir()
-	managedPath := filepath.Join(dir, "downloads", "movie.mkv")
-	if err := os.MkdirAll(filepath.Dir(managedPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(managedPath, []byte("media"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	libraryPath := filepath.Join(dir, "library", "movie.mkv")
+	target := filepath.Join(dir, "managed", "Movie.Release", "movie.mkv")
+	libraryPath := filepath.Join(dir, "library", "Movie.mkv")
 	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(managedPath, libraryPath); err != nil {
+	if err := os.Symlink(target, libraryPath); err != nil {
 		t.Fatal(err)
 	}
 
 	matches := matchLibraryFiles(
-		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath, Size: 5}},
-		[]ManagedFile{{EntryID: "entry", FileID: "file", Path: managedPath, Size: 5}},
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: "Movie.Release", FileID: "file", FileName: "movie.mkv"}},
 	)
 	if len(matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(matches))
 	}
 	if matches[0].managed.FileID != "file" {
-		t.Fatalf("matched file ID = %q, want file", matches[0].managed.FileID)
+		t.Fatalf("managed file ID = %q, want file", matches[0].managed.FileID)
 	}
 }
 
-func TestHistoryBindingCannotReplaceExactCurrentArrFile(t *testing.T) {
-	instance := arr.Arr{Name: "movies", Type: arr.Radarr}
-	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
-	managed := []ManagedFile{
-		{EntryID: "current-entry", FileID: "current-file", DownloadID: "current-download", Path: "/downloads/current/movie.mkv"},
-		{EntryID: "old-entry", FileID: "old-file", DownloadID: "old-download", Path: "/downloads/old/movie.mkv"},
-	}
-	exact := []Binding{{
-		ArrName:     "movies",
-		ArrType:     arr.Radarr,
-		EntryID:     "current-entry",
-		EntryFileID: "current-file",
-		DownloadID:  "current-download",
-		ArrFileID:   42,
-		MovieID:     9,
-		Confidence:  ConfidenceExactPath,
-	}}
-	history := []arr.HistoryRecord{{
-		DownloadID: "old-download",
-		EventType:  "downloadFolderImported",
-		MovieID:    9,
-		Date:       time.Now(),
-		Data: map[string]string{
-			"droppedPath":  "/downloads/old/movie.mkv",
-			"importedPath": "/library/movie.mkv",
-		},
-	}}
-
-	bindings := bindingsFromHistoryRecords(instance, 2, library, managed, exact, history)
-	if len(bindings) != 0 {
-		t.Fatalf("history bindings = %#v, want no collision with exact current binding", bindings)
-	}
-}
-
-func TestLatestUnmanagedImportBlocksOlderHistoryBinding(t *testing.T) {
-	instance := arr.Arr{Name: "movies", Type: arr.Radarr}
-	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
-	managed := []ManagedFile{{
-		EntryID: "old-entry", FileID: "old-file", DownloadID: "old-download", Path: "/downloads/old/movie.mkv",
-	}}
-	history := []arr.HistoryRecord{
-		{
-			DownloadID: "external-download",
-			EventType:  "downloadFolderImported",
-			MovieID:    9,
-			Date:       time.Date(2026, time.August, 30, 12, 0, 0, 0, time.UTC),
-			Data: map[string]string{
-				"droppedPath":  "/external/movie.mkv",
-				"importedPath": "/library/movie.mkv",
-			},
-		},
-		{
-			DownloadID: "old-download",
-			EventType:  "downloadFolderImported",
-			MovieID:    9,
-			Date:       time.Date(2026, time.August, 1, 12, 0, 0, 0, time.UTC),
-			Data: map[string]string{
-				"droppedPath":  "/downloads/old/movie.mkv",
-				"importedPath": "/library/movie.mkv",
-			},
-		},
-	}
-
-	bindings := bindingsFromHistoryRecords(instance, 2, library, managed, nil, history)
-	if len(bindings) != 0 {
-		t.Fatalf("history bindings = %#v, want latest current import to consume the Arr file", bindings)
-	}
-}
-
-func TestMatchLibraryFilesRejectsAmbiguousManagedPath(t *testing.T) {
+func TestMatchLibraryFilesResolvesRelativeSymlink(t *testing.T) {
 	dir := t.TempDir()
-	managedPath := filepath.Join(dir, "downloads", "movie.mkv")
-	if err := os.MkdirAll(filepath.Dir(managedPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(managedPath, []byte("media"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	libraryPath := filepath.Join(dir, "library", "movie.mkv")
+	libraryPath := filepath.Join(dir, "library", "Movie.mkv")
 	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(managedPath, libraryPath); err != nil {
+	target := filepath.Join("..", "managed", "Movie.Release", "movie.mkv")
+	if err := os.Symlink(target, libraryPath); err != nil {
 		t.Fatal(err)
 	}
 
 	matches := matchLibraryFiles(
-		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath, Size: 5}},
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: "Movie.Release", FileID: "file", FileName: "movie.mkv"}},
+	)
+	if len(matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(matches))
+	}
+}
+
+func TestMatchLibraryFilesSkipsNonSymlink(t *testing.T) {
+	dir := t.TempDir()
+	libraryPath := filepath.Join(dir, "Movie.mkv")
+	if err := os.WriteFile(libraryPath, []byte("media"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	matches := matchLibraryFiles(
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: filepath.Base(dir), FileID: "file", FileName: "Movie.mkv"}},
+	)
+	if len(matches) != 0 {
+		t.Fatalf("matches = %d, want 0", len(matches))
+	}
+}
+
+func TestMatchLibraryFilesRequiresFolderAndFilename(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "managed", "Movie.Release", "movie.mkv")
+	libraryPath := filepath.Join(dir, "library", "Movie.mkv")
+	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, libraryPath); err != nil {
+		t.Fatal(err)
+	}
+
+	matches := matchLibraryFiles(
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: "Other.Release", FileID: "file", FileName: "movie.mkv"}},
+	)
+	if len(matches) != 0 {
+		t.Fatalf("matches = %d, want 0", len(matches))
+	}
+}
+
+func TestMatchLibraryFilesRejectsAmbiguousManagedFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "managed", "Movie.Release", "movie.mkv")
+	libraryPath := filepath.Join(dir, "library", "Movie.mkv")
+	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, libraryPath); err != nil {
+		t.Fatal(err)
+	}
+
+	matches := matchLibraryFiles(
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
 		[]ManagedFile{
-			{EntryID: "entry-1", FileID: "file-1", Path: managedPath, Size: 5},
-			{EntryID: "entry-2", FileID: "file-2", Path: managedPath, Size: 5},
+			{EntryID: "entry-1", EntryFolder: "Movie.Release", FileID: "file-1", FileName: "movie.mkv"},
+			{EntryID: "entry-2", EntryFolder: "Movie.Release", FileID: "file-2", FileName: "movie.mkv"},
 		},
 	)
 	if len(matches) != 0 {
-		t.Fatalf("matches = %d, want none for an ambiguous managed path", len(matches))
+		t.Fatalf("matches = %d, want 0", len(matches))
 	}
 }
 
-func TestBindingsFromHistoryUsesExactDroppedPath(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/api/v3/history" || request.URL.Query().Get("downloadId") != "download-1" {
-			http.NotFound(w, request)
-			return
-		}
-		_, _ = fmt.Fprint(w, `{"page":1,"totalRecords":1,"records":[{"id":7,"downloadId":"download-1","eventType":"downloadFolderImported","movieId":9,"data":{"droppedPath":"/downloads/movie.mkv","importedPath":"/library/Movie (2025)/Movie.mkv"}}]}`)
-	}))
-	defer server.Close()
-
-	instance := arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
-	arrs := arr.New()
-	arrs.AddOrUpdate(instance)
-	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/Movie (2025)/Movie.mkv", MovieID: 9}}
-	managed := []ManagedFile{{EntryID: "entry", FileID: "file", DownloadID: "download-1", Path: "/downloads/movie.mkv"}}
-	records, err := (&Indexer{arrs: arrs}).historyForManaged(t.Context(), instance, managed, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bindings := bindingsFromHistoryRecords(instance, 3, library, managed, nil, records)
-	if len(bindings) != 1 || bindings[0].Confidence != ConfidenceDownloadHistory {
-		t.Fatalf("bindings = %#v", bindings)
-	}
-	if bindings[0].ArrInstanceFingerprint != instance.Fingerprint() {
-		t.Fatal("history binding did not capture the current Arr instance fingerprint")
-	}
-}
-
-func TestCarryForwardBindingRequiresCurrentInstanceAndPath(t *testing.T) {
-	instance := arr.Arr{Name: "movies", Host: "http://radarr.example", Type: arr.Radarr}
-	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
-	managed := []ManagedFile{{EntryID: "entry", FileID: "file", Path: "/downloads/movie.mkv"}}
-	old := Binding{
-		ArrName:     "movies",
-		ArrType:     arr.Radarr,
-		EntryID:     "entry",
-		EntryFileID: "file",
-		ArrFileID:   42,
-		LibraryPath: "/library/movie.mkv",
-		MovieID:     9,
-		Confidence:  ConfidenceExactPath,
-	}
-
-	if bindings := carryForwardBindings(instance, 2, nil, []Binding{old}, library, managed); len(bindings) != 0 {
-		t.Fatal("legacy binding was carried forward without a fresh identity match")
-	}
-	old.ArrInstanceFingerprint = instance.Fingerprint()
-	old.LibraryPath = "/library/old.mkv"
-	if bindings := carryForwardBindings(instance, 2, nil, []Binding{old}, library, managed); len(bindings) != 0 {
-		t.Fatal("binding was carried forward after its library path changed")
-	}
-	old.LibraryPath = library[0].Path
-	bindings := carryForwardBindings(instance, 2, nil, []Binding{old}, library, managed)
-	if len(bindings) != 1 || bindings[0].ArrInstanceFingerprint != instance.Fingerprint() {
-		t.Fatalf("current binding was not carried forward: %#v", bindings)
-	}
-}
-
-func TestMatchLibraryFilesBindsStrmByIdentity(t *testing.T) {
+func TestMatchLibraryFilesRejectsDuplicateArrTargets(t *testing.T) {
 	dir := t.TempDir()
-	const (
-		entryID = "0123456789abcdef0123456789abcdef"
-		fileID  = "fedcba9876543210fedcba9876543210"
-	)
-	libraryPath := filepath.Join(dir, "Movie (2026).strm")
-	url := strm.FileURL("http://decypharr.test", "secret", entryID, fileID, "Movie.mkv")
-	if err := os.WriteFile(libraryPath, []byte(url), 0o644); err != nil {
+	target := filepath.Join(dir, "managed", "Movie.Release", "movie.mkv")
+	libraryDir := filepath.Join(dir, "library")
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	foreignPath := filepath.Join(dir, "Foreign.strm")
-	if err := os.WriteFile(foreignPath, []byte("http://example.com/other.mkv"), 0o644); err != nil {
-		t.Fatal(err)
+	libraryPaths := []string{
+		filepath.Join(libraryDir, "Movie.mkv"),
+		filepath.Join(libraryDir, "Movie copy.mkv"),
+	}
+	for _, path := range libraryPaths {
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	matches := matchLibraryFiles(
 		[]arr.LibraryFile{
-			{ArrFileID: 42, Path: libraryPath, Size: 120},
-			{ArrFileID: 43, Path: foreignPath, Size: 120},
+			{ArrFileID: 42, Path: libraryPaths[0]},
+			{ArrFileID: 43, Path: libraryPaths[1]},
 		},
-		[]ManagedFile{{EntryID: entryID, FileID: fileID, Path: "/downloads/Movie.mkv", Size: 1 << 30}},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: "Movie.Release", FileID: "file", FileName: "movie.mkv"}},
 	)
-	if len(matches) != 1 || matches[0].library.ArrFileID != 42 {
-		t.Fatalf("matches = %#v, want only the Decypharr .strm", matches)
-	}
-	if matches[0].managed.EntryID != entryID || matches[0].managed.FileID != fileID {
-		t.Fatalf("managed identity = %#v", matches[0].managed)
+	if len(matches) != 0 {
+		t.Fatalf("matches = %d, want 0", len(matches))
 	}
 }
