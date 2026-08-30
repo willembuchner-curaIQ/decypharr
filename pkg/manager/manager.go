@@ -293,7 +293,8 @@ func (m *Manager) initArrServices() {
 		return
 	}
 	m.arrService = service
-	m.arrIndexer = reacquire.NewIndexer(m.arr, managedArrCatalog{storage: m.storage}, service)
+	m.arrIndexer = reacquire.NewIndexer(m.arr, managedArrCatalog{storage: m.storage}, service,
+		filepath.Join(m.config.Mount.MountPath, EntryAllFolder))
 	m.SetArrRecovery(service)
 }
 

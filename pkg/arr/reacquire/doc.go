@@ -1,7 +1,9 @@
 // Package reacquire replaces media a Decypharr entry can no longer serve.
 //
 // It binds each managed file to the Sonarr or Radarr library symlink that points
-// at its entry folder and filename. A confirmed content failure can then be
+// at its entry folder and filename. A symlink that points into the mount but
+// carries a stale entry folder is bound by filename and size instead, so a
+// folder rename does not drop the file. A confirmed content failure can then be
 // turned into an Arr action on exact database IDs.
 //
 // Indexer keeps the bindings current: a full reconciliation per Arr on start

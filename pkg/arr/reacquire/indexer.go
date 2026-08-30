@@ -21,14 +21,17 @@ type ManagedFile struct {
 	EntryFolder string `json:"entry_folder"`
 	FileID      string `json:"file_id"`
 	FileName    string `json:"file_name"`
+	FileSize    int64  `json:"file_size"`
 	DownloadID  string `json:"download_id"`
 }
 
 // ManagedCatalog exposes managed files without coupling pkg/arr to storage.
 // A non-empty entry ID must return only that entry's files: a targeted index
 // runs after every completed download and must not walk the whole library.
+// The catalog is not scoped to an Arr; the library symlink decides which Arr
+// owns a managed file.
 type ManagedCatalog interface {
-	ListManagedFiles(ctx context.Context, arrName, entryID string) ([]ManagedFile, error)
+	ListManagedFiles(ctx context.Context, entryID string) ([]ManagedFile, error)
 }
 
 type bindingWriter interface {
@@ -43,10 +46,11 @@ type indexRequest struct {
 }
 
 type Indexer struct {
-	arrs    *arr.Service
-	catalog ManagedCatalog
-	writer  bindingWriter
-	logger  zerolog.Logger
+	arrs        *arr.Service
+	catalog     ManagedCatalog
+	writer      bindingWriter
+	managedRoot string
+	logger      zerolog.Logger
 
 	wake        chan struct{}
 	queue       []indexRequest
@@ -74,14 +78,18 @@ var targetedIndexBackoff = [...]time.Duration{
 	30 * time.Second,
 }
 
-func NewIndexer(arrs *arr.Service, catalog ManagedCatalog, writer bindingWriter) *Indexer {
+// NewIndexer builds the indexer. managedRoot is the mount directory that holds
+// every entry folder; library symlinks that point outside it are not managed by
+// Decypharr and are skipped.
+func NewIndexer(arrs *arr.Service, catalog ManagedCatalog, writer bindingWriter, managedRoot string) *Indexer {
 	return &Indexer{
-		arrs:    arrs,
-		catalog: catalog,
-		writer:  writer,
-		logger:  logger.New("arr-indexer"),
-		wake:    make(chan struct{}, 1),
-		pending: make(map[string]struct{}),
+		arrs:        arrs,
+		catalog:     catalog,
+		writer:      writer,
+		managedRoot: managedRoot,
+		logger:      logger.New("arr-indexer"),
+		wake:        make(chan struct{}, 1),
+		pending:     make(map[string]struct{}),
 	}
 }
 
@@ -199,19 +207,7 @@ func (i *Indexer) nextRequest() (indexRequest, bool) {
 
 func (i *Indexer) handle(ctx context.Context, request indexRequest) {
 	if request.arrName == "" {
-		failed := false
-		for _, instance := range i.arrs.All() {
-			if instance.Type != arr.Sonarr && instance.Type != arr.Radarr {
-				continue
-			}
-			if _, err := i.reconcile(ctx, instance, ""); err != nil {
-				failed = true
-				i.logger.Warn().Err(err).Str("arr", instance.Name).Msg("Arr index reconciliation failed")
-			}
-		}
-		if failed && request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
-			i.retry(ctx, request, targetedIndexBackoff[request.attempt])
-		}
+		i.handleRefresh(ctx, request)
 		return
 	}
 
@@ -220,39 +216,103 @@ func (i *Indexer) handle(ctx context.Context, request indexRequest) {
 		i.logger.Warn().Str("arr", request.arrName).Msg("Targeted Arr index skipped: instance not found")
 		return
 	}
-	found, err := i.reconcile(ctx, instance, request.entryID)
-	if err != nil {
-		i.logger.Debug().Err(err).Str("arr", request.arrName).Str("entry_id", request.entryID).Msg("Targeted Arr index attempt failed")
+	managed, err := i.catalog.ListManagedFiles(ctx, request.entryID)
+	if err == nil {
+		var stats matchStats
+		stats, err = i.reconcile(ctx, instance, request.entryID, managed)
+		if err == nil && stats.matched() > 0 {
+			stats.fields(i.logger.Info()).
+				Str("arr", request.arrName).
+				Str("entry_id", request.entryID).
+				Msg("Indexed Arr entry")
+			return
+		}
+		if err == nil {
+			i.retryTargeted(ctx, request, stats)
+			return
+		}
 	}
-	if !found && request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
+	i.logger.Debug().Err(err).Str("arr", request.arrName).Str("entry_id", request.entryID).Msg("Targeted Arr index attempt failed")
+	i.retryTargeted(ctx, request, matchStats{})
+}
+
+// handleRefresh reconciles every Sonarr and Radarr instance against one read of
+// the managed catalog. The catalog is the same for all of them, and walking the
+// whole entry store once per Arr is the expensive half of a refresh.
+func (i *Indexer) handleRefresh(ctx context.Context, request indexRequest) {
+	managed, err := i.catalog.ListManagedFiles(ctx, "")
+	if err != nil {
+		i.logger.Warn().Err(err).Msg("Arr index reconciliation failed: cannot read managed files")
+		if request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
+			i.retry(ctx, request, targetedIndexBackoff[request.attempt])
+		}
+		return
+	}
+
+	failed := false
+	for _, instance := range i.arrs.All() {
+		if instance.Type != arr.Sonarr && instance.Type != arr.Radarr {
+			continue
+		}
+		started := time.Now()
+		stats, err := i.reconcile(ctx, instance, "", managed)
+		if err != nil {
+			failed = true
+			i.logger.Warn().Err(err).Str("arr", instance.Name).Msg("Arr index reconciliation failed")
+			continue
+		}
+		stats.fields(i.logger.Info()).
+			Str("arr", instance.Name).
+			Dur("took", time.Since(started)).
+			Msg("Indexed Arr library")
+	}
+	if failed && request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
 		i.retry(ctx, request, targetedIndexBackoff[request.attempt])
 	}
 }
 
-func (i *Indexer) reconcile(ctx context.Context, instance arr.Arr, entryID string) (bool, error) {
-	managed, err := i.catalog.ListManagedFiles(ctx, instance.Name, entryID)
-	if err != nil {
-		return false, err
+// retryTargeted waits for the Arr to import the entry, then indexes it again.
+func (i *Indexer) retryTargeted(ctx context.Context, request indexRequest, stats matchStats) {
+	if ctx.Err() != nil {
+		return
 	}
+	if request.attempt < len(targetedIndexBackoff) {
+		stats.fields(i.logger.Debug()).
+			Str("arr", request.arrName).
+			Str("entry_id", request.entryID).
+			Int("attempt", request.attempt+1).
+			Msg("Targeted Arr index found no library file yet")
+		i.retry(ctx, request, targetedIndexBackoff[request.attempt])
+		return
+	}
+	stats.fields(i.logger.Warn()).
+		Str("arr", request.arrName).
+		Str("entry_id", request.entryID).
+		Int("attempts", request.attempt+1).
+		Msg("Targeted Arr index gave up: no library file matched the entry")
+}
+
+func (i *Indexer) reconcile(ctx context.Context, instance arr.Arr, entryID string, managed []ManagedFile) (matchStats, error) {
 	library, err := i.arrs.LibraryFiles(ctx, instance.Name)
 	if err != nil {
-		return false, err
+		return matchStats{}, err
 	}
 
 	generation := uint64(time.Now().UnixMilli()) + i.sequence.Add(1)
-	bindings := bindingsFromMatches(instance, generation, matchLibraryFiles(library, managed))
+	matches, stats := matchLibraryFiles(library, managed, i.managedRoot)
+	bindings := bindingsFromMatches(instance, generation, matches)
 	if entryID == "" {
 		if err := i.writer.ReplaceArrGeneration(instance.Name, generation, bindings); err != nil {
-			return false, err
+			return stats, err
 		}
-	} else {
-		for _, binding := range bindings {
-			if err := i.writer.UpsertBinding(binding); err != nil {
-				return false, err
-			}
+		return stats, nil
+	}
+	for _, binding := range bindings {
+		if err := i.writer.UpsertBinding(binding); err != nil {
+			return stats, err
 		}
 	}
-	return len(bindings) > 0, nil
+	return stats, nil
 }
 
 func (i *Indexer) retry(ctx context.Context, request indexRequest, delay time.Duration) {

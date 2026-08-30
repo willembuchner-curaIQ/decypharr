@@ -2,7 +2,6 @@ package manager
 
 import (
 	"context"
-	"strings"
 
 	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 	"github.com/sirrobot01/decypharr/pkg/storage"
@@ -15,16 +14,16 @@ type managedArrCatalog struct {
 	storage *storage.Storage
 }
 
-// ListManagedFiles returns the managed files an Arr owns. A non-empty entryID
-// reads that one entry: a targeted reindex runs after every completed
-// download, so it must never walk the whole library.
-func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryID string) ([]reacquire.ManagedFile, error) {
+// ListManagedFiles returns every managed file. Ownership is not filtered by
+// entry category: an entry synced from the provider carries no category, and an
+// Arr can only import a file Decypharr symlinked, so the library symlink is the
+// only proof of ownership. A non-empty entryID reads that one entry: a targeted
+// reindex runs after every completed download, so it must never walk the whole
+// library.
+func (c managedArrCatalog) ListManagedFiles(ctx context.Context, entryID string) ([]reacquire.ManagedFile, error) {
 	if entryID != "" {
 		entry, err := c.storage.Get(entryID)
 		if err != nil || entry == nil {
-			return nil, nil
-		}
-		if !ownedByArr(entry, arrName) {
 			return nil, nil
 		}
 		return c.entryFiles(entry)
@@ -37,9 +36,6 @@ func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryI
 			return err
 		}
 		for _, entry := range entries {
-			if !ownedByArr(entry, arrName) {
-				continue
-			}
 			if needsFileIDs(entry) {
 				missingIDs = append(missingIDs, entry)
 				continue
@@ -91,14 +87,11 @@ func entryManagedFiles(entry *storage.Entry) []reacquire.ManagedFile {
 			EntryFolder: folder,
 			FileID:      file.ID,
 			FileName:    fileName,
+			FileSize:    file.Size,
 			DownloadID:  entry.InfoHash,
 		})
 	}
 	return files
-}
-
-func ownedByArr(entry *storage.Entry, arrName string) bool {
-	return entry != nil && strings.EqualFold(strings.TrimSpace(entry.Category), strings.TrimSpace(arrName))
 }
 
 func needsFileIDs(entry *storage.Entry) bool {

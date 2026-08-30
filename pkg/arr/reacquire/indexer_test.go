@@ -23,9 +23,10 @@ func TestMatchLibraryFilesBySymlinkTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matches := matchLibraryFiles(
+	matches, _ := matchLibraryFiles(
 		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
 		[]ManagedFile{{EntryID: "entry", EntryFolder: "Movie.Release", FileID: "file", FileName: "movie.mkv"}},
+		filepath.Join(dir, "managed"),
 	)
 	if len(matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(matches))
@@ -46,9 +47,10 @@ func TestMatchLibraryFilesResolvesRelativeSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matches := matchLibraryFiles(
+	matches, _ := matchLibraryFiles(
 		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
 		[]ManagedFile{{EntryID: "entry", EntryFolder: "Movie.Release", FileID: "file", FileName: "movie.mkv"}},
+		filepath.Join(dir, "managed"),
 	)
 	if len(matches) != 1 {
 		t.Fatalf("matches = %d, want 1", len(matches))
@@ -62,12 +64,16 @@ func TestMatchLibraryFilesSkipsNonSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matches := matchLibraryFiles(
+	matches, stats := matchLibraryFiles(
 		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
 		[]ManagedFile{{EntryID: "entry", EntryFolder: filepath.Base(dir), FileID: "file", FileName: "Movie.mkv"}},
+		dir,
 	)
 	if len(matches) != 0 {
 		t.Fatalf("matches = %d, want 0", len(matches))
+	}
+	if stats.notSymlink != 1 {
+		t.Fatalf("not-symlink = %d, want 1", stats.notSymlink)
 	}
 }
 
@@ -82,12 +88,16 @@ func TestMatchLibraryFilesRequiresFolderAndFilename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matches := matchLibraryFiles(
+	matches, stats := matchLibraryFiles(
 		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
 		[]ManagedFile{{EntryID: "entry", EntryFolder: "Other.Release", FileID: "file", FileName: "movie.mkv"}},
+		filepath.Join(dir, "managed"),
 	)
 	if len(matches) != 0 {
 		t.Fatalf("matches = %d, want 0", len(matches))
+	}
+	if stats.unknownTarget != 1 {
+		t.Fatalf("unknown-target = %d, want 1", stats.unknownTarget)
 	}
 }
 
@@ -102,15 +112,19 @@ func TestMatchLibraryFilesRejectsAmbiguousManagedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	matches := matchLibraryFiles(
+	matches, stats := matchLibraryFiles(
 		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
 		[]ManagedFile{
 			{EntryID: "entry-1", EntryFolder: "Movie.Release", FileID: "file-1", FileName: "movie.mkv"},
 			{EntryID: "entry-2", EntryFolder: "Movie.Release", FileID: "file-2", FileName: "movie.mkv"},
 		},
+		filepath.Join(dir, "managed"),
 	)
 	if len(matches) != 0 {
 		t.Fatalf("matches = %d, want 0", len(matches))
+	}
+	if stats.ambiguousTarget != 1 {
+		t.Fatalf("ambiguous-target = %d, want 1", stats.ambiguousTarget)
 	}
 }
 
@@ -131,15 +145,19 @@ func TestMatchLibraryFilesRejectsDuplicateArrTargets(t *testing.T) {
 		}
 	}
 
-	matches := matchLibraryFiles(
+	matches, stats := matchLibraryFiles(
 		[]arr.LibraryFile{
 			{ArrFileID: 42, Path: libraryPaths[0]},
 			{ArrFileID: 43, Path: libraryPaths[1]},
 		},
 		[]ManagedFile{{EntryID: "entry", EntryFolder: "Movie.Release", FileID: "file", FileName: "movie.mkv"}},
+		filepath.Join(dir, "managed"),
 	)
 	if len(matches) != 0 {
 		t.Fatalf("matches = %d, want 0", len(matches))
+	}
+	if stats.conflicted != 2 {
+		t.Fatalf("conflicted = %d, want 2", stats.conflicted)
 	}
 }
 
@@ -171,25 +189,31 @@ func TestReconcileBuildsIndexFromSymlinks(t *testing.T) {
 	arrs := arr.New()
 	arrs.AddOrUpdate(instance)
 	writer := new(recordingBindingWriter)
+	managed := []ManagedFile{{
+		EntryID:     "entry",
+		EntryName:   "Movie Release",
+		EntryFolder: "Movie.Release",
+		FileID:      "file",
+		FileName:    "movie.mkv",
+		DownloadID:  "download",
+	}}
 	indexer := &Indexer{
-		arrs: arrs,
-		catalog: fixedManagedCatalog{{
-			EntryID:     "entry",
-			EntryName:   "Movie Release",
-			EntryFolder: "Movie.Release",
-			FileID:      "file",
-			FileName:    "movie.mkv",
-			DownloadID:  "download",
-		}},
-		writer: writer,
+		arrs:        arrs,
+		catalog:     fixedManagedCatalog(managed),
+		writer:      writer,
+		managedRoot: filepath.Join(dir, "managed"),
 	}
 
-	found, err := indexer.reconcile(t.Context(), instance, "")
+	stats, err := indexer.reconcile(t.Context(), instance, "", managed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !found || len(writer.replacement) != 1 {
-		t.Fatalf("found = %v, bindings = %#v", found, writer.replacement)
+	if len(writer.replacement) != 1 {
+		t.Fatalf("bindings = %#v", writer.replacement)
+	}
+	want := matchStats{libraryFiles: 2, managedFiles: 1, matchedFolder: 1, notSymlink: 1}
+	if stats != want {
+		t.Fatalf("stats = %#v, want %#v", stats, want)
 	}
 	binding := writer.replacement[0]
 	if binding.EntryID != "entry" || binding.EntryFileID != "file" || binding.ArrFileID != 42 {
@@ -199,7 +223,7 @@ func TestReconcileBuildsIndexFromSymlinks(t *testing.T) {
 
 type fixedManagedCatalog []ManagedFile
 
-func (c fixedManagedCatalog) ListManagedFiles(context.Context, string, string) ([]ManagedFile, error) {
+func (c fixedManagedCatalog) ListManagedFiles(context.Context, string) ([]ManagedFile, error) {
 	return c, nil
 }
 
@@ -214,4 +238,117 @@ func (*recordingBindingWriter) UpsertBinding(Binding) error {
 func (w *recordingBindingWriter) ReplaceArrGeneration(_ string, _ uint64, bindings []Binding) error {
 	w.replacement = bindings
 	return nil
+}
+
+func TestMatchLibraryFilesMatchesRenamedFolderBySize(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "managed", "Show.S01.Complete", "episode.mkv")
+	libraryPath := filepath.Join(dir, "library", "Episode.mkv")
+	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, libraryPath); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, stats := matchLibraryFiles(
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath, Size: 1024}},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: "Show.S01", FileID: "file", FileName: "episode.mkv", FileSize: 1024}},
+		filepath.Join(dir, "managed"),
+	)
+	if len(matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(matches))
+	}
+	if matches[0].confidence != ConfidenceManagedTarget {
+		t.Fatalf("confidence = %q, want %q", matches[0].confidence, ConfidenceManagedTarget)
+	}
+	if stats.matchedSize != 1 || stats.matchedFolder != 0 {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestMatchLibraryFilesSizeMatchNeedsUniqueName(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "managed", "Show.S01.Complete", "episode.mkv")
+	libraryPath := filepath.Join(dir, "library", "Episode.mkv")
+	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, libraryPath); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, stats := matchLibraryFiles(
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath, Size: 1024}},
+		[]ManagedFile{
+			{EntryID: "entry-1", EntryFolder: "Show.S01", FileID: "file-1", FileName: "episode.mkv", FileSize: 1024},
+			{EntryID: "entry-2", EntryFolder: "Show.S01.Repack", FileID: "file-2", FileName: "episode.mkv", FileSize: 1024},
+		},
+		filepath.Join(dir, "managed"),
+	)
+	if len(matches) != 0 {
+		t.Fatalf("matches = %d, want 0", len(matches))
+	}
+	if stats.ambiguousTarget != 1 {
+		t.Fatalf("ambiguous_target = %d, want 1", stats.ambiguousTarget)
+	}
+}
+
+func TestMatchLibraryFilesSkipsTargetsOutsideMount(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere", "Movie.Release", "movie.mkv")
+	libraryPath := filepath.Join(dir, "library", "Movie.mkv")
+	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, libraryPath); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, stats := matchLibraryFiles(
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath, Size: 1024}},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: "Movie.Release", FileID: "file", FileName: "movie.mkv", FileSize: 1024}},
+		filepath.Join(dir, "managed"),
+	)
+	if len(matches) != 0 {
+		t.Fatalf("matches = %d, want 0", len(matches))
+	}
+	if stats.foreignTarget != 1 || stats.unknownTarget != 0 {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestMatchLibraryFilesFolderMatchWinsOverSizeMatch(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "managed")
+	libraryDir := filepath.Join(dir, "library")
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exactPath := filepath.Join(libraryDir, "Exact.mkv")
+	driftedPath := filepath.Join(libraryDir, "Drifted.mkv")
+	if err := os.Symlink(filepath.Join(root, "Show.S01", "episode.mkv"), exactPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "Show.S01.Complete", "episode.mkv"), driftedPath); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, stats := matchLibraryFiles(
+		[]arr.LibraryFile{
+			{ArrFileID: 42, Path: exactPath, Size: 1024},
+			{ArrFileID: 43, Path: driftedPath, Size: 1024},
+		},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: "Show.S01", FileID: "file", FileName: "episode.mkv", FileSize: 1024}},
+		root,
+	)
+	if len(matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(matches))
+	}
+	if matches[0].library.ArrFileID != 42 || matches[0].confidence != ConfidenceExactPath {
+		t.Fatalf("match = %#v", matches[0])
+	}
+	if stats.matchedFolder != 1 || stats.conflicted != 1 {
+		t.Fatalf("stats = %#v", stats)
+	}
 }

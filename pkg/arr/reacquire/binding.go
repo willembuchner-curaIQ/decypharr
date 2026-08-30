@@ -21,7 +21,13 @@ var (
 type Confidence string
 
 const (
-	ConfidenceExactPath       Confidence = "exact_path"
+	ConfidenceExactPath Confidence = "exact_path"
+	// ConfidenceManagedTarget binds a library symlink that points into the
+	// managed mount to the one managed file with that name and size. It is
+	// used when the entry folder no longer matches, which happens after a
+	// folder-naming change and for the season entries a multi-season torrent
+	// is split into.
+	ConfidenceManagedTarget   Confidence = "managed_target"
 	ConfidenceDownloadHistory Confidence = "download_history"
 	ConfidenceHeuristic       Confidence = "heuristic"
 )
@@ -51,7 +57,9 @@ func (b Binding) AuthorizesMutation() bool {
 		b.ArrInstanceFingerprint != "" &&
 		b.LibraryPath != "" &&
 		(b.ArrType == arr.Sonarr || b.ArrType == arr.Radarr) &&
-		(b.Confidence == ConfidenceExactPath || b.Confidence == ConfidenceDownloadHistory)
+		(b.Confidence == ConfidenceExactPath ||
+			b.Confidence == ConfidenceManagedTarget ||
+			b.Confidence == ConfidenceDownloadHistory)
 }
 
 func (b Binding) validate() error {
