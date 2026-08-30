@@ -37,8 +37,10 @@ type matchStats struct {
 	matchedFolder   int
 	matchedSize     int
 	notSymlink      int
+	unreadable      int
 	foreignTarget   int
-	unknownTarget   int
+	unknownEntry    int
+	unknownFile     int
 	ambiguousTarget int
 	conflicted      int
 	managedSkipped  int
@@ -57,6 +59,7 @@ func matchLibraryFiles(library []arr.LibraryFile, managed []ManagedFile, managed
 
 	byTarget := make(map[targetFileKey][]ManagedFile, len(managed))
 	bySize := make(map[sizeFileKey][]ManagedFile, len(managed))
+	folders := make(map[string]struct{}, len(managed))
 	for _, file := range managed {
 		if file.EntryFolder == "" || file.FileName == "" {
 			stats.managedSkipped++
@@ -65,6 +68,7 @@ func matchLibraryFiles(library []arr.LibraryFile, managed []ManagedFile, managed
 		name := filepath.Clean(file.FileName)
 		folder := targetFileKey{folder: filepath.Clean(file.EntryFolder), name: name}
 		byTarget[folder] = append(byTarget[folder], file)
+		folders[folder.folder] = struct{}{}
 		if file.FileSize > 0 {
 			size := sizeFileKey{name: name, size: file.FileSize}
 			bySize[size] = append(bySize[size], file)
@@ -74,18 +78,21 @@ func matchLibraryFiles(library []arr.LibraryFile, managed []ManagedFile, managed
 	byFolder := make([]libraryMatch, 0, min(len(library), len(managed)))
 	byTargetSize := make([]libraryMatch, 0)
 	for _, libraryFile := range library {
-		target := symlinkTarget(libraryFile.Path)
+		target, readable := symlinkTarget(libraryFile.Path)
 		if target == "" {
-			stats.notSymlink++
+			if readable {
+				stats.notSymlink++
+			} else {
+				stats.unreadable++
+			}
 			continue
 		}
 		if managedRoot != "." && !isUnder(target, managedRoot) {
 			stats.foreignTarget++
 			continue
 		}
-		directory, name := filepath.Split(target)
-		name = filepath.Clean(name)
-		folder := targetFileKey{folder: filepath.Base(filepath.Clean(directory)), name: name}
+		name := filepath.Base(target)
+		folder := targetFileKey{folder: entryFolderOf(target, managedRoot), name: name}
 		if files := byTarget[folder]; len(files) == 1 {
 			byFolder = append(byFolder, libraryMatch{library: libraryFile, managed: files[0], confidence: ConfidenceExactPath})
 			continue
@@ -104,7 +111,11 @@ func matchLibraryFiles(library []arr.LibraryFile, managed []ManagedFile, managed
 				continue
 			}
 		}
-		stats.unknownTarget++
+		if _, ok := folders[folder.folder]; ok {
+			stats.unknownFile++
+		} else {
+			stats.unknownEntry++
+		}
 	}
 
 	claimedManaged := make(map[entryFileKey]bool, len(byFolder)+len(byTargetSize))
@@ -163,28 +174,50 @@ func (s matchStats) fields(event *zerolog.Event) *zerolog.Event {
 		Int("indexed", s.matched()).
 		Int("indexed_by_folder", s.matchedFolder).
 		Int("indexed_by_size", s.matchedSize).
-		Int("managed_unindexed", s.managedFiles-s.managedSkipped-s.matched()).
 		Int("not_symlink", s.notSymlink).
+		Int("unreadable", s.unreadable).
 		Int("foreign_target", s.foreignTarget).
-		Int("unknown_target", s.unknownTarget).
+		Int("unknown_entry", s.unknownEntry).
+		Int("unknown_file", s.unknownFile).
 		Int("ambiguous_target", s.ambiguousTarget).
 		Int("conflicted", s.conflicted).
 		Int("managed_incomplete", s.managedSkipped)
 }
 
-func symlinkTarget(path string) string {
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+// entryFolderOf returns the entry folder a mount target sits in: the first
+// path component below the mount root. The downloader also links files nested
+// in subdirectories of an entry, so the parent directory is not the folder.
+func entryFolderOf(target, managedRoot string) string {
+	if managedRoot == "." {
+		return filepath.Base(filepath.Dir(target))
+	}
+	relative := strings.TrimPrefix(target, managedRoot+string(os.PathSeparator))
+	folder, _, nested := strings.Cut(relative, string(os.PathSeparator))
+	if !nested {
 		return ""
+	}
+	return folder
+}
+
+// symlinkTarget resolves a library symlink to an absolute path. It reports an
+// empty target for a path that is not a symlink, and readable false for one it
+// could not read at all.
+func symlinkTarget(path string) (string, bool) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", false
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return "", true
 	}
 	target, err := os.Readlink(path)
 	if err != nil {
-		return ""
+		return "", false
 	}
 	if !filepath.IsAbs(target) {
 		target = filepath.Join(filepath.Dir(path), target)
 	}
-	return filepath.Clean(target)
+	return filepath.Clean(target), true
 }
 
 func bindingsFromMatches(instance arr.Arr, generation uint64, matches []libraryMatch) []Binding {

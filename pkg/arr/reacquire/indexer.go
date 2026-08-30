@@ -250,6 +250,7 @@ func (i *Indexer) handleRefresh(ctx context.Context, request indexRequest) {
 	}
 
 	failed := false
+	indexed, arrs := 0, 0
 	for _, instance := range i.arrs.All() {
 		if instance.Type != arr.Sonarr && instance.Type != arr.Radarr {
 			continue
@@ -261,11 +262,22 @@ func (i *Indexer) handleRefresh(ctx context.Context, request indexRequest) {
 			i.logger.Warn().Err(err).Str("arr", instance.Name).Msg("Arr index reconciliation failed")
 			continue
 		}
+		indexed += stats.matched()
+		arrs++
 		stats.fields(i.logger.Info()).
 			Str("arr", instance.Name).
 			Dur("took", time.Since(started)).
 			Msg("Indexed Arr library")
 	}
+	// managed_files counts the whole store, so only a total over every Arr says
+	// how much of it a library actually claims. The rest is not an error: an
+	// entry no Arr imported is still mounted and streamable.
+	i.logger.Info().
+		Int("arrs", arrs).
+		Int("managed_files", len(managed)).
+		Int("indexed", indexed).
+		Int("unclaimed", len(managed)-indexed).
+		Msg("Arr index refreshed")
 	if failed && request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
 		i.retry(ctx, request, targetedIndexBackoff[request.attempt])
 	}

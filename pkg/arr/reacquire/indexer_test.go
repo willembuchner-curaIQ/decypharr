@@ -96,8 +96,8 @@ func TestMatchLibraryFilesRequiresFolderAndFilename(t *testing.T) {
 	if len(matches) != 0 {
 		t.Fatalf("matches = %d, want 0", len(matches))
 	}
-	if stats.unknownTarget != 1 {
-		t.Fatalf("unknown-target = %d, want 1", stats.unknownTarget)
+	if stats.unknownEntry != 1 {
+		t.Fatalf("unknown-entry = %d, want 1", stats.unknownEntry)
 	}
 }
 
@@ -313,7 +313,7 @@ func TestMatchLibraryFilesSkipsTargetsOutsideMount(t *testing.T) {
 	if len(matches) != 0 {
 		t.Fatalf("matches = %d, want 0", len(matches))
 	}
-	if stats.foreignTarget != 1 || stats.unknownTarget != 0 {
+	if stats.foreignTarget != 1 || stats.unknownEntry != 0 {
 		t.Fatalf("stats = %#v", stats)
 	}
 }
@@ -349,6 +349,60 @@ func TestMatchLibraryFilesFolderMatchWinsOverSizeMatch(t *testing.T) {
 		t.Fatalf("match = %#v", matches[0])
 	}
 	if stats.matchedFolder != 1 || stats.conflicted != 1 {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestMatchLibraryFilesMatchesNestedMountTarget(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "managed")
+	target := filepath.Join(root, "Show.S01", "Season 1", "episode.mkv")
+	libraryPath := filepath.Join(dir, "library", "Episode.mkv")
+	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, libraryPath); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, stats := matchLibraryFiles(
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath}},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: "Show.S01", FileID: "file", FileName: "episode.mkv"}},
+		root,
+	)
+	if len(matches) != 1 {
+		t.Fatalf("matches = %d, want 1", len(matches))
+	}
+	if stats.matchedFolder != 1 {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestMatchLibraryFilesSeparatesUnknownEntryFromUnknownFile(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "managed")
+	libraryDir := filepath.Join(dir, "library")
+	if err := os.MkdirAll(libraryDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	knownEntry := filepath.Join(libraryDir, "Known.mkv")
+	goneEntry := filepath.Join(libraryDir, "Gone.mkv")
+	if err := os.Symlink(filepath.Join(root, "Show.S01", "other.mkv"), knownEntry); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "Deleted.S01", "episode.mkv"), goneEntry); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stats := matchLibraryFiles(
+		[]arr.LibraryFile{
+			{ArrFileID: 42, Path: knownEntry},
+			{ArrFileID: 43, Path: goneEntry},
+		},
+		[]ManagedFile{{EntryID: "entry", EntryFolder: "Show.S01", FileID: "file", FileName: "episode.mkv"}},
+		root,
+	)
+	if stats.unknownFile != 1 || stats.unknownEntry != 1 {
 		t.Fatalf("stats = %#v", stats)
 	}
 }
