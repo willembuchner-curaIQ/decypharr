@@ -16,15 +16,12 @@ import (
 
 // ManagedFile is the stable Decypharr-side identity used by the arr.Arr index.
 type ManagedFile struct {
-	ArrName     string `json:"arr_name"`
 	EntryID     string `json:"entry_id"`
 	EntryName   string `json:"entry_name"`
 	EntryFolder string `json:"entry_folder"`
 	FileID      string `json:"file_id"`
 	FileName    string `json:"file_name"`
 	DownloadID  string `json:"download_id"`
-	Path        string `json:"path"`
-	Size        int64  `json:"size"`
 }
 
 // ManagedCatalog exposes managed files without coupling pkg/arr to storage.
@@ -37,10 +34,6 @@ type ManagedCatalog interface {
 type bindingWriter interface {
 	UpsertBinding(Binding) error
 	ReplaceArrGeneration(string, uint64, []Binding) error
-}
-
-type bindingSnapshotReader interface {
-	BindingsByArr(string) []Binding
 }
 
 type indexRequest struct {
@@ -241,20 +234,7 @@ func (i *Indexer) reconcile(ctx context.Context, instance arr.Arr, entryID strin
 	if err != nil {
 		return false, err
 	}
-	var history []arr.HistoryRecord
-	if entryID != "" {
-		history, err = i.historyForManaged(ctx, instance, managed, nil)
-		if err != nil {
-			return false, err
-		}
-	}
-
-	var library []arr.LibraryFile
-	if entryID == "" {
-		library, err = i.arrs.LibraryFiles(ctx, instance.Name)
-	} else {
-		library, err = i.arrs.LibraryFilesForHistory(ctx, instance.Name, history)
-	}
+	library, err := i.arrs.LibraryFiles(ctx, instance.Name)
 	if err != nil {
 		return false, err
 	}
@@ -262,24 +242,10 @@ func (i *Indexer) reconcile(ctx context.Context, instance arr.Arr, entryID strin
 	generation := uint64(time.Now().UnixMilli()) + i.sequence.Add(1)
 	bindings := bindingsFromMatches(instance, generation, matchLibraryFiles(library, managed))
 	if entryID == "" {
-		if reader, ok := i.writer.(bindingSnapshotReader); ok {
-			bindings = carryForwardBindings(instance, generation, bindings, reader.BindingsByArr(instance.Name), library, managed)
-		}
-		if unmatched := unmatchedDownloadIDs(managed, bindings); len(unmatched) > 0 {
-			history, err := i.arrs.ImportHistory(ctx, instance.Name, unmatched)
-			if err != nil {
-				return false, err
-			}
-			bindings = append(bindings, bindingsFromHistoryRecords(instance, generation, library, managed, bindings, history)...)
-		}
-		if len(library) > 0 && len(managed) > 0 && len(bindings) == 0 {
-			return false, fmt.Errorf("arr returned %d library files but none matched %d managed files", len(library), len(managed))
-		}
 		if err := i.writer.ReplaceArrGeneration(instance.Name, generation, bindings); err != nil {
 			return false, err
 		}
 	} else {
-		bindings = append(bindings, bindingsFromHistoryRecords(instance, generation, library, managed, bindings, history)...)
 		for _, binding := range bindings {
 			if err := i.writer.UpsertBinding(binding); err != nil {
 				return false, err
@@ -300,35 +266,4 @@ func (i *Indexer) retry(ctx context.Context, request indexRequest, delay time.Du
 			i.enqueue(request)
 		}
 	})
-}
-
-func (i *Indexer) historyForManaged(
-	ctx context.Context,
-	instance arr.Arr,
-	managed []ManagedFile,
-	existing []Binding,
-) ([]arr.HistoryRecord, error) {
-	matched := bindingKeys(existing)
-	downloadIDs := make(map[string]struct{})
-	for _, file := range managed {
-		if _, ok := matched[entryFileKey{entryID: file.EntryID, fileID: file.FileID}]; ok {
-			continue
-		}
-		if file.DownloadID != "" {
-			downloadIDs[file.DownloadID] = struct{}{}
-		}
-	}
-	if len(downloadIDs) == 0 {
-		return nil, nil
-	}
-
-	records := make([]arr.HistoryRecord, 0)
-	for downloadID := range downloadIDs {
-		downloadHistory, err := i.arrs.DownloadHistory(ctx, instance.Name, downloadID, "")
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, downloadHistory...)
-	}
-	return records, nil
 }

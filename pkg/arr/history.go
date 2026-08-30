@@ -12,17 +12,10 @@ import (
 
 const (
 	EventGrabbed        = "grabbed"
-	EventImported       = "downloadFolderImported"
 	EventDownloadFailed = "downloadFailed"
 
-	eventTypeGrabbed  = 1
-	eventTypeImported = 3
-
-	historyPageSize = 100
-	// importHistoryPageSize is large because an import scan reads history it
-	// mostly discards; importHistoryMaxPages bounds that read.
-	importHistoryPageSize = 1000
-	importHistoryMaxPages = 20
+	eventTypeGrabbed = 1
+	historyPageSize  = 100
 )
 
 type HistorySchema struct {
@@ -55,52 +48,6 @@ func (r HistoryRecord) DataValue(key string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// ImportHistory returns the import records for the given downloads, newest
-// first. It stops once every download is found or the page budget runs out: a
-// large library holds far more history than a scan needs.
-func (s *Service) ImportHistory(ctx context.Context, name string, downloadIDs map[string]struct{}) ([]HistoryRecord, error) {
-	instance, err := s.instance(name)
-	if err != nil {
-		return nil, err
-	}
-	if len(downloadIDs) == 0 {
-		return nil, nil
-	}
-
-	records := make([]HistoryRecord, 0, len(downloadIDs))
-	found := make(map[string]struct{}, len(downloadIDs))
-	fetched := 0
-	for page := 1; page <= importHistoryMaxPages; page++ {
-		query := url.Values{
-			"page":          {strconv.Itoa(page)},
-			"pageSize":      {strconv.Itoa(importHistoryPageSize)},
-			"sortKey":       {"date"},
-			"sortDirection": {"descending"},
-			"eventType":     {strconv.Itoa(eventTypeImported)},
-		}
-		history, err := s.history(ctx, instance, query)
-		if err != nil {
-			return nil, fmt.Errorf("import history: %w", err)
-		}
-
-		fetched += len(history.Records)
-		for _, record := range history.Records {
-			if _, wanted := downloadIDs[record.DownloadID]; !wanted {
-				continue
-			}
-			if !strings.EqualFold(record.EventType, EventImported) {
-				continue
-			}
-			records = append(records, record)
-			found[record.DownloadID] = struct{}{}
-		}
-		if len(found) == len(downloadIDs) || len(history.Records) == 0 || fetched >= history.TotalRecords {
-			break
-		}
-	}
-	return records, nil
 }
 
 // DownloadHistory returns every record for one download, newest first. An empty

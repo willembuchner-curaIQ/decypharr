@@ -37,7 +37,6 @@ type sonarrEpisodeFile struct {
 
 type sonarrEpisode struct {
 	ID            int `json:"id"`
-	SeriesID      int `json:"seriesId"`
 	EpisodeFileID int `json:"episodeFileId"`
 }
 
@@ -62,66 +61,6 @@ func (s *Service) LibraryFiles(ctx context.Context, name string) ([]LibraryFile,
 		return s.sonarrLibraryFiles(ctx, instance)
 	case Radarr:
 		return s.radarrLibraryFiles(ctx, instance)
-	default:
-		return nil, fmt.Errorf("%w: %s", ErrUnsupportedType, instance.Type)
-	}
-}
-
-// LibraryFilesForHistory enumerates only the series or movies the given history
-// records touch, so a targeted index does not walk the whole library.
-func (s *Service) LibraryFilesForHistory(ctx context.Context, name string, records []HistoryRecord) ([]LibraryFile, error) {
-	instance, err := s.instance(name)
-	if err != nil {
-		return nil, err
-	}
-
-	switch instance.Type {
-	case Sonarr:
-		seriesIDs := make(map[int]struct{})
-		episodeIDs := make(map[int]struct{})
-		for _, record := range records {
-			if record.SeriesID > 0 {
-				seriesIDs[record.SeriesID] = struct{}{}
-			} else if record.EpisodeID > 0 {
-				episodeIDs[record.EpisodeID] = struct{}{}
-			}
-		}
-		for episodeID := range episodeIDs {
-			seriesID, err := s.sonarrSeriesForEpisode(ctx, instance, episodeID)
-			if err != nil {
-				return nil, err
-			}
-			if seriesID > 0 {
-				seriesIDs[seriesID] = struct{}{}
-			}
-		}
-		files := make([]LibraryFile, 0, len(seriesIDs))
-		for seriesID := range seriesIDs {
-			seriesFiles, err := s.sonarrSeriesFiles(ctx, instance, seriesID)
-			if err != nil {
-				return nil, err
-			}
-			files = append(files, seriesFiles...)
-		}
-		return files, nil
-	case Radarr:
-		movieIDs := make(map[int]struct{})
-		for _, record := range records {
-			if record.MovieID > 0 {
-				movieIDs[record.MovieID] = struct{}{}
-			}
-		}
-		files := make([]LibraryFile, 0, len(movieIDs))
-		for movieID := range movieIDs {
-			file, found, err := s.radarrMovieFile(ctx, instance, movieID)
-			if err != nil {
-				return nil, err
-			}
-			if found {
-				files = append(files, file)
-			}
-		}
-		return files, nil
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedType, instance.Type)
 	}
@@ -217,22 +156,6 @@ func (s *Service) sonarrEpisodeIDs(ctx context.Context, instance Arr, seriesID i
 	return byFile, nil
 }
 
-func (s *Service) sonarrSeriesForEpisode(ctx context.Context, instance Arr, episodeID int) (int, error) {
-	var episode sonarrEpisode
-	endpoint := fmt.Sprintf("api/v3/episode/%d", episodeID)
-	resp, err := s.get(ctx, instance, endpoint, &episode)
-	if err != nil {
-		return 0, fmt.Errorf("get sonarr episode %d: %w", episodeID, err)
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return 0, nil
-	}
-	if err := expectStatus(resp, http.StatusOK); err != nil {
-		return 0, fmt.Errorf("get sonarr episode %d: %w", episodeID, err)
-	}
-	return episode.SeriesID, nil
-}
-
 func (s *Service) radarrLibraryFiles(ctx context.Context, instance Arr) ([]LibraryFile, error) {
 	var movies []radarrMovie
 	resp, err := s.get(ctx, instance, "api/v3/movie", &movies)
@@ -256,28 +179,4 @@ func (s *Service) radarrLibraryFiles(ctx context.Context, instance Arr) ([]Libra
 		})
 	}
 	return files, nil
-}
-
-func (s *Service) radarrMovieFile(ctx context.Context, instance Arr, movieID int) (LibraryFile, bool, error) {
-	var movie radarrMovie
-	endpoint := fmt.Sprintf("api/v3/movie/%d", movieID)
-	resp, err := s.get(ctx, instance, endpoint, &movie)
-	if err != nil {
-		return LibraryFile{}, false, fmt.Errorf("get radarr movie %d: %w", movieID, err)
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return LibraryFile{}, false, nil
-	}
-	if err := expectStatus(resp, http.StatusOK); err != nil {
-		return LibraryFile{}, false, fmt.Errorf("get radarr movie %d: %w", movieID, err)
-	}
-	if movie.MovieFile.ID <= 0 || movie.MovieFile.Path == "" {
-		return LibraryFile{}, false, nil
-	}
-	return LibraryFile{
-		ArrFileID: movie.MovieFile.ID,
-		Path:      movie.MovieFile.Path,
-		Size:      movie.MovieFile.Size,
-		MovieID:   cmp.Or(movie.MovieFile.MovieID, movie.ID),
-	}, true, nil
 }

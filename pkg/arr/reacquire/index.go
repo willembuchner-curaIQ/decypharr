@@ -110,13 +110,6 @@ func (i *Index) BySeriesID(arrName string, seriesID int) []Binding {
 	return i.bindingsForLocked(i.bySeries[mediaKey{arrName: arrName, mediaID: seriesID}])
 }
 
-func (i *Index) ByArr(arrName string) []Binding {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-
-	return i.bindingsForLocked(i.byArr[arrName])
-}
-
 func (i *Index) All() []Binding {
 	i.mu.RLock()
 	defer i.mu.RUnlock()

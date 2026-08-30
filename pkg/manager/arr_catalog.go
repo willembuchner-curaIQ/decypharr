@@ -2,7 +2,6 @@ package manager
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 
 	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
@@ -28,7 +27,7 @@ func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryI
 		if !ownedByArr(entry, arrName) {
 			return nil, nil
 		}
-		return c.entryFiles(entry, arrName)
+		return c.entryFiles(entry)
 	}
 
 	files := make([]reacquire.ManagedFile, 0)
@@ -45,7 +44,7 @@ func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryI
 				missingIDs = append(missingIDs, entry)
 				continue
 			}
-			files = append(files, entryManagedFiles(entry, arrName)...)
+			files = append(files, entryManagedFiles(entry)...)
 		}
 		return nil
 	})
@@ -58,7 +57,7 @@ func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryI
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		entryFiles, err := c.entryFiles(entry, arrName)
+		entryFiles, err := c.entryFiles(entry)
 		if err != nil {
 			return nil, err
 		}
@@ -67,18 +66,17 @@ func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryI
 	return files, nil
 }
 
-func (c managedArrCatalog) entryFiles(entry *storage.Entry, arrName string) ([]reacquire.ManagedFile, error) {
+func (c managedArrCatalog) entryFiles(entry *storage.Entry) ([]reacquire.ManagedFile, error) {
 	if needsFileIDs(entry) {
 		if err := c.storage.AddOrUpdate(entry); err != nil {
 			return nil, err
 		}
 	}
-	return entryManagedFiles(entry, arrName), nil
+	return entryManagedFiles(entry), nil
 }
 
-func entryManagedFiles(entry *storage.Entry, arrName string) []reacquire.ManagedFile {
+func entryManagedFiles(entry *storage.Entry) []reacquire.ManagedFile {
 	folder := entry.GetFolder()
-	downloadPath := entry.DownloadPath()
 	files := make([]reacquire.ManagedFile, 0, len(entry.Files))
 	for fileName, file := range entry.Files {
 		if file == nil || file.Deleted || file.ID == "" {
@@ -88,15 +86,12 @@ func entryManagedFiles(entry *storage.Entry, arrName string) []reacquire.Managed
 			fileName = file.Name
 		}
 		files = append(files, reacquire.ManagedFile{
-			ArrName:     arrName,
 			EntryID:     entry.InfoHash,
 			EntryName:   entry.Name,
 			EntryFolder: folder,
 			FileID:      file.ID,
 			FileName:    fileName,
 			DownloadID:  entry.InfoHash,
-			Path:        filepath.Join(downloadPath, fileName),
-			Size:        file.Size,
 		})
 	}
 	return files

@@ -1,6 +1,10 @@
 package reacquire
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -137,4 +141,77 @@ func TestMatchLibraryFilesRejectsDuplicateArrTargets(t *testing.T) {
 	if len(matches) != 0 {
 		t.Fatalf("matches = %d, want 0", len(matches))
 	}
+}
+
+func TestReconcileBuildsIndexFromSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "managed", "Movie.Release", "movie.mkv")
+	libraryPath := filepath.Join(dir, "library", "Movie.mkv")
+	regularPath := filepath.Join(dir, "library", "Other.mkv")
+	if err := os.MkdirAll(filepath.Dir(libraryPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, libraryPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(regularPath, []byte("media"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v3/movie" {
+			http.NotFound(w, request)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `[{"id":9,"movieFile":{"id":42,"path":%q}},{"id":10,"movieFile":{"id":43,"path":%q}}]`, libraryPath, regularPath)
+	}))
+	defer server.Close()
+
+	instance := arr.Arr{Name: "radarr", Host: server.URL, Token: "secret", Type: arr.Radarr}
+	arrs := arr.New()
+	arrs.AddOrUpdate(instance)
+	writer := new(recordingBindingWriter)
+	indexer := &Indexer{
+		arrs: arrs,
+		catalog: fixedManagedCatalog{{
+			EntryID:     "entry",
+			EntryName:   "Movie Release",
+			EntryFolder: "Movie.Release",
+			FileID:      "file",
+			FileName:    "movie.mkv",
+			DownloadID:  "download",
+		}},
+		writer: writer,
+	}
+
+	found, err := indexer.reconcile(t.Context(), instance, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || len(writer.replacement) != 1 {
+		t.Fatalf("found = %v, bindings = %#v", found, writer.replacement)
+	}
+	binding := writer.replacement[0]
+	if binding.EntryID != "entry" || binding.EntryFileID != "file" || binding.ArrFileID != 42 {
+		t.Fatalf("binding = %#v", binding)
+	}
+}
+
+type fixedManagedCatalog []ManagedFile
+
+func (c fixedManagedCatalog) ListManagedFiles(context.Context, string, string) ([]ManagedFile, error) {
+	return c, nil
+}
+
+type recordingBindingWriter struct {
+	replacement []Binding
+}
+
+func (*recordingBindingWriter) UpsertBinding(Binding) error {
+	return nil
+}
+
+func (w *recordingBindingWriter) ReplaceArrGeneration(_ string, _ uint64, bindings []Binding) error {
+	w.replacement = bindings
+	return nil
 }

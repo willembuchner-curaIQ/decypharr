@@ -1,11 +1,8 @@
 // Package reacquire replaces media a Decypharr entry can no longer serve.
 //
-// It binds each managed file to the Sonarr or Radarr library file that points
-// at it, so a confirmed content failure can be turned into an Arr action on
-// exact database IDs rather than a name or size guess. A binding comes from
-// one of three exact sources: the symlink a library file resolves to, the
-// stream identity a Decypharr .strm file carries, or the download history the
-// Arr recorded on import. Only those authorize a destructive action.
+// It binds each managed file to the Sonarr or Radarr library symlink that points
+// at its entry folder and filename. A confirmed content failure can then be
+// turned into an Arr action on exact database IDs.
 //
 // Indexer keeps the bindings current: a full reconciliation per Arr on start
 // and on demand, and a targeted pass for one entry after a download completes.

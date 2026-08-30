@@ -171,10 +171,6 @@ func (s *Service) Lookup(entryID, fileID string) (Binding, bool) {
 	return s.index.Lookup(entryID, fileID)
 }
 
-func (s *Service) BindingsByArr(arrName string) []Binding {
-	return s.index.ByArr(arrName)
-}
-
 func (s *Service) UpsertBinding(binding Binding) error {
 	release, err := s.beginOperation()
 	if err != nil {
