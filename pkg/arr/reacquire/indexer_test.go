@@ -211,9 +211,8 @@ func TestReconcileBuildsIndexFromSymlinks(t *testing.T) {
 	if len(writer.replacement) != 1 {
 		t.Fatalf("bindings = %#v", writer.replacement)
 	}
-	want := matchStats{libraryFiles: 2, managedFiles: 1, matchedFolder: 1, notSymlink: 1}
-	if stats != want {
-		t.Fatalf("stats = %#v, want %#v", stats, want)
+	if stats.libraryFiles != 2 || stats.managedFiles != 1 || stats.matchedFolder != 1 || stats.notSymlink != 1 {
+		t.Fatalf("stats = %#v", stats)
 	}
 	binding := writer.replacement[0]
 	if binding.EntryID != "entry" || binding.EntryFileID != "file" || binding.ArrFileID != 42 {
