@@ -3,7 +3,6 @@ package reacquire
 import (
 	"context"
 	"fmt"
-	"github.com/sirrobot01/decypharr/pkg/arr"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/sirrobot01/decypharr/pkg/arr"
 
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
@@ -96,97 +97,97 @@ func NewIndexer(registry *arr.Storage, catalog ManagedCatalog, writer bindingWri
 	}
 }
 
-func (indexer *Indexer) Start(ctx context.Context) error {
-	if indexer == nil || indexer.registry == nil || indexer.catalog == nil || indexer.writer == nil {
+func (i *Indexer) Start(ctx context.Context) error {
+	if i == nil || i.registry == nil || i.catalog == nil || i.writer == nil {
 		return fmt.Errorf("arr indexer is not configured")
 	}
-	indexer.lifecycleMu.Lock()
-	defer indexer.lifecycleMu.Unlock()
-	if indexer.closed.Load() {
+	i.lifecycleMu.Lock()
+	defer i.lifecycleMu.Unlock()
+	if i.closed.Load() {
 		return fmt.Errorf("arr indexer is closed")
 	}
-	if !indexer.started.CompareAndSwap(false, true) {
+	if !i.started.CompareAndSwap(false, true) {
 		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
-	indexer.mu.Lock()
-	indexer.ctx = workerCtx
-	indexer.cancel = cancel
-	indexer.mu.Unlock()
-	indexer.wg.Go(func() { indexer.run(workerCtx) })
-	indexer.Refresh()
+	i.mu.Lock()
+	i.ctx = workerCtx
+	i.cancel = cancel
+	i.mu.Unlock()
+	i.wg.Go(func() { i.run(workerCtx) })
+	i.Refresh()
 	return nil
 }
 
-func (indexer *Indexer) Close() {
-	if indexer == nil {
+func (i *Indexer) Close() {
+	if i == nil {
 		return
 	}
-	indexer.lifecycleMu.Lock()
-	if !indexer.closed.CompareAndSwap(false, true) {
-		indexer.lifecycleMu.Unlock()
+	i.lifecycleMu.Lock()
+	if !i.closed.CompareAndSwap(false, true) {
+		i.lifecycleMu.Unlock()
 		return
 	}
-	if indexer.cancel != nil {
-		indexer.cancel()
+	if i.cancel != nil {
+		i.cancel()
 	}
-	indexer.lifecycleMu.Unlock()
-	indexer.wg.Wait()
+	i.lifecycleMu.Unlock()
+	i.wg.Wait()
 }
 
-func (indexer *Indexer) Refresh() bool {
-	return indexer.enqueue(indexRequest{})
+func (i *Indexer) Refresh() bool {
+	return i.enqueue(indexRequest{})
 }
 
-func (indexer *Indexer) ReindexEntry(arrName, entryID string) bool {
+func (i *Indexer) ReindexEntry(arrName, entryID string) bool {
 	arrName = strings.TrimSpace(arrName)
 	entryID = strings.TrimSpace(entryID)
 	if arrName == "" || entryID == "" {
 		return false
 	}
-	return indexer.enqueue(indexRequest{arrName: arrName, entryID: entryID})
+	return i.enqueue(indexRequest{arrName: arrName, entryID: entryID})
 }
 
-func (indexer *Indexer) enqueue(request indexRequest) bool {
-	if indexer == nil || indexer.closed.Load() {
+func (i *Indexer) enqueue(request indexRequest) bool {
+	if i == nil || i.closed.Load() {
 		return false
 	}
 	key := request.arrName + "\x00" + request.entryID
-	indexer.mu.Lock()
-	if indexer.ctx == nil || indexer.ctx.Err() != nil {
-		indexer.mu.Unlock()
+	i.mu.Lock()
+	if i.ctx == nil || i.ctx.Err() != nil {
+		i.mu.Unlock()
 		return false
 	}
-	if _, exists := indexer.pending[key]; exists {
-		indexer.mu.Unlock()
+	if _, exists := i.pending[key]; exists {
+		i.mu.Unlock()
 		return true
 	}
-	indexer.pending[key] = struct{}{}
-	indexer.queue = append(indexer.queue, request)
-	indexer.mu.Unlock()
+	i.pending[key] = struct{}{}
+	i.queue = append(i.queue, request)
+	i.mu.Unlock()
 
 	select {
-	case indexer.wake <- struct{}{}:
+	case i.wake <- struct{}{}:
 	default:
 	}
 	return true
 }
 
-func (indexer *Indexer) run(ctx context.Context) {
+func (i *Indexer) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-indexer.wake:
+		case <-i.wake:
 			for {
-				request, ok := indexer.nextRequest()
+				request, ok := i.nextRequest()
 				if !ok {
 					break
 				}
-				indexer.handle(ctx, request)
+				i.handle(ctx, request)
 				if ctx.Err() != nil {
 					return
 				}
@@ -195,59 +196,59 @@ func (indexer *Indexer) run(ctx context.Context) {
 	}
 }
 
-func (indexer *Indexer) nextRequest() (indexRequest, bool) {
-	indexer.mu.Lock()
-	defer indexer.mu.Unlock()
-	if len(indexer.queue) == 0 {
+func (i *Indexer) nextRequest() (indexRequest, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if len(i.queue) == 0 {
 		return indexRequest{}, false
 	}
-	request := indexer.queue[0]
-	indexer.queue[0] = indexRequest{}
-	indexer.queue = indexer.queue[1:]
-	delete(indexer.pending, request.arrName+"\x00"+request.entryID)
+	request := i.queue[0]
+	i.queue[0] = indexRequest{}
+	i.queue = i.queue[1:]
+	delete(i.pending, request.arrName+"\x00"+request.entryID)
 	return request, true
 }
 
-func (indexer *Indexer) handle(ctx context.Context, request indexRequest) {
+func (i *Indexer) handle(ctx context.Context, request indexRequest) {
 	if request.arrName == "" {
 		failed := false
-		for _, instance := range indexer.registry.GetAll() {
+		for _, instance := range i.registry.GetAll() {
 			if instance == nil || (instance.Type != arr.Sonarr && instance.Type != arr.Radarr) {
 				continue
 			}
-			if _, err := indexer.reconcile(ctx, instance, ""); err != nil {
+			if _, err := i.reconcile(ctx, instance, ""); err != nil {
 				failed = true
-				indexer.logger.Warn().Err(err).Str("arr", instance.Name).Msg("arr.Arr index reconciliation failed")
+				i.logger.Warn().Err(err).Str("arr", instance.Name).Msg("arr.Arr index reconciliation failed")
 			}
 		}
 		if failed && request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
-			indexer.retry(ctx, request, targetedIndexBackoff[request.attempt])
+			i.retry(ctx, request, targetedIndexBackoff[request.attempt])
 		}
 		return
 	}
 
-	instance := indexer.registry.Get(request.arrName)
+	instance := i.registry.Get(request.arrName)
 	if instance == nil {
-		indexer.logger.Warn().Str("arr", request.arrName).Msg("Targeted arr.Arr index skipped: instance not found")
+		i.logger.Warn().Str("arr", request.arrName).Msg("Targeted arr.Arr index skipped: instance not found")
 		return
 	}
-	found, err := indexer.reconcile(ctx, instance, request.entryID)
+	found, err := i.reconcile(ctx, instance, request.entryID)
 	if err != nil {
-		indexer.logger.Debug().Err(err).Str("arr", request.arrName).Str("entry_id", request.entryID).Msg("Targeted arr.Arr index attempt failed")
+		i.logger.Debug().Err(err).Str("arr", request.arrName).Str("entry_id", request.entryID).Msg("Targeted arr.Arr index attempt failed")
 	}
 	if !found && request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
-		indexer.retry(ctx, request, targetedIndexBackoff[request.attempt])
+		i.retry(ctx, request, targetedIndexBackoff[request.attempt])
 	}
 }
 
-func (indexer *Indexer) reconcile(ctx context.Context, instance *arr.Arr, entryID string) (bool, error) {
-	managed, err := indexer.catalog.ListManagedFiles(ctx, instance.Name, entryID)
+func (i *Indexer) reconcile(ctx context.Context, instance *arr.Arr, entryID string) (bool, error) {
+	managed, err := i.catalog.ListManagedFiles(ctx, instance.Name, entryID)
 	if err != nil {
 		return false, err
 	}
 	var history []arr.HistoryRecord
 	if entryID != "" {
-		history, err = indexer.historyForManaged(ctx, instance, managed, nil)
+		history, err = i.historyForManaged(ctx, instance, managed, nil)
 		if err != nil {
 			return false, err
 		}
@@ -263,10 +264,10 @@ func (indexer *Indexer) reconcile(ctx context.Context, instance *arr.Arr, entryI
 		return false, err
 	}
 
-	generation := uint64(time.Now().UnixMilli()) + indexer.sequence.Add(1)
+	generation := uint64(time.Now().UnixMilli()) + i.sequence.Add(1)
 	bindings := bindingsFromMatches(instance, generation, matchLibraryFiles(library, managed))
 	if entryID == "" {
-		if reader, ok := indexer.writer.(bindingSnapshotReader); ok {
+		if reader, ok := i.writer.(bindingSnapshotReader); ok {
 			bindings = carryForwardBindings(instance, generation, bindings, reader.BindingsByArr(instance.Name), library, managed)
 		}
 		if unmatched := unmatchedDownloadIDs(managed, bindings); len(unmatched) > 0 {
@@ -279,13 +280,13 @@ func (indexer *Indexer) reconcile(ctx context.Context, instance *arr.Arr, entryI
 		if len(library) > 0 && len(managed) > 0 && len(bindings) == 0 {
 			return false, fmt.Errorf("arr returned %d library files but none matched %d managed files", len(library), len(managed))
 		}
-		if err := indexer.writer.ReplaceArrGeneration(instance.Name, generation, bindings); err != nil {
+		if err := i.writer.ReplaceArrGeneration(instance.Name, generation, bindings); err != nil {
 			return false, err
 		}
 	} else {
 		bindings = append(bindings, bindingsFromHistoryRecords(instance, generation, library, managed, bindings, history)...)
 		for _, binding := range bindings {
-			if err := indexer.writer.UpsertBinding(binding); err != nil {
+			if err := i.writer.UpsertBinding(binding); err != nil {
 				return false, err
 			}
 		}
@@ -293,15 +294,15 @@ func (indexer *Indexer) reconcile(ctx context.Context, instance *arr.Arr, entryI
 	return len(bindings) > 0, nil
 }
 
-func (indexer *Indexer) retry(ctx context.Context, request indexRequest, delay time.Duration) {
+func (i *Indexer) retry(ctx context.Context, request indexRequest, delay time.Duration) {
 	request.attempt++
-	indexer.wg.Go(func() {
+	i.wg.Go(func() {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
 		case <-timer.C:
-			indexer.enqueue(request)
+			i.enqueue(request)
 		}
 	})
 }
@@ -314,7 +315,7 @@ func bindingsFromMatches(instance *arr.Arr, generation uint64, matches []library
 	return bindings
 }
 
-func (indexer *Indexer) historyForManaged(
+func (i *Indexer) historyForManaged(
 	ctx context.Context,
 	instance *arr.Arr,
 	managed []ManagedFile,

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"unique"
 )
 
 type entryFileKey struct {
@@ -29,13 +30,17 @@ type mediaKey struct {
 }
 
 type Index struct {
-	mu          sync.RWMutex
-	bindings    map[entryFileKey]Binding
-	byArr       map[string]map[entryFileKey]struct{}
-	byArrFile   map[arrFileKey]entryFileKey
-	byDownload  map[downloadKey]map[entryFileKey]struct{}
-	byEpisode   map[mediaKey]map[entryFileKey]struct{}
-	byMovie     map[mediaKey]map[entryFileKey]struct{}
+	mu        sync.RWMutex
+	bindings  map[entryFileKey]Binding
+	byArr     map[string]map[entryFileKey]struct{}
+	byArrFile map[arrFileKey]entryFileKey
+	// A download, episode, or movie binds a handful of files, so these hold a
+	// slice: a one-entry Go map costs several hundred bytes, which a library
+	// with hundreds of thousands of files cannot afford. byArr and bySeries
+	// keep maps because their buckets are large.
+	byDownload  map[downloadKey][]entryFileKey
+	byEpisode   map[mediaKey][]entryFileKey
+	byMovie     map[mediaKey][]entryFileKey
 	bySeries    map[mediaKey]map[entryFileKey]struct{}
 	generations map[string]uint64
 }
@@ -45,9 +50,9 @@ func NewIndex() *Index {
 		bindings:    make(map[entryFileKey]Binding),
 		byArr:       make(map[string]map[entryFileKey]struct{}),
 		byArrFile:   make(map[arrFileKey]entryFileKey),
-		byDownload:  make(map[downloadKey]map[entryFileKey]struct{}),
-		byEpisode:   make(map[mediaKey]map[entryFileKey]struct{}),
-		byMovie:     make(map[mediaKey]map[entryFileKey]struct{}),
+		byDownload:  make(map[downloadKey][]entryFileKey),
+		byEpisode:   make(map[mediaKey][]entryFileKey),
+		byMovie:     make(map[mediaKey][]entryFileKey),
 		bySeries:    make(map[mediaKey]map[entryFileKey]struct{}),
 		generations: make(map[string]uint64),
 	}
@@ -77,21 +82,21 @@ func (i *Index) ByDownloadID(arrName, downloadID string) []Binding {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
-	return i.bindingsForLocked(i.byDownload[downloadKey{arrName: arrName, downloadID: downloadID}])
+	return i.bindingsForKeysLocked(i.byDownload[downloadKey{arrName: arrName, downloadID: downloadID}])
 }
 
 func (i *Index) ByEpisodeID(arrName string, episodeID int) []Binding {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
-	return i.bindingsForLocked(i.byEpisode[mediaKey{arrName: arrName, mediaID: episodeID}])
+	return i.bindingsForKeysLocked(i.byEpisode[mediaKey{arrName: arrName, mediaID: episodeID}])
 }
 
 func (i *Index) ByMovieID(arrName string, movieID int) []Binding {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
-	return i.bindingsForLocked(i.byMovie[mediaKey{arrName: arrName, mediaID: movieID}])
+	return i.bindingsForKeysLocked(i.byMovie[mediaKey{arrName: arrName, mediaID: movieID}])
 }
 
 func (i *Index) BySeriesID(arrName string, seriesID int) []Binding {
@@ -214,7 +219,20 @@ func (i *Index) replaceAll(bindings []Binding) error {
 	return nil
 }
 
+// internBinding replaces the fields every binding of an Arr repeats with one
+// shared copy. A decode hands each binding its own copy of the Arr name, type,
+// instance fingerprint, and confidence, which on a large library is hundreds of
+// megabytes of identical strings.
+func internBinding(binding Binding) Binding {
+	binding.ArrName = unique.Make(binding.ArrName).Value()
+	binding.ArrType = unique.Make(binding.ArrType).Value()
+	binding.ArrInstanceFingerprint = unique.Make(binding.ArrInstanceFingerprint).Value()
+	binding.Confidence = unique.Make(binding.Confidence).Value()
+	return binding
+}
+
 func (i *Index) upsertLocked(binding Binding) {
+	binding = internBinding(binding)
 	key := entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}
 	i.removeLocked(key)
 	if binding.ArrFileID != 0 {
@@ -230,15 +248,15 @@ func (i *Index) upsertLocked(binding Binding) {
 		i.byArrFile[arrFileKey{arrName: binding.ArrName, fileID: binding.ArrFileID}] = key
 	}
 	if binding.DownloadID != "" {
-		addIndexValue(i.byDownload, downloadKey{arrName: binding.ArrName, downloadID: binding.DownloadID}, key)
+		addIndexKey(i.byDownload, downloadKey{arrName: binding.ArrName, downloadID: binding.DownloadID}, key)
 	}
 	for _, episodeID := range binding.EpisodeIDs {
 		if episodeID != 0 {
-			addIndexValue(i.byEpisode, mediaKey{arrName: binding.ArrName, mediaID: episodeID}, key)
+			addIndexKey(i.byEpisode, mediaKey{arrName: binding.ArrName, mediaID: episodeID}, key)
 		}
 	}
 	if binding.MovieID != 0 {
-		addIndexValue(i.byMovie, mediaKey{arrName: binding.ArrName, mediaID: binding.MovieID}, key)
+		addIndexKey(i.byMovie, mediaKey{arrName: binding.ArrName, mediaID: binding.MovieID}, key)
 	}
 	if binding.SeriesID != 0 {
 		addIndexValue(i.bySeries, mediaKey{arrName: binding.ArrName, mediaID: binding.SeriesID}, key)
@@ -257,20 +275,31 @@ func (i *Index) removeLocked(key entryFileKey) bool {
 		delete(i.byArrFile, arrFileKey{arrName: binding.ArrName, fileID: binding.ArrFileID})
 	}
 	if binding.DownloadID != "" {
-		removeIndexValue(i.byDownload, downloadKey{arrName: binding.ArrName, downloadID: binding.DownloadID}, key)
+		removeIndexKey(i.byDownload, downloadKey{arrName: binding.ArrName, downloadID: binding.DownloadID}, key)
 	}
 	for _, episodeID := range binding.EpisodeIDs {
 		if episodeID != 0 {
-			removeIndexValue(i.byEpisode, mediaKey{arrName: binding.ArrName, mediaID: episodeID}, key)
+			removeIndexKey(i.byEpisode, mediaKey{arrName: binding.ArrName, mediaID: episodeID}, key)
 		}
 	}
 	if binding.MovieID != 0 {
-		removeIndexValue(i.byMovie, mediaKey{arrName: binding.ArrName, mediaID: binding.MovieID}, key)
+		removeIndexKey(i.byMovie, mediaKey{arrName: binding.ArrName, mediaID: binding.MovieID}, key)
 	}
 	if binding.SeriesID != 0 {
 		removeIndexValue(i.bySeries, mediaKey{arrName: binding.ArrName, mediaID: binding.SeriesID}, key)
 	}
 	return true
+}
+
+func (i *Index) bindingsForKeysLocked(keys []entryFileKey) []Binding {
+	bindings := make([]Binding, 0, len(keys))
+	for _, key := range keys {
+		if binding, ok := i.bindings[key]; ok {
+			bindings = append(bindings, cloneBinding(binding))
+		}
+	}
+	sortBindings(bindings)
+	return bindings
 }
 
 func (i *Index) bindingsForLocked(keys map[entryFileKey]struct{}) []Binding {
@@ -282,6 +311,28 @@ func (i *Index) bindingsForLocked(keys map[entryFileKey]struct{}) []Binding {
 	}
 	sortBindings(bindings)
 	return bindings
+}
+
+func addIndexKey[K comparable](values map[K][]entryFileKey, indexKey K, bindingKey entryFileKey) {
+	keys := values[indexKey]
+	if slices.Contains(keys, bindingKey) {
+		return
+	}
+	values[indexKey] = append(keys, bindingKey)
+}
+
+func removeIndexKey[K comparable](values map[K][]entryFileKey, indexKey K, bindingKey entryFileKey) {
+	keys := values[indexKey]
+	at := slices.Index(keys, bindingKey)
+	if at < 0 {
+		return
+	}
+	keys = slices.Delete(keys, at, at+1)
+	if len(keys) == 0 {
+		delete(values, indexKey)
+		return
+	}
+	values[indexKey] = keys
 }
 
 func addIndexValue[K comparable](values map[K]map[entryFileKey]struct{}, indexKey K, bindingKey entryFileKey) {

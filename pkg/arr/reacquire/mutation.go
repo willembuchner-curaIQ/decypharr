@@ -3,10 +3,11 @@ package reacquire
 import (
 	"errors"
 	"fmt"
-	"github.com/sirrobot01/decypharr/pkg/arr"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/sirrobot01/decypharr/pkg/arr"
 )
 
 const (
@@ -70,48 +71,48 @@ type Mutation struct {
 	ConfirmedAt      time.Time     `json:"confirmedAt,omitzero"`
 }
 
-func (mutation Mutation) validate() error {
+func (m Mutation) validate() error {
 	switch {
-	case mutation.Key == "":
+	case m.Key == "":
 		return errors.New("mutation key is required")
-	case !mutation.Kind.valid():
-		return fmt.Errorf("invalid mutation kind %q", mutation.Kind)
-	case !mutation.State.valid():
-		return fmt.Errorf("invalid mutation state %q", mutation.State)
-	case mutation.IntentAt.IsZero():
+	case !m.Kind.valid():
+		return fmt.Errorf("invalid mutation kind %q", m.Kind)
+	case !m.State.valid():
+		return fmt.Errorf("invalid mutation state %q", m.State)
+	case m.IntentAt.IsZero():
 		return errors.New("mutation intent timestamp is required")
-	case mutation.Attempts < 0:
+	case m.Attempts < 0:
 		return errors.New("mutation attempts cannot be negative")
-	case mutation.Attempts > 0 && mutation.LastDispatchedAt.IsZero():
+	case m.Attempts > 0 && m.LastDispatchedAt.IsZero():
 		return errors.New("attempted mutation requires a dispatch timestamp")
-	case mutation.Attempts == 0 && !mutation.LastDispatchedAt.IsZero():
+	case m.Attempts == 0 && !m.LastDispatchedAt.IsZero():
 		return errors.New("unattempted mutation cannot have a dispatch timestamp")
-	case mutation.State == MutationConfirmed && mutation.ConfirmedAt.IsZero():
+	case m.State == MutationConfirmed && m.ConfirmedAt.IsZero():
 		return errors.New("confirmed mutation timestamp is required")
 	}
-	switch mutation.Kind {
+	switch m.Kind {
 	case MutationHistoryFailed:
-		if mutation.DownloadID == "" {
+		if m.DownloadID == "" {
 			return errors.New("failed-history mutation requires a download ID")
 		}
 	case MutationEpisodeSearch:
-		if mutation.CommandName == "" || !validMutationIDs(mutation.EpisodeIDs) {
+		if m.CommandName == "" || !validMutationIDs(m.EpisodeIDs) {
 			return errors.New("episode-search mutation requires a command and episode IDs")
 		}
 	case MutationSeasonSearch:
-		if mutation.CommandName == "" || mutation.SeriesID <= 0 || mutation.SeasonNumber < 0 {
+		if m.CommandName == "" || m.SeriesID <= 0 || m.SeasonNumber < 0 {
 			return errors.New("season-search mutation requires an exact season scope")
 		}
 	case MutationMovieSearch:
-		if mutation.CommandName == "" || !validMutationIDs(mutation.MovieIDs) {
+		if m.CommandName == "" || !validMutationIDs(m.MovieIDs) {
 			return errors.New("movie-search mutation requires a command and movie IDs")
 		}
 	case MutationReleaseGrab:
-		if mutation.ReleaseGUID == "" || mutation.ReleaseIndexer == "" || mutation.ReleaseIndexerID <= 0 {
+		if m.ReleaseGUID == "" || m.ReleaseIndexer == "" || m.ReleaseIndexerID <= 0 {
 			return errors.New("release-grab mutation requires a GUID and indexer identity")
 		}
-		movieScope := validMutationIDs(mutation.MovieIDs) && len(mutation.EpisodeIDs) == 0
-		episodeScope := mutation.SeriesID > 0 && validMutationIDs(mutation.EpisodeIDs) && len(mutation.MovieIDs) == 0
+		movieScope := validMutationIDs(m.MovieIDs) && len(m.EpisodeIDs) == 0
+		episodeScope := m.SeriesID > 0 && validMutationIDs(m.EpisodeIDs) && len(m.MovieIDs) == 0
 		if !movieScope && !episodeScope {
 			return errors.New("release-grab mutation requires one exact media scope")
 		}
