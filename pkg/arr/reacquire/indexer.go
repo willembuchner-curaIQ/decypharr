@@ -1,8 +1,9 @@
-package arr
+package reacquire
 
 import (
 	"context"
 	"fmt"
+	"github.com/sirrobot01/decypharr/pkg/arr"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,18 +18,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/strm"
 )
 
-// LibraryFile is the Arr-side identity of an imported media file.
-type LibraryFile struct {
-	ArrFileID    int    `json:"arr_file_id"`
-	Path         string `json:"path"`
-	Size         int64  `json:"size"`
-	SeriesID     int    `json:"series_id,omitempty"`
-	SeasonNumber int    `json:"season_number,omitempty"`
-	EpisodeIDs   []int  `json:"episode_ids,omitempty"`
-	MovieID      int    `json:"movie_id,omitempty"`
-}
-
-// ManagedFile is the stable Decypharr-side identity used by the Arr index.
+// ManagedFile is the stable Decypharr-side identity used by the arr.Arr index.
 type ManagedFile struct {
 	ArrName     string `json:"arr_name"`
 	EntryID     string `json:"entry_id"`
@@ -64,7 +54,7 @@ type indexRequest struct {
 }
 
 type Indexer struct {
-	registry *Storage
+	registry *arr.Storage
 	catalog  ManagedCatalog
 	writer   bindingWriter
 	logger   zerolog.Logger
@@ -95,7 +85,7 @@ var targetedIndexBackoff = [...]time.Duration{
 	30 * time.Second,
 }
 
-func NewIndexer(registry *Storage, catalog ManagedCatalog, writer bindingWriter) *Indexer {
+func NewIndexer(registry *arr.Storage, catalog ManagedCatalog, writer bindingWriter) *Indexer {
 	return &Indexer{
 		registry: registry,
 		catalog:  catalog,
@@ -222,12 +212,12 @@ func (indexer *Indexer) handle(ctx context.Context, request indexRequest) {
 	if request.arrName == "" {
 		failed := false
 		for _, instance := range indexer.registry.GetAll() {
-			if instance == nil || (instance.Type != Sonarr && instance.Type != Radarr) {
+			if instance == nil || (instance.Type != arr.Sonarr && instance.Type != arr.Radarr) {
 				continue
 			}
 			if _, err := indexer.reconcile(ctx, instance, ""); err != nil {
 				failed = true
-				indexer.logger.Warn().Err(err).Str("arr", instance.Name).Msg("Arr index reconciliation failed")
+				indexer.logger.Warn().Err(err).Str("arr", instance.Name).Msg("arr.Arr index reconciliation failed")
 			}
 		}
 		if failed && request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
@@ -238,24 +228,24 @@ func (indexer *Indexer) handle(ctx context.Context, request indexRequest) {
 
 	instance := indexer.registry.Get(request.arrName)
 	if instance == nil {
-		indexer.logger.Warn().Str("arr", request.arrName).Msg("Targeted Arr index skipped: instance not found")
+		indexer.logger.Warn().Str("arr", request.arrName).Msg("Targeted arr.Arr index skipped: instance not found")
 		return
 	}
 	found, err := indexer.reconcile(ctx, instance, request.entryID)
 	if err != nil {
-		indexer.logger.Debug().Err(err).Str("arr", request.arrName).Str("entry_id", request.entryID).Msg("Targeted Arr index attempt failed")
+		indexer.logger.Debug().Err(err).Str("arr", request.arrName).Str("entry_id", request.entryID).Msg("Targeted arr.Arr index attempt failed")
 	}
 	if !found && request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
 		indexer.retry(ctx, request, targetedIndexBackoff[request.attempt])
 	}
 }
 
-func (indexer *Indexer) reconcile(ctx context.Context, instance *Arr, entryID string) (bool, error) {
+func (indexer *Indexer) reconcile(ctx context.Context, instance *arr.Arr, entryID string) (bool, error) {
 	managed, err := indexer.catalog.ListManagedFiles(ctx, instance.Name, entryID)
 	if err != nil {
 		return false, err
 	}
-	var history []HistoryRecord
+	var history []arr.HistoryRecord
 	if entryID != "" {
 		history, err = indexer.historyForManaged(ctx, instance, managed, nil)
 		if err != nil {
@@ -263,11 +253,11 @@ func (indexer *Indexer) reconcile(ctx context.Context, instance *Arr, entryID st
 		}
 	}
 
-	var library []LibraryFile
+	var library []arr.LibraryFile
 	if entryID == "" {
 		library, err = instance.ListLibraryFiles(ctx)
 	} else {
-		library, err = instance.listTargetLibraryFiles(ctx, history)
+		library, err = instance.ListTargetLibraryFiles(ctx, history)
 	}
 	if err != nil {
 		return false, err
@@ -316,20 +306,20 @@ func (indexer *Indexer) retry(ctx context.Context, request indexRequest, delay t
 	})
 }
 
-func bindingsFromMatches(instance *Arr, generation uint64, matches []libraryMatch) []Binding {
+func bindingsFromMatches(instance *arr.Arr, generation uint64, matches []libraryMatch) []Binding {
 	bindings := make([]Binding, 0, len(matches))
 	for _, match := range matches {
-		bindings = append(bindings, bindingFromFiles(instance, generation, BindingConfidenceExactPath, match.library, match.managed))
+		bindings = append(bindings, bindingFromFiles(instance, generation, ConfidenceExactPath, match.library, match.managed))
 	}
 	return bindings
 }
 
 func (indexer *Indexer) historyForManaged(
 	ctx context.Context,
-	instance *Arr,
+	instance *arr.Arr,
 	managed []ManagedFile,
 	existing []Binding,
-) ([]HistoryRecord, error) {
+) ([]arr.HistoryRecord, error) {
 	matched := bindingKeys(existing)
 	downloadIDs := make(map[string]struct{})
 	for _, file := range managed {
@@ -344,7 +334,7 @@ func (indexer *Indexer) historyForManaged(
 		return nil, nil
 	}
 
-	records := make([]HistoryRecord, 0)
+	records := make([]arr.HistoryRecord, 0)
 	for downloadID := range downloadIDs {
 		downloadHistory, err := instance.HistoryByDownloadID(ctx, downloadID, "")
 		if err != nil {
@@ -356,12 +346,12 @@ func (indexer *Indexer) historyForManaged(
 }
 
 func bindingsFromHistoryRecords(
-	instance *Arr,
+	instance *arr.Arr,
 	generation uint64,
-	library []LibraryFile,
+	library []arr.LibraryFile,
 	managed []ManagedFile,
 	existing []Binding,
-	records []HistoryRecord,
+	records []arr.HistoryRecord,
 ) []Binding {
 	matched := make(map[entryFileKey]struct{}, len(existing))
 	usedArrFiles := make(map[int]struct{}, len(existing))
@@ -383,7 +373,7 @@ func bindingsFromHistoryRecords(
 	episodes, movies := libraryMediaIndexes(library)
 	bindings := make([]Binding, 0)
 	ordered := slices.Clone(records)
-	slices.SortStableFunc(ordered, func(left, right HistoryRecord) int {
+	slices.SortStableFunc(ordered, func(left, right arr.HistoryRecord) int {
 		return right.Date.Compare(left.Date)
 	})
 	for _, record := range ordered {
@@ -412,7 +402,7 @@ func bindingsFromHistoryRecords(
 		if _, ok := matched[key]; ok {
 			continue
 		}
-		bindings = append(bindings, bindingFromFiles(instance, generation, BindingConfidenceDownloadHistory, libraryFile, managedFile))
+		bindings = append(bindings, bindingFromFiles(instance, generation, ConfidenceDownloadHistory, libraryFile, managedFile))
 		matched[key] = struct{}{}
 	}
 	return bindings
@@ -443,11 +433,11 @@ func bindingKeys(bindings []Binding) map[entryFileKey]struct{} {
 }
 
 func carryForwardBindings(
-	instance *Arr,
+	instance *arr.Arr,
 	generation uint64,
 	current []Binding,
 	existing []Binding,
-	library []LibraryFile,
+	library []arr.LibraryFile,
 	managed []ManagedFile,
 ) []Binding {
 	fingerprint := instance.InstanceFingerprint()
@@ -463,7 +453,7 @@ func carryForwardBindings(
 	for _, file := range managed {
 		managedByID[entryFileKey{entryID: file.EntryID, fileID: file.FileID}] = file
 	}
-	libraryByID := make(map[int]LibraryFile, len(library))
+	libraryByID := make(map[int]arr.LibraryFile, len(library))
 	for _, file := range library {
 		libraryByID[file.ArrFileID] = file
 	}
@@ -490,7 +480,7 @@ func carryForwardBindings(
 	return current
 }
 
-func bindingFromFiles(instance *Arr, generation uint64, confidence BindingConfidence, library LibraryFile, managed ManagedFile) Binding {
+func bindingFromFiles(instance *arr.Arr, generation uint64, confidence Confidence, library arr.LibraryFile, managed ManagedFile) Binding {
 	return Binding{
 		ArrName:                instance.Name,
 		ArrType:                instance.Type,
@@ -512,9 +502,9 @@ func bindingFromFiles(instance *Arr, generation uint64, confidence BindingConfid
 	}
 }
 
-func libraryMediaIndexes(library []LibraryFile) (map[int][]LibraryFile, map[int][]LibraryFile) {
-	episodes := make(map[int][]LibraryFile)
-	movies := make(map[int][]LibraryFile)
+func libraryMediaIndexes(library []arr.LibraryFile) (map[int][]arr.LibraryFile, map[int][]arr.LibraryFile) {
+	episodes := make(map[int][]arr.LibraryFile)
+	movies := make(map[int][]arr.LibraryFile)
 	for _, file := range library {
 		for _, episodeID := range file.EpisodeIDs {
 			episodes[episodeID] = append(episodes[episodeID], file)
@@ -526,16 +516,16 @@ func libraryMediaIndexes(library []LibraryFile) (map[int][]LibraryFile, map[int]
 	return episodes, movies
 }
 
-func historyLibraryFile(kind Type, record HistoryRecord, episodes, movies map[int][]LibraryFile) (LibraryFile, bool) {
-	var candidates []LibraryFile
+func historyLibraryFile(kind arr.Type, record arr.HistoryRecord, episodes, movies map[int][]arr.LibraryFile) (arr.LibraryFile, bool) {
+	var candidates []arr.LibraryFile
 	switch kind {
-	case Sonarr:
+	case arr.Sonarr:
 		candidates = episodes[record.EpisodeID]
-	case Radarr:
+	case arr.Radarr:
 		candidates = movies[record.MovieID]
 	}
 	if len(candidates) != 1 {
-		return LibraryFile{}, false
+		return arr.LibraryFile{}, false
 	}
 	return candidates[0], true
 }
@@ -549,7 +539,7 @@ func historyValue(data map[string]string, name string) string {
 	return ""
 }
 
-func sameLibraryMedia(binding Binding, file LibraryFile) bool {
+func sameLibraryMedia(binding Binding, file arr.LibraryFile) bool {
 	if binding.MovieID > 0 {
 		return binding.MovieID == file.MovieID
 	}
@@ -565,11 +555,11 @@ func sameLibraryMedia(binding Binding, file LibraryFile) bool {
 }
 
 type libraryMatch struct {
-	library LibraryFile
+	library arr.LibraryFile
 	managed ManagedFile
 }
 
-func matchLibraryFiles(library []LibraryFile, managed []ManagedFile) []libraryMatch {
+func matchLibraryFiles(library []arr.LibraryFile, managed []ManagedFile) []libraryMatch {
 	byPath := make(map[string][]ManagedFile, len(managed))
 	byIdentity := make(map[entryFileKey]ManagedFile, len(managed))
 	bySize := make(map[int64][]ManagedFile)

@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/url"
 	"path"
-	"path/filepath"
 	"strings"
 )
 
@@ -62,23 +61,4 @@ func canonicalArrHost(rawHost string) (string, error) {
 		parsed.Path = ""
 	}
 	return parsed.String(), nil
-}
-
-func validateMutationInstance(instance *Arr, bindings []Binding) error {
-	fingerprint := instance.InstanceFingerprint()
-	if fingerprint == "" {
-		return errors.New("Arr instance identity is unavailable")
-	}
-	for _, binding := range bindings {
-		if binding.ArrInstanceFingerprint != fingerprint {
-			return errors.New("Arr instance changed since binding was indexed")
-		}
-	}
-	return nil
-}
-
-func sameLibraryPath(left, right string) bool {
-	left = strings.TrimSpace(left)
-	right = strings.TrimSpace(right)
-	return left != "" && right != "" && filepath.Clean(left) == filepath.Clean(right)
 }

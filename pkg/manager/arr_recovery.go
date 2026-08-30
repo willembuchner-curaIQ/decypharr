@@ -3,13 +3,13 @@ package manager
 import (
 	"slices"
 
-	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 )
 
 // ArrRecovery is the stream-facing subset of the Arr service.
 type ArrRecovery interface {
-	Lookup(entryID, fileID string) (arr.Binding, bool)
-	Reacquire(arr.ReacquireRequest) (*arr.ReacquireJob, error)
+	Lookup(entryID, fileID string) (reacquire.Binding, bool)
+	Reacquire(reacquire.Request) (*reacquire.Job, error)
 }
 
 type streamTarget struct {
@@ -31,10 +31,10 @@ func (m *Manager) recoveryService() ArrRecovery {
 	return recovery
 }
 
-func (m *Manager) lookupArrBinding(entryID, fileID string) (arr.Binding, bool) {
+func (m *Manager) lookupArrBinding(entryID, fileID string) (reacquire.Binding, bool) {
 	recovery := m.recoveryService()
 	if recovery == nil || entryID == "" || fileID == "" {
-		return arr.Binding{}, false
+		return reacquire.Binding{}, false
 	}
 	binding, ok := recovery.Lookup(entryID, fileID)
 	if ok {
@@ -56,10 +56,10 @@ func (m *Manager) submitStreamReacquire(entryID, fileID string) {
 
 	go func() {
 		defer m.reacquireNotifications.Delete(target)
-		job, err := recovery.Reacquire(arr.ReacquireRequest{
+		job, err := recovery.Reacquire(reacquire.Request{
 			EntryID: entryID,
 			FileID:  fileID,
-			Cause:   arr.ReacquireCauseStream,
+			Cause:   reacquire.CauseStream,
 		})
 		if err != nil {
 			m.logger.Error().Err(err).

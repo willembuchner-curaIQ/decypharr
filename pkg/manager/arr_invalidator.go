@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 )
 
-func (m *Manager) InvalidateReacquire(ctx context.Context, job arr.ReacquireJob) error {
+func (m *Manager) InvalidateReacquire(ctx context.Context, job reacquire.Job) error {
 	entryIDs := make(map[string]struct{}, len(job.Bindings))
 	for _, binding := range job.Bindings {
 		if binding.EntryID != "" {

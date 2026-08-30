@@ -7,7 +7,7 @@ import (
 
 	"github.com/gorilla/sessions"
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 )
 
 func TestArrReacquireRoutesRequireAuthentication(t *testing.T) {
@@ -49,10 +49,10 @@ func TestArrReacquireRoutesRequireAuthentication(t *testing.T) {
 }
 
 func TestValidateArrReacquireRequest(t *testing.T) {
-	valid := arr.ReacquireRequest{
+	valid := reacquire.Request{
 		EntryID: "entry",
 		FileID:  "file",
-		Cause:   arr.ReacquireCauseManual,
+		Cause:   reacquire.CauseManual,
 	}
 	if message := validateArrReacquireRequest(valid); message != "" {
 		t.Fatalf("valid request rejected: %s", message)

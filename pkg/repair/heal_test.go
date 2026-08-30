@@ -9,15 +9,16 @@ import (
 	"testing"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 type fakeReacquirer struct {
-	requests  []arr.ReacquireRequest
-	reacquire func(arr.ReacquireRequest) (*arr.ReacquireJob, error)
+	requests  []reacquire.Request
+	reacquire func(reacquire.Request) (*reacquire.Job, error)
 }
 
-func (fake *fakeReacquirer) Reacquire(request arr.ReacquireRequest) (*arr.ReacquireJob, error) {
+func (fake *fakeReacquirer) Reacquire(request reacquire.Request) (*reacquire.Job, error) {
 	fake.requests = append(fake.requests, request)
 	return fake.reacquire(request)
 }
@@ -40,8 +41,8 @@ func TestHealBrokenEntryQueuesStableFileIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reacquirer := &fakeReacquirer{reacquire: func(arr.ReacquireRequest) (*arr.ReacquireJob, error) {
-		return &arr.ReacquireJob{ID: "reacquire-1"}, nil
+	reacquirer := &fakeReacquirer{reacquire: func(reacquire.Request) (*reacquire.Job, error) {
+		return &reacquire.Job{ID: "reacquire-1"}, nil
 	}}
 	service := New(Dependencies{Storage: store, Reacquirer: reacquirer})
 	run := &storage.RepairRun{ID: "repair-run-1"}
@@ -68,7 +69,7 @@ func TestHealBrokenEntryQueuesStableFileIdentity(t *testing.T) {
 	if request.EntryID != entryID || request.FileID != fileID {
 		t.Fatalf("reacquire identity = %q/%q, want %q/%q", request.EntryID, request.FileID, entryID, fileID)
 	}
-	if request.Cause != arr.ReacquireCauseRepair || request.Strategy != arr.ReacquireStrategyHistoryFailed {
+	if request.Cause != reacquire.CauseRepair || request.Strategy != reacquire.StrategyHistoryFailed {
 		t.Fatalf("reacquire request = %#v", request)
 	}
 	if run.Stats.Repaired != 1 || run.Stats.RepairFailed != 0 {
@@ -102,7 +103,7 @@ func TestHealBrokenEntryCountsQueueAndIdentityFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reacquirer := &fakeReacquirer{reacquire: func(arr.ReacquireRequest) (*arr.ReacquireJob, error) {
+	reacquirer := &fakeReacquirer{reacquire: func(reacquire.Request) (*reacquire.Job, error) {
 		return nil, errors.New("queue unavailable")
 	}}
 	service := New(Dependencies{Storage: store, Reacquirer: reacquirer})
@@ -148,7 +149,7 @@ func TestHealBrokenEntrySkipsArrsWithoutReacquisition(t *testing.T) {
 	registry := arr.NewStorage()
 	registry.AddOrUpdate(arr.New("lidarr", "http://lidarr.test", "token", false, nil, "", "manual"))
 
-	reacquirer := &fakeReacquirer{reacquire: func(arr.ReacquireRequest) (*arr.ReacquireJob, error) {
+	reacquirer := &fakeReacquirer{reacquire: func(reacquire.Request) (*reacquire.Job, error) {
 		return nil, errors.New("must not be called")
 	}}
 	service := New(Dependencies{Storage: store, Arrs: registry, Reacquirer: reacquirer})
@@ -208,8 +209,8 @@ func TestHealBrokenEntryFallsBackToLegacyRepairWhenUnmapped(t *testing.T) {
 	registry := arr.NewStorage()
 	registry.AddOrUpdate(arr.New("sonarr", server.URL, "token", false, nil, "", "manual"))
 
-	reacquirer := &fakeReacquirer{reacquire: func(arr.ReacquireRequest) (*arr.ReacquireJob, error) {
-		return nil, arr.ErrBindingNotFound
+	reacquirer := &fakeReacquirer{reacquire: func(reacquire.Request) (*reacquire.Job, error) {
+		return nil, reacquire.ErrBindingNotFound
 	}}
 	service := New(Dependencies{Storage: store, Arrs: registry, Reacquirer: reacquirer})
 	run := &storage.RepairRun{ID: "repair-run-4"}

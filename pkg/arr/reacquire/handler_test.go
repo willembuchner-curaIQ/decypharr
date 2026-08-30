@@ -1,4 +1,4 @@
-package arr
+package reacquire
 
 import (
 	"errors"
@@ -9,20 +9,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/puzpuzpuz/xsync/v4"
+	"github.com/sirrobot01/decypharr/pkg/arr"
+
 	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 type recordedProgress struct {
-	statuses []ReacquireStatus
+	statuses []Status
 }
 
-func (progress *recordedProgress) Update(status ReacquireStatus, mutate func(*ReacquireJob)) error {
+func (progress *recordedProgress) Update(status Status, mutate func(*Job)) error {
 	progress.statuses = append(progress.statuses, status)
 	return nil
 }
 
-func (progress *recordedProgress) UpdateDurable(status ReacquireStatus, mutate func(*ReacquireJob)) error {
+func (progress *recordedProgress) UpdateDurable(status Status, mutate func(*Job)) error {
 	return progress.Update(status, mutate)
 }
 
@@ -55,20 +56,20 @@ func TestReacquireHandlerFailsExactDownloadAndWaitsForArr(t *testing.T) {
 	defer server.Close()
 
 	registry := newTestArrStorage()
-	instance := &Arr{Name: "movies", Host: server.URL, Token: "secret", Type: Radarr}
+	instance := &arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
 	registry.AddOrUpdate(instance)
-	handler := NewReacquireHandler(registry)
+	handler := NewHandler(registry)
 	progress := &recordedProgress{}
-	job := ReacquireJob{
+	job := Job{
 		ArrName:    "movies",
-		ArrType:    Radarr,
+		ArrType:    arr.Radarr,
 		EntryID:    "entry-1",
 		FileID:     "file-1",
 		DownloadID: "download-1",
-		Strategy:   ReacquireStrategyHistoryFailed,
+		Strategy:   StrategyHistoryFailed,
 		Bindings: []Binding{{
 			ArrName:                "movies",
-			ArrType:                Radarr,
+			ArrType:                arr.Radarr,
 			ArrInstanceFingerprint: instance.InstanceFingerprint(),
 			EntryID:                "entry-1",
 			EntryFileID:            "file-1",
@@ -76,7 +77,7 @@ func TestReacquireHandlerFailsExactDownloadAndWaitsForArr(t *testing.T) {
 			ArrFileID:              42,
 			LibraryPath:            "/library/movie.mkv",
 			MovieID:                9,
-			Confidence:             BindingConfidenceExactPath,
+			Confidence:             ConfidenceExactPath,
 		}},
 	}
 	if err := handler.Reacquire(t.Context(), job, progress); err != nil {
@@ -85,8 +86,8 @@ func TestReacquireHandlerFailsExactDownloadAndWaitsForArr(t *testing.T) {
 	if !failed.Load() {
 		t.Fatal("history record was not marked failed")
 	}
-	if got := progress.statuses[len(progress.statuses)-1]; got != ReacquireStatusWaitingForGrab {
-		t.Fatalf("last status = %q, want %q", got, ReacquireStatusWaitingForGrab)
+	if got := progress.statuses[len(progress.statuses)-1]; got != StatusWaitingForGrab {
+		t.Fatalf("last status = %q, want %q", got, StatusWaitingForGrab)
 	}
 }
 
@@ -109,32 +110,32 @@ func TestReacquireHandlerRefusesStaleArrFileIdentity(t *testing.T) {
 	defer server.Close()
 
 	registry := newTestArrStorage()
-	instance := &Arr{Name: "movies", Host: server.URL, Token: "secret", Type: Radarr}
+	instance := &arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
 	registry.AddOrUpdate(instance)
-	job := ReacquireJob{
+	job := Job{
 		ArrName:  "movies",
-		ArrType:  Radarr,
+		ArrType:  arr.Radarr,
 		EntryID:  "entry-1",
 		FileID:   "file-1",
-		Strategy: ReacquireStrategyCommandSearch,
+		Strategy: StrategyCommandSearch,
 		Bindings: []Binding{{
 			ArrName:                "movies",
-			ArrType:                Radarr,
+			ArrType:                arr.Radarr,
 			ArrInstanceFingerprint: instance.InstanceFingerprint(),
 			EntryID:                "entry-1",
 			EntryFileID:            "file-1",
 			ArrFileID:              42,
 			LibraryPath:            "/library/movie.mkv",
 			MovieID:                9,
-			Confidence:             BindingConfidenceExactPath,
+			Confidence:             ConfidenceExactPath,
 		}},
 	}
-	err := NewReacquireHandler(registry).Reacquire(t.Context(), job, &recordedProgress{})
+	err := NewHandler(registry).Reacquire(t.Context(), job, &recordedProgress{})
 	if err == nil {
-		t.Fatal("expected stale Arr identity to be rejected")
+		t.Fatal("expected stale arr.Arr identity to be rejected")
 	}
 	if deleted.Load() {
-		t.Fatal("stale Arr file was deleted")
+		t.Fatal("stale arr.Arr file was deleted")
 	}
 }
 
@@ -148,49 +149,49 @@ func TestReacquireHandlerRefusesChangedArrInstance(t *testing.T) {
 	defer server.Close()
 
 	registry := newTestArrStorage()
-	registry.AddOrUpdate(&Arr{Name: "movies", Host: server.URL, Token: "secret", Type: Radarr})
-	job := ReacquireJob{
+	registry.AddOrUpdate(&arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr})
+	job := Job{
 		ArrName:  "movies",
-		ArrType:  Radarr,
+		ArrType:  arr.Radarr,
 		EntryID:  "entry-1",
 		FileID:   "file-1",
-		Strategy: ReacquireStrategyCommandSearch,
+		Strategy: StrategyCommandSearch,
 		Bindings: []Binding{{
 			ArrName:                "movies",
-			ArrType:                Radarr,
+			ArrType:                arr.Radarr,
 			ArrInstanceFingerprint: "v1:old-instance",
 			EntryID:                "entry-1",
 			EntryFileID:            "file-1",
 			ArrFileID:              42,
 			LibraryPath:            "/library/movie.mkv",
 			MovieID:                9,
-			Confidence:             BindingConfidenceExactPath,
+			Confidence:             ConfidenceExactPath,
 		}},
 	}
-	err := NewReacquireHandler(registry).Reacquire(t.Context(), job, &recordedProgress{})
+	err := NewHandler(registry).Reacquire(t.Context(), job, &recordedProgress{})
 	if err == nil {
-		t.Fatal("expected changed Arr instance to be rejected")
+		t.Fatal("expected changed arr.Arr instance to be rejected")
 	}
 	if requests.Load() != 0 {
-		t.Fatalf("changed Arr instance received %d requests", requests.Load())
+		t.Fatalf("changed arr.Arr instance received %d requests", requests.Load())
 	}
 }
 
 func TestAutoRedownloadsFailureHonorsInteractiveSourceConfig(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		config DownloadClientConfig
+		config arr.DownloadClientConfig
 		source string
 		want   bool
 	}{
-		{name: "master disabled", config: DownloadClientConfig{AutoRedownloadFailedFromInteractiveSearch: true}, source: "InteractiveSearch"},
-		{name: "automatic source", config: DownloadClientConfig{AutoRedownloadFailed: true}, source: "Search", want: true},
-		{name: "missing source", config: DownloadClientConfig{AutoRedownloadFailed: true}, want: true},
-		{name: "interactive disabled", config: DownloadClientConfig{AutoRedownloadFailed: true}, source: "InteractiveSearch"},
-		{name: "interactive enabled", config: DownloadClientConfig{AutoRedownloadFailed: true, AutoRedownloadFailedFromInteractiveSearch: true}, source: "InteractiveSearch", want: true},
+		{name: "master disabled", config: arr.DownloadClientConfig{AutoRedownloadFailedFromInteractiveSearch: true}, source: "InteractiveSearch"},
+		{name: "automatic source", config: arr.DownloadClientConfig{AutoRedownloadFailed: true}, source: "Search", want: true},
+		{name: "missing source", config: arr.DownloadClientConfig{AutoRedownloadFailed: true}, want: true},
+		{name: "interactive disabled", config: arr.DownloadClientConfig{AutoRedownloadFailed: true}, source: "InteractiveSearch"},
+		{name: "interactive enabled", config: arr.DownloadClientConfig{AutoRedownloadFailed: true, AutoRedownloadFailedFromInteractiveSearch: true}, source: "InteractiveSearch", want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			failure := exactDownloadFailure{grabRecord: HistoryRecord{Data: map[string]string{"releaseSource": test.source}}}
+			failure := exactDownloadFailure{grabRecord: arr.HistoryRecord{Data: map[string]string{"releaseSource": test.source}}}
 			if got := autoRedownloadsFailure(test.config, failure); got != test.want {
 				t.Fatalf("autoRedownloadsFailure() = %v, want %v", got, test.want)
 			}
@@ -214,35 +215,35 @@ func TestSearchBindingsReconcilesPersistedCommandWithoutRedispatch(t *testing.T)
 	}))
 	defer server.Close()
 
-	mutation := ReacquireMutation{
-		Key:              mutationKey(ReacquireMutationMovieSearch, "9"),
-		Kind:             ReacquireMutationMovieSearch,
-		State:            ReacquireMutationIntent,
+	mutation := Mutation{
+		Key:              mutationKey(MutationMovieSearch, "9"),
+		Kind:             MutationMovieSearch,
+		State:            MutationIntent,
 		CommandName:      "MoviesSearch",
 		MovieIDs:         []int{9},
 		IntentAt:         queued.Add(-time.Second),
 		LastDispatchedAt: queued,
 		Attempts:         1,
 	}
-	job := ReacquireJob{Mutations: []ReacquireMutation{mutation}}
+	job := Job{Mutations: []Mutation{mutation}}
 	status, err := searchBindings(
 		t.Context(),
-		&Arr{Host: server.URL, Token: "secret", Type: Radarr},
+		&arr.Arr{Host: server.URL, Token: "secret", Type: arr.Radarr},
 		&job,
-		[]Binding{{ArrType: Radarr, MovieID: 9}},
+		[]Binding{{ArrType: arr.Radarr, MovieID: 9}},
 		&recordedProgress{},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status != ReacquireStatusWaitingForGrab {
+	if status != StatusWaitingForGrab {
 		t.Fatalf("status = %q", status)
 	}
 	if dispatched.Load() != 0 {
 		t.Fatalf("search was redispatched %d times", dispatched.Load())
 	}
 	confirmed, ok := mutationForKey(job, mutation.Key)
-	if !ok || confirmed.State != ReacquireMutationConfirmed || confirmed.ReceiptID != 71 {
+	if !ok || confirmed.State != MutationConfirmed || confirmed.ReceiptID != 71 {
 		t.Fatalf("confirmed mutation = %#v, found = %v", confirmed, ok)
 	}
 }
@@ -258,25 +259,25 @@ func TestSearchBindingsWaitsForCommandVisibilityBeforeRedispatch(t *testing.T) {
 	defer server.Close()
 
 	now := time.Now().UTC()
-	mutation := ReacquireMutation{
-		Key:              mutationKey(ReacquireMutationMovieSearch, "9"),
-		Kind:             ReacquireMutationMovieSearch,
-		State:            ReacquireMutationIntent,
+	mutation := Mutation{
+		Key:              mutationKey(MutationMovieSearch, "9"),
+		Kind:             MutationMovieSearch,
+		State:            MutationIntent,
 		CommandName:      "MoviesSearch",
 		MovieIDs:         []int{9},
 		IntentAt:         now.Add(-time.Second),
 		LastDispatchedAt: now,
 		Attempts:         1,
 	}
-	job := ReacquireJob{Mutations: []ReacquireMutation{mutation}}
+	job := Job{Mutations: []Mutation{mutation}}
 	_, err := searchBindings(
 		t.Context(),
-		&Arr{Host: server.URL, Token: "secret", Type: Radarr},
+		&arr.Arr{Host: server.URL, Token: "secret", Type: arr.Radarr},
 		&job,
-		[]Binding{{ArrType: Radarr, MovieID: 9}},
+		[]Binding{{ArrType: arr.Radarr, MovieID: 9}},
 		&recordedProgress{},
 	)
-	if !errors.Is(err, errMutationOutcomeUnknown) {
+	if !errors.Is(err, arr.ErrMutationOutcomeUnknown) {
 		t.Fatalf("error = %v, want unknown mutation outcome", err)
 	}
 	if dispatched.Load() != 0 {
@@ -297,26 +298,26 @@ func TestPreexistingFailedHistoryUsesExplicitSearch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	job := ReacquireJob{}
-	status, err := (&reacquireHandler{}).failHistory(
+	job := Job{}
+	status, err := (&arrHandler{}).failHistory(
 		t.Context(),
-		&Arr{Host: server.URL, Token: "secret", Type: Radarr},
+		&arr.Arr{Host: server.URL, Token: "secret", Type: arr.Radarr},
 		&job,
-		[]Binding{{ArrType: Radarr, MovieID: 9}},
+		[]Binding{{ArrType: arr.Radarr, MovieID: 9}},
 		exactDownloadFailure{found: true, alreadyFailed: true, downloadID: "download-1", failedID: 18},
-		DownloadClientConfig{AutoRedownloadFailed: true},
+		arr.DownloadClientConfig{AutoRedownloadFailed: true},
 		&recordedProgress{},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status != ReacquireStatusWaitingForGrab || searches.Load() != 1 {
+	if status != StatusWaitingForGrab || searches.Load() != 1 {
 		t.Fatalf("status = %q, searches = %d", status, searches.Load())
 	}
 }
 
-func newTestArrStorage() *Storage {
-	return &Storage{arrs: xsync.NewMap[string, *Arr]()}
+func newTestArrStorage() *arr.Storage {
+	return arr.NewStorage()
 }
 
 func configureArrHTTPTest(t *testing.T) {

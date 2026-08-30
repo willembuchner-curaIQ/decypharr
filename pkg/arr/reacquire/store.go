@@ -1,4 +1,4 @@
-package arr
+package reacquire
 
 import (
 	"crypto/sha256"
@@ -33,7 +33,7 @@ type bindingRepositoryStore interface {
 	Close() error
 }
 
-// BindingRepository persists Arr bindings as one snapshot per Arr plus a delta
+// BindingRepository persists arr.Arr bindings as one snapshot per arr.Arr plus a delta
 // row per targeted change. A full reconciliation replaces the snapshot; single
 // upserts write one row, because a library can hold hundreds of thousands of
 // bindings and rewriting the snapshot per file does not scale.
@@ -51,7 +51,7 @@ type bindingSnapshot struct {
 	Bindings   []Binding `json:"bindings"`
 }
 
-// bindingDelta is one change made since its Arr's snapshot was written.
+// bindingDelta is one change made since its arr.Arr's snapshot was written.
 type bindingDelta struct {
 	Version     int      `json:"version"`
 	ArrName     string   `json:"arrName"`
@@ -252,8 +252,8 @@ func (r *BindingRepository) invalidateLocked() {
 }
 
 // scanLocked reads the store once and merges the three row kinds: a snapshot is
-// authoritative for its Arr, deltas written after it win per managed file, and
-// legacy rows only apply to an Arr that has no snapshot yet.
+// authoritative for its arr.Arr, deltas written after it win per managed file, and
+// legacy rows only apply to an arr.Arr that has no snapshot yet.
 func (r *BindingRepository) scanLocked() ([]Binding, bindingRepositoryState, error) {
 	snapshots := make(map[string]bindingSnapshot)
 	deltas := make(map[entryFileKey]bindingDelta)
@@ -454,111 +454,6 @@ func validateBindingDelta(key string, delta bindingDelta) error {
 	return nil
 }
 
-type ReacquireJobRepository struct {
-	mu    sync.RWMutex
-	store *appendstore.Store
-}
-
-func OpenReacquireJobRepository(path string) (*ReacquireJobRepository, error) {
-	store, err := openArrStore(path, []string{jobAttributeArrName, jobAttributeStatus})
-	if err != nil {
-		return nil, fmt.Errorf("open reacquire job repository: %w", err)
-	}
-	return &ReacquireJobRepository{store: store}, nil
-}
-
-func (r *ReacquireJobRepository) LoadAll() ([]ReacquireJob, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	jobs := make([]ReacquireJob, 0, r.store.Len())
-	err := r.store.ForEach(func(_ string, value []byte) error {
-		var job ReacquireJob
-		if err := json.Unmarshal(value, &job); err != nil {
-			return fmt.Errorf("decode reacquire job: %w", err)
-		}
-		if err := validateJob(job); err != nil {
-			return fmt.Errorf("decode reacquire job: %w", err)
-		}
-		jobs = append(jobs, cloneJob(job))
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return jobs, nil
-}
-
-func (r *ReacquireJobRepository) Get(id string) (ReacquireJob, bool, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	data, err := r.store.Get(id)
-	if errors.Is(err, appendstore.ErrKeyNotFound) {
-		return ReacquireJob{}, false, nil
-	}
-	if err != nil {
-		return ReacquireJob{}, false, fmt.Errorf("load reacquire job: %w", err)
-	}
-	var job ReacquireJob
-	if err := json.Unmarshal(data, &job); err != nil {
-		return ReacquireJob{}, false, fmt.Errorf("decode reacquire job: %w", err)
-	}
-	if err := validateJob(job); err != nil {
-		return ReacquireJob{}, false, fmt.Errorf("decode reacquire job: %w", err)
-	}
-	return cloneJob(job), true, nil
-}
-
-func (r *ReacquireJobRepository) Save(job ReacquireJob) error {
-	return r.save(job, false)
-}
-
-func (r *ReacquireJobRepository) SaveDurable(job ReacquireJob) error {
-	return r.save(job, true)
-}
-
-func (r *ReacquireJobRepository) save(job ReacquireJob, durable bool) error {
-	if err := validateJob(job); err != nil {
-		return fmt.Errorf("save reacquire job: %w", err)
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	data, err := json.Marshal(job)
-	if err != nil {
-		return fmt.Errorf("encode reacquire job: %w", err)
-	}
-	options := &appendstore.PutOptions{Attributes: map[string]string{
-		jobAttributeArrName: job.ArrName,
-		jobAttributeStatus:  string(job.Status),
-	}}
-	if err := r.store.Put(job.ID, data, options); err != nil {
-		return fmt.Errorf("persist reacquire job: %w", err)
-	}
-	if durable {
-		if err := r.store.Sync(); err != nil {
-			return fmt.Errorf("sync reacquire job: %w", err)
-		}
-	}
-	return nil
-}
-
-func (r *ReacquireJobRepository) Delete(id string) error {
-	if id == "" {
-		return errors.New("job ID is required")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return deleteStoreKey(r.store, id)
-}
-
-func (r *ReacquireJobRepository) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.store.Close()
-}
-
 func openArrStore(path string, indexedFields []string) (*appendstore.Store, error) {
 	if path == "" {
 		return nil, errors.New("database path is required")
@@ -595,44 +490,6 @@ func bindingSnapshotStoreKey(arrName string) string {
 func deleteStoreKey(store *appendstore.Store, key string) error {
 	if err := store.Delete(key); err != nil && !errors.Is(err, appendstore.ErrKeyNotFound) {
 		return err
-	}
-	return nil
-}
-
-func validateJob(job ReacquireJob) error {
-	switch {
-	case job.ID == "":
-		return errors.New("job ID is required")
-	case !job.Status.valid():
-		return fmt.Errorf("invalid job status %q", job.Status)
-	case !job.Cause.valid():
-		return fmt.Errorf("invalid job cause %q", job.Cause)
-	case !job.Strategy.valid():
-		return fmt.Errorf("invalid job strategy %q", job.Strategy)
-	case job.ArrName == "":
-		return errors.New("arr name is required")
-	case job.EntryID == "" || job.FileID == "":
-		return errors.New("entry ID and file ID are required")
-	case job.CreatedAt.IsZero() || job.UpdatedAt.IsZero():
-		return errors.New("job timestamps are required")
-	}
-	if len(job.Bindings) == 0 {
-		return errors.New("job bindings are required")
-	}
-	for _, binding := range job.Bindings {
-		if err := binding.validate(); err != nil {
-			return fmt.Errorf("invalid job binding: %w", err)
-		}
-	}
-	mutationKeys := make(map[string]struct{}, len(job.Mutations))
-	for _, mutation := range job.Mutations {
-		if err := mutation.validate(); err != nil {
-			return fmt.Errorf("invalid job mutation: %w", err)
-		}
-		if _, exists := mutationKeys[mutation.Key]; exists {
-			return fmt.Errorf("duplicate job mutation key %q", mutation.Key)
-		}
-		mutationKeys[mutation.Key] = struct{}{}
 	}
 	return nil
 }

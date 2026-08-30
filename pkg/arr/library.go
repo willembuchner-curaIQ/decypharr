@@ -9,6 +9,17 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// LibraryFile is the Arr-side identity of an imported media file.
+type LibraryFile struct {
+	ArrFileID    int    `json:"arr_file_id"`
+	Path         string `json:"path"`
+	Size         int64  `json:"size"`
+	SeriesID     int    `json:"series_id,omitempty"`
+	SeasonNumber int    `json:"season_number,omitempty"`
+	EpisodeIDs   []int  `json:"episode_ids,omitempty"`
+	MovieID      int    `json:"movie_id,omitempty"`
+}
+
 const sonarrLibraryConcurrency = 4
 
 type sonarrSeriesSummary struct {
@@ -188,7 +199,7 @@ func (a *Arr) listRadarrLibraryFiles(ctx context.Context) ([]LibraryFile, error)
 	return files, nil
 }
 
-func (a *Arr) listTargetLibraryFiles(ctx context.Context, records []HistoryRecord) ([]LibraryFile, error) {
+func (a *Arr) ListTargetLibraryFiles(ctx context.Context, records []HistoryRecord) ([]LibraryFile, error) {
 	switch a.Type {
 	case Sonarr:
 		seriesIDs := make(map[int]struct{})

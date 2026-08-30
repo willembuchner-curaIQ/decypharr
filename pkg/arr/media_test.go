@@ -123,7 +123,7 @@ func TestExplicitSearchCommands(t *testing.T) {
 
 func TestMutationRequestClassifiesOnlyPossiblyDispatchedErrorsAsUnknown(t *testing.T) {
 	_, err := (&Arr{Type: Radarr}).SearchMovies(t.Context(), []int{7})
-	if err == nil || errors.Is(err, errMutationOutcomeUnknown) {
+	if err == nil || errors.Is(err, ErrMutationOutcomeUnknown) {
 		t.Fatalf("preflight error = %v", err)
 	}
 
@@ -131,7 +131,7 @@ func TestMutationRequestClassifiesOnlyPossiblyDispatchedErrorsAsUnknown(t *testi
 	host := server.URL
 	server.Close()
 	_, err = (&Arr{Host: host, Token: "secret", Type: Radarr}).SearchMovies(t.Context(), []int{7})
-	if !errors.Is(err, errMutationOutcomeUnknown) {
+	if !errors.Is(err, ErrMutationOutcomeUnknown) {
 		t.Fatalf("transport error = %v, want unknown outcome", err)
 	}
 }

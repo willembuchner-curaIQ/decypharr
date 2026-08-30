@@ -1,4 +1,4 @@
-package arr
+package reacquire
 
 import (
 	"context"
@@ -15,21 +15,21 @@ const (
 )
 
 type JobProgress interface {
-	Update(status ReacquireStatus, mutate func(*ReacquireJob)) error
-	UpdateDurable(status ReacquireStatus, mutate func(*ReacquireJob)) error
+	Update(status Status, mutate func(*Job)) error
+	UpdateDurable(status Status, mutate func(*Job)) error
 }
 
-type ReacquireHandler interface {
-	Reacquire(context.Context, ReacquireJob, JobProgress) error
+type Handler interface {
+	Reacquire(context.Context, Job, JobProgress) error
 }
 
 type ServiceOptions struct {
 	Directory string
 	Index     *Index
-	Handler   ReacquireHandler
+	Handler   Handler
 }
 
-type reacquireKey struct {
+type jobKey struct {
 	arrName    string
 	downloadID string
 	entryID    string
@@ -39,7 +39,7 @@ type reacquireKey struct {
 type Service struct {
 	index                *Index
 	bindingRepository    *BindingRepository
-	jobRepository        *ReacquireJobRepository
+	jobRepository        *JobRepository
 	wake                 chan struct{}
 	now                  func() time.Time
 	lifecycleMu          sync.RWMutex
@@ -47,11 +47,11 @@ type Service struct {
 	closed               bool
 	ctx                  context.Context
 	cancel               context.CancelFunc
-	handler              ReacquireHandler
+	handler              Handler
 	wg                   sync.WaitGroup
 	jobsMu               sync.RWMutex
-	jobs                 map[string]ReacquireJob
-	activeReacquisitions map[reacquireKey]string
+	jobs                 map[string]Job
+	activeReacquisitions map[jobKey]string
 }
 
 func NewService(options ServiceOptions) (*Service, error) {
@@ -78,8 +78,8 @@ func NewService(options ServiceOptions) (*Service, error) {
 		wake:                 make(chan struct{}, 1),
 		now:                  func() time.Time { return time.Now().UTC() },
 		handler:              options.Handler,
-		jobs:                 make(map[string]ReacquireJob),
-		activeReacquisitions: make(map[reacquireKey]string),
+		jobs:                 make(map[string]Job),
+		activeReacquisitions: make(map[jobKey]string),
 	}, nil
 }
 
@@ -142,7 +142,7 @@ func (s *Service) Close() error {
 	return errors.Join(s.bindingRepository.Close(), s.jobRepository.Close())
 }
 
-func (s *Service) SetHandler(handler ReacquireHandler) error {
+func (s *Service) SetHandler(handler Handler) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	if s.closed {
@@ -293,7 +293,7 @@ func (s *Service) beginOperation() (func(), error) {
 	return s.lifecycleMu.RUnlock, nil
 }
 
-func (s *Service) currentHandler() ReacquireHandler {
+func (s *Service) currentHandler() Handler {
 	s.lifecycleMu.RLock()
 	defer s.lifecycleMu.RUnlock()
 	return s.handler

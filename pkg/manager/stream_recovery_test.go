@@ -11,11 +11,12 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 type fakeArrRecovery struct {
-	binding arr.Binding
+	binding reacquire.Binding
 
 	calls     atomic.Int64
 	startOnce sync.Once
@@ -23,17 +24,17 @@ type fakeArrRecovery struct {
 	release   chan struct{}
 	finished  chan struct{}
 	requestMu sync.Mutex
-	request   arr.ReacquireRequest
+	request   reacquire.Request
 }
 
-func (f *fakeArrRecovery) Lookup(entryID, fileID string) (arr.Binding, bool) {
+func (f *fakeArrRecovery) Lookup(entryID, fileID string) (reacquire.Binding, bool) {
 	if f.binding.EntryID != entryID || f.binding.EntryFileID != fileID {
-		return arr.Binding{}, false
+		return reacquire.Binding{}, false
 	}
 	return f.binding, true
 }
 
-func (f *fakeArrRecovery) Reacquire(request arr.ReacquireRequest) (*arr.ReacquireJob, error) {
+func (f *fakeArrRecovery) Reacquire(request reacquire.Request) (*reacquire.Job, error) {
 	f.calls.Add(1)
 	f.requestMu.Lock()
 	f.request = request
@@ -45,12 +46,12 @@ func (f *fakeArrRecovery) Reacquire(request arr.ReacquireRequest) (*arr.Reacquir
 	if f.finished != nil {
 		close(f.finished)
 	}
-	return &arr.ReacquireJob{ID: "reacquire-1"}, nil
+	return &reacquire.Job{ID: "reacquire-1"}, nil
 }
 
 func TestActiveStreamIncludesArrBinding(t *testing.T) {
 	recovery := &fakeArrRecovery{
-		binding: arr.Binding{
+		binding: reacquire.Binding{
 			ArrName:      "sonarr-main",
 			ArrType:      arr.Sonarr,
 			EntryID:      "nzb-1",
@@ -114,7 +115,7 @@ func (missingArticleReader) Close() error                           { return nil
 
 func TestUsenetArticleNotFoundQueuesOneNonBlockingReacquire(t *testing.T) {
 	recovery := &fakeArrRecovery{
-		binding: arr.Binding{
+		binding: reacquire.Binding{
 			EntryID:     "nzb-1",
 			EntryFileID: "file-1",
 		},
@@ -182,7 +183,7 @@ func TestUsenetArticleNotFoundQueuesOneNonBlockingReacquire(t *testing.T) {
 	recovery.requestMu.Lock()
 	request := recovery.request
 	recovery.requestMu.Unlock()
-	if request.EntryID != "nzb-1" || request.FileID != "file-1" || request.Cause != arr.ReacquireCauseStream {
+	if request.EntryID != "nzb-1" || request.FileID != "file-1" || request.Cause != reacquire.CauseStream {
 		t.Fatalf("reacquire request = %+v", request)
 	}
 

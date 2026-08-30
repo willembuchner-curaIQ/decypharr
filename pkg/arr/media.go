@@ -219,7 +219,7 @@ func (a *Arr) postCommand(ctx context.Context, payload any) (Command, error) {
 	if err != nil {
 		err = fmt.Errorf("submit arr command: %w", err)
 		if ambiguousMutationRequest(resp, err) {
-			return Command{}, unknownMutationOutcome(err, 0)
+			return Command{}, UnknownMutationOutcome(err, 0)
 		}
 		return Command{}, err
 	}

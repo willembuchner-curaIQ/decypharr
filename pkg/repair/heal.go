@@ -9,6 +9,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -126,9 +127,9 @@ func (r *Service) reacquirable(broken storage.BrokenFile) bool {
 // unmappedBrokenFile reports an error that means the Arr service cannot act on
 // this file, as opposed to one that means the attempt itself failed.
 func unmappedBrokenFile(err error) bool {
-	return errors.Is(err, arr.ErrBindingNotFound) ||
-		errors.Is(err, arr.ErrBindingUnsafe) ||
-		errors.Is(err, arr.ErrServiceNotStarted) ||
+	return errors.Is(err, reacquire.ErrBindingNotFound) ||
+		errors.Is(err, reacquire.ErrBindingUnsafe) ||
+		errors.Is(err, reacquire.ErrServiceNotStarted) ||
 		errors.Is(err, errReacquirerUnavailable) ||
 		errors.Is(err, errUnmappedBrokenFile)
 }
@@ -231,7 +232,7 @@ func (r *Service) deleteRepairedEntry(health *storage.EntryHealth, repaired map[
 	}
 }
 
-func (r *Service) reacquireBrokenFile(broken storage.BrokenFile) (*arr.ReacquireJob, error) {
+func (r *Service) reacquireBrokenFile(broken storage.BrokenFile) (*reacquire.Job, error) {
 	if r.reacquirer == nil {
 		return nil, errReacquirerUnavailable
 	}
@@ -239,11 +240,11 @@ func (r *Service) reacquireBrokenFile(broken storage.BrokenFile) (*arr.Reacquire
 	if err != nil {
 		return nil, err
 	}
-	job, err := r.reacquirer.Reacquire(arr.ReacquireRequest{
+	job, err := r.reacquirer.Reacquire(reacquire.Request{
 		EntryID:  entryID,
 		FileID:   fileID,
-		Cause:    arr.ReacquireCauseRepair,
-		Strategy: arr.ReacquireStrategyHistoryFailed,
+		Cause:    reacquire.CauseRepair,
+		Strategy: reacquire.StrategyHistoryFailed,
 	})
 	if err != nil {
 		return nil, err

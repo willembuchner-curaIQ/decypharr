@@ -1,32 +1,33 @@
-package arr
+package reacquire
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/sirrobot01/decypharr/pkg/arr"
 	"slices"
 	"strconv"
 	"strings"
 )
 
-type reacquireHandler struct {
-	registry    *Storage
-	invalidator ReacquireInvalidator
+type arrHandler struct {
+	registry    *arr.Storage
+	invalidator Invalidator
 }
 
-type ReacquireInvalidator interface {
-	InvalidateReacquire(context.Context, ReacquireJob) error
+type Invalidator interface {
+	InvalidateReacquire(context.Context, Job) error
 }
 
-func NewReacquireHandler(registry *Storage, invalidators ...ReacquireInvalidator) ReacquireHandler {
-	var invalidator ReacquireInvalidator
+func NewHandler(registry *arr.Storage, invalidators ...Invalidator) Handler {
+	var invalidator Invalidator
 	if len(invalidators) > 0 {
 		invalidator = invalidators[0]
 	}
-	return &reacquireHandler{registry: registry, invalidator: invalidator}
+	return &arrHandler{registry: registry, invalidator: invalidator}
 }
 
-func (handler *reacquireHandler) Reacquire(ctx context.Context, job ReacquireJob, progress JobProgress) error {
+func (handler *arrHandler) Reacquire(ctx context.Context, job Job, progress JobProgress) error {
 	if handler == nil || handler.registry == nil {
 		return fmt.Errorf("arr reacquirer is not configured")
 	}
@@ -49,17 +50,17 @@ func (handler *reacquireHandler) Reacquire(ctx context.Context, job ReacquireJob
 		return err
 	}
 	if !downloadConfig.EnableCompletedDownloadHandling {
-		return fmt.Errorf("Arr completed download handling is disabled")
+		return fmt.Errorf("arr.Arr completed download handling is disabled")
 	}
 
 	var failurePlan exactDownloadFailure
-	if job.Strategy == ReacquireStrategyHistoryFailed || job.Strategy == ReacquireStrategyInteractiveBest {
+	if job.Strategy == StrategyHistoryFailed || job.Strategy == StrategyInteractiveBest {
 		failurePlan, err = prepareExactDownloadFailure(ctx, instance, job.DownloadID)
 		if err != nil {
 			return err
 		}
 	}
-	if job.Strategy == ReacquireStrategyInteractiveBest {
+	if job.Strategy == StrategyInteractiveBest {
 		if !failurePlan.grabFound {
 			return fmt.Errorf("interactive reacquisition requires exact grab history")
 		}
@@ -68,19 +69,19 @@ func (handler *reacquireHandler) Reacquire(ctx context.Context, job ReacquireJob
 		}
 	}
 
-	if err := progress.Update(ReacquireStatusInvalidating, nil); err != nil {
+	if err := progress.Update(StatusInvalidating, nil); err != nil {
 		return err
 	}
 	if err := deleteArrFiles(ctx, instance, bindings); err != nil {
 		return err
 	}
-	var waitingStatus ReacquireStatus
+	var waitingStatus Status
 	switch job.Strategy {
-	case ReacquireStrategyHistoryFailed:
+	case StrategyHistoryFailed:
 		waitingStatus, err = handler.failHistory(ctx, instance, &job, bindings, failurePlan, downloadConfig, progress)
-	case ReacquireStrategyCommandSearch:
+	case StrategyCommandSearch:
 		waitingStatus, err = searchBindings(ctx, instance, &job, bindings, progress)
-	case ReacquireStrategyInteractiveBest:
+	case StrategyInteractiveBest:
 		if err = executeExactDownloadFailure(ctx, instance, &job, failurePlan, progress); err == nil {
 			waitingStatus, err = grabBestRelease(ctx, instance, &job, bindings, progress)
 		}
@@ -100,15 +101,15 @@ func (handler *reacquireHandler) Reacquire(ctx context.Context, job ReacquireJob
 	return progress.Update(waitingStatus, nil)
 }
 
-func (handler *reacquireHandler) failHistory(
+func (handler *arrHandler) failHistory(
 	ctx context.Context,
-	instance *Arr,
-	job *ReacquireJob,
+	instance *arr.Arr,
+	job *Job,
 	bindings []Binding,
 	failure exactDownloadFailure,
-	config DownloadClientConfig,
+	config arr.DownloadClientConfig,
 	progress JobProgress,
-) (ReacquireStatus, error) {
+) (Status, error) {
 	if !failure.found {
 		return searchBindings(ctx, instance, job, bindings, progress)
 	}
@@ -116,7 +117,7 @@ func (handler *reacquireHandler) failHistory(
 		return "", err
 	}
 	if failure.alreadyFailed {
-		mutation, _ := mutationForKey(*job, mutationKey(ReacquireMutationHistoryFailed, failure.downloadID))
+		mutation, _ := mutationForKey(*job, mutationKey(MutationHistoryFailed, failure.downloadID))
 		if mutation.Attempts == 0 {
 			return searchBindings(ctx, instance, job, bindings, progress)
 		}
@@ -124,7 +125,7 @@ func (handler *reacquireHandler) failHistory(
 	if !autoRedownloadsFailure(config, failure) {
 		return searchBindings(ctx, instance, job, bindings, progress)
 	}
-	return ReacquireStatusWaitingForGrab, nil
+	return StatusWaitingForGrab, nil
 }
 
 type exactDownloadFailure struct {
@@ -134,10 +135,10 @@ type exactDownloadFailure struct {
 	downloadID    string
 	historyID     int
 	failedID      int
-	grabRecord    HistoryRecord
+	grabRecord    arr.HistoryRecord
 }
 
-func prepareExactDownloadFailure(ctx context.Context, instance *Arr, downloadID string) (exactDownloadFailure, error) {
+func prepareExactDownloadFailure(ctx context.Context, instance *arr.Arr, downloadID string) (exactDownloadFailure, error) {
 	if downloadID == "" {
 		return exactDownloadFailure{}, nil
 	}
@@ -168,7 +169,7 @@ func prepareExactDownloadFailure(ctx context.Context, instance *Arr, downloadID 
 	}, nil
 }
 
-func autoRedownloadsFailure(config DownloadClientConfig, failure exactDownloadFailure) bool {
+func autoRedownloadsFailure(config arr.DownloadClientConfig, failure exactDownloadFailure) bool {
 	if !config.AutoRedownloadFailed {
 		return false
 	}
@@ -178,32 +179,32 @@ func autoRedownloadsFailure(config DownloadClientConfig, failure exactDownloadFa
 
 func executeExactDownloadFailure(
 	ctx context.Context,
-	instance *Arr,
-	job *ReacquireJob,
+	instance *arr.Arr,
+	job *Job,
 	failure exactDownloadFailure,
 	progress JobProgress,
 ) error {
 	if !failure.found {
 		return nil
 	}
-	if err := progress.Update(ReacquireStatusBlocklisting, nil); err != nil {
+	if err := progress.Update(StatusBlocklisting, nil); err != nil {
 		return err
 	}
-	mutation := ReacquireMutation{
-		Key:        mutationKey(ReacquireMutationHistoryFailed, failure.downloadID),
-		Kind:       ReacquireMutationHistoryFailed,
+	mutation := Mutation{
+		Key:        mutationKey(MutationHistoryFailed, failure.downloadID),
+		Kind:       MutationHistoryFailed,
 		DownloadID: failure.downloadID,
 		HistoryID:  failure.historyID,
 	}
-	mutation, err := ensureMutationIntent(job, progress, ReacquireStatusBlocklisting, mutation)
+	mutation, err := ensureMutationIntent(job, progress, StatusBlocklisting, mutation)
 	if err != nil {
 		return err
 	}
-	if mutation.State == ReacquireMutationConfirmed {
+	if mutation.State == MutationConfirmed {
 		return nil
 	}
 	if failure.alreadyFailed {
-		return confirmMutation(job, progress, ReacquireStatusBlocklisting, mutation, failure.failedID)
+		return confirmMutation(job, progress, StatusBlocklisting, mutation, failure.failedID)
 	}
 	if mutation.Attempts > 0 {
 		record, found, err := instance.FindDownloadFailedHistoryByDownloadID(ctx, failure.downloadID)
@@ -211,30 +212,30 @@ func executeExactDownloadFailure(
 			return unavailableMutationReconciliation(mutation, fmt.Errorf("reconcile failed-download history: %w", err))
 		}
 		if found {
-			return confirmMutation(job, progress, ReacquireStatusBlocklisting, mutation, record.ID)
+			return confirmMutation(job, progress, StatusBlocklisting, mutation, record.ID)
 		}
 		if err := mutationRedispatchError(mutation); err != nil {
 			return err
 		}
 	}
-	mutation, err = recordMutationAttempt(job, progress, ReacquireStatusBlocklisting, mutation)
+	mutation, err = recordMutationAttempt(job, progress, StatusBlocklisting, mutation)
 	if err != nil {
 		return err
 	}
 	if err := instance.MarkHistoryFailedCtx(ctx, mutation.HistoryID); err != nil {
-		if !errors.Is(err, errMutationOutcomeUnknown) {
+		if !errors.Is(err, arr.ErrMutationOutcomeUnknown) {
 			return err
 		}
 		record, found, reconcileErr := instance.FindDownloadFailedHistoryByDownloadID(ctx, failure.downloadID)
 		if reconcileErr == nil && found {
-			return confirmMutation(job, progress, ReacquireStatusBlocklisting, mutation, record.ID)
+			return confirmMutation(job, progress, StatusBlocklisting, mutation, record.ID)
 		}
 		return unresolvedMutation(mutation, err, reconcileErr)
 	}
-	return confirmMutation(job, progress, ReacquireStatusBlocklisting, mutation, mutation.HistoryID)
+	return confirmMutation(job, progress, StatusBlocklisting, mutation, mutation.HistoryID)
 }
 
-func mutationBindings(job ReacquireJob) ([]Binding, error) {
+func mutationBindings(job Job) ([]Binding, error) {
 	bindings := make([]Binding, 0, len(job.Bindings))
 	requestedFound := false
 	for _, binding := range job.Bindings {
@@ -247,12 +248,12 @@ func mutationBindings(job ReacquireJob) ([]Binding, error) {
 		bindings = append(bindings, binding)
 	}
 	if !requestedFound {
-		return nil, fmt.Errorf("requested Arr binding no longer authorizes mutation")
+		return nil, fmt.Errorf("requested arr.Arr binding no longer authorizes mutation")
 	}
 	return bindings, nil
 }
 
-func deleteArrFiles(ctx context.Context, instance *Arr, bindings []Binding) error {
+func deleteArrFiles(ctx context.Context, instance *arr.Arr, bindings []Binding) error {
 	byFileID := make(map[int]Binding, len(bindings))
 	for _, binding := range bindings {
 		if binding.ArrFileID <= 0 {
@@ -285,33 +286,33 @@ func deleteArrFiles(ctx context.Context, instance *Arr, bindings []Binding) erro
 	return nil
 }
 
-func bindingMatchesManagedFile(binding Binding, current LibraryFile) bool {
+func bindingMatchesManagedFile(binding Binding, current arr.LibraryFile) bool {
 	if binding.ArrFileID != current.ArrFileID || !sameLibraryPath(binding.LibraryPath, current.Path) {
 		return false
 	}
 	switch binding.ArrType {
-	case Sonarr:
+	case arr.Sonarr:
 		return binding.SeriesID > 0 &&
 			binding.SeriesID == current.SeriesID &&
 			binding.SeasonNumber == current.SeasonNumber &&
 			slices.Equal(binding.EpisodeIDs, current.EpisodeIDs)
-	case Radarr:
+	case arr.Radarr:
 		return binding.MovieID > 0 && binding.MovieID == current.MovieID
 	default:
 		return false
 	}
 }
 
-func validateSearchBindings(instance *Arr, bindings []Binding) error {
+func validateSearchBindings(instance *arr.Arr, bindings []Binding) error {
 	switch instance.Type {
-	case Sonarr:
+	case arr.Sonarr:
 		episodeIDs, seriesID, _ := sonarrTargets(bindings)
 		if len(episodeIDs) == 0 && seriesID <= 0 {
-			return fmt.Errorf("Sonarr binding has no episode or series target")
+			return fmt.Errorf("arr.Sonarr binding has no episode or series target")
 		}
-	case Radarr:
+	case arr.Radarr:
 		if len(movieTargets(bindings)) == 0 {
-			return fmt.Errorf("Radarr binding has no movie target")
+			return fmt.Errorf("arr.Radarr binding has no movie target")
 		}
 	default:
 		return fmt.Errorf("search unsupported for arr type %q", instance.Type)
@@ -321,12 +322,12 @@ func validateSearchBindings(instance *Arr, bindings []Binding) error {
 
 func searchBindings(
 	ctx context.Context,
-	instance *Arr,
-	job *ReacquireJob,
+	instance *arr.Arr,
+	job *Job,
 	bindings []Binding,
 	progress JobProgress,
-) (ReacquireStatus, error) {
-	if err := progress.Update(ReacquireStatusSearching, nil); err != nil {
+) (Status, error) {
+	if err := progress.Update(StatusSearching, nil); err != nil {
 		return "", err
 	}
 
@@ -334,12 +335,12 @@ func searchBindings(
 	if err != nil {
 		return "", err
 	}
-	mutation, err = ensureMutationIntent(job, progress, ReacquireStatusSearching, mutation)
+	mutation, err = ensureMutationIntent(job, progress, StatusSearching, mutation)
 	if err != nil {
 		return "", err
 	}
-	if mutation.State == ReacquireMutationConfirmed {
-		return ReacquireStatusWaitingForGrab, nil
+	if mutation.State == MutationConfirmed {
+		return StatusWaitingForGrab, nil
 	}
 	if mutation.Attempts > 0 {
 		command, found, err := reconcileCommandMutation(ctx, instance, mutation)
@@ -347,88 +348,88 @@ func searchBindings(
 			return "", unavailableMutationReconciliation(mutation, err)
 		}
 		if found {
-			if err := confirmMutation(job, progress, ReacquireStatusSearching, mutation, command.ID); err != nil {
+			if err := confirmMutation(job, progress, StatusSearching, mutation, command.ID); err != nil {
 				return "", err
 			}
-			return ReacquireStatusWaitingForGrab, nil
+			return StatusWaitingForGrab, nil
 		}
 		if err := mutationRedispatchError(mutation); err != nil {
 			return "", err
 		}
 	}
-	mutation, err = recordMutationAttempt(job, progress, ReacquireStatusSearching, mutation)
+	mutation, err = recordMutationAttempt(job, progress, StatusSearching, mutation)
 	if err != nil {
 		return "", err
 	}
 	command, err := dispatchSearchCommand(ctx, instance, mutation)
 	if err != nil {
-		if !errors.Is(err, errMutationOutcomeUnknown) {
+		if !errors.Is(err, arr.ErrMutationOutcomeUnknown) {
 			return "", err
 		}
 		receipt, found, reconcileErr := reconcileCommandMutation(ctx, instance, mutation)
 		if reconcileErr == nil && found {
-			if err := confirmMutation(job, progress, ReacquireStatusSearching, mutation, receipt.ID); err != nil {
+			if err := confirmMutation(job, progress, StatusSearching, mutation, receipt.ID); err != nil {
 				return "", err
 			}
-			return ReacquireStatusWaitingForGrab, nil
+			return StatusWaitingForGrab, nil
 		}
 		return "", unresolvedMutation(mutation, err, reconcileErr)
 	}
-	if err := confirmMutation(job, progress, ReacquireStatusSearching, mutation, command.ID); err != nil {
+	if err := confirmMutation(job, progress, StatusSearching, mutation, command.ID); err != nil {
 		return "", err
 	}
-	return ReacquireStatusWaitingForGrab, nil
+	return StatusWaitingForGrab, nil
 }
 
-func searchMutation(instance *Arr, bindings []Binding) (ReacquireMutation, error) {
+func searchMutation(instance *arr.Arr, bindings []Binding) (Mutation, error) {
 	switch instance.Type {
-	case Sonarr:
+	case arr.Sonarr:
 		episodeIDs, seriesID, seasonNumber := sonarrTargets(bindings)
 		if len(episodeIDs) > 0 {
-			return ReacquireMutation{
-				Key:         mutationKey(ReacquireMutationEpisodeSearch, idListKey(episodeIDs)),
-				Kind:        ReacquireMutationEpisodeSearch,
+			return Mutation{
+				Key:         mutationKey(MutationEpisodeSearch, idListKey(episodeIDs)),
+				Kind:        MutationEpisodeSearch,
 				CommandName: "EpisodeSearch",
 				EpisodeIDs:  episodeIDs,
 			}, nil
 		}
-		return ReacquireMutation{
-			Key:          mutationKey(ReacquireMutationSeasonSearch, strconv.Itoa(seriesID), strconv.Itoa(seasonNumber)),
-			Kind:         ReacquireMutationSeasonSearch,
+		return Mutation{
+			Key:          mutationKey(MutationSeasonSearch, strconv.Itoa(seriesID), strconv.Itoa(seasonNumber)),
+			Kind:         MutationSeasonSearch,
 			CommandName:  "SeasonSearch",
 			SeriesID:     seriesID,
 			SeasonNumber: seasonNumber,
 		}, nil
-	case Radarr:
+	case arr.Radarr:
 		movieIDs := movieTargets(bindings)
-		return ReacquireMutation{
-			Key:         mutationKey(ReacquireMutationMovieSearch, idListKey(movieIDs)),
-			Kind:        ReacquireMutationMovieSearch,
+		return Mutation{
+			Key:         mutationKey(MutationMovieSearch, idListKey(movieIDs)),
+			Kind:        MutationMovieSearch,
 			CommandName: "MoviesSearch",
 			MovieIDs:    movieIDs,
 		}, nil
 	default:
-		return ReacquireMutation{}, fmt.Errorf("search unsupported for arr type %q", instance.Type)
+		return Mutation{}, fmt.Errorf("search unsupported for arr type %q", instance.Type)
 	}
 }
 
-func dispatchSearchCommand(ctx context.Context, instance *Arr, mutation ReacquireMutation) (Command, error) {
+func dispatchSearchCommand(ctx context.Context, instance *arr.Arr, mutation Mutation) (arr.Command, error) {
 	switch mutation.Kind {
-	case ReacquireMutationEpisodeSearch:
+	case MutationEpisodeSearch:
 		return instance.SearchEpisodes(ctx, mutation.EpisodeIDs)
-	case ReacquireMutationSeasonSearch:
+	case MutationSeasonSearch:
 		return instance.SearchSeason(ctx, mutation.SeriesID, mutation.SeasonNumber)
-	case ReacquireMutationMovieSearch:
+	case MutationMovieSearch:
 		return instance.SearchMovies(ctx, mutation.MovieIDs)
 	default:
-		return Command{}, fmt.Errorf("unsupported Arr command mutation %q", mutation.Kind)
+		return arr.Command{}, fmt.Errorf("unsupported arr.Arr command mutation %q", mutation.Kind)
 	}
 }
 
-func reconcileCommandMutation(ctx context.Context, instance *Arr, mutation ReacquireMutation) (Command, bool, error) {
+func reconcileCommandMutation(ctx context.Context, instance *arr.Arr, mutation Mutation) (arr.Command, bool, error) {
 	commands, err := instance.Commands(ctx)
 	if err != nil {
-		return Command{}, false, fmt.Errorf("reconcile Arr command: %w", err)
+		return arr.Command{}, false, fmt.Errorf("reconcile arr.Arr command: %w", err)
 	}
 	command, found := findCommandReceipt(commands, mutation)
 	return command, found, nil
@@ -436,18 +437,18 @@ func reconcileCommandMutation(ctx context.Context, instance *Arr, mutation Reacq
 
 func grabBestRelease(
 	ctx context.Context,
-	instance *Arr,
-	job *ReacquireJob,
+	instance *arr.Arr,
+	job *Job,
 	bindings []Binding,
 	progress JobProgress,
-) (ReacquireStatus, error) {
-	if err := progress.Update(ReacquireStatusSearching, nil); err != nil {
+) (Status, error) {
+	if err := progress.Update(StatusSearching, nil); err != nil {
 		return "", err
 	}
 
-	if mutation, found := mutationOfKind(*job, ReacquireMutationReleaseGrab); found {
-		if mutation.State == ReacquireMutationConfirmed {
-			return ReacquireStatusWaitingForDownload, nil
+	if mutation, found := mutationOfKind(*job, MutationReleaseGrab); found {
+		if mutation.State == MutationConfirmed {
+			return StatusWaitingForDownload, nil
 		}
 		if mutation.Attempts > 0 {
 			record, found, err := reconcileReleaseMutation(ctx, instance, mutation)
@@ -455,10 +456,10 @@ func grabBestRelease(
 				return "", unavailableMutationReconciliation(mutation, err)
 			}
 			if found {
-				if err := confirmMutation(job, progress, ReacquireStatusSearching, mutation, record.ID); err != nil {
+				if err := confirmMutation(job, progress, StatusSearching, mutation, record.ID); err != nil {
 					return "", err
 				}
-				return ReacquireStatusWaitingForDownload, nil
+				return StatusWaitingForDownload, nil
 			}
 			if err := mutationRedispatchError(mutation); err != nil {
 				return "", err
@@ -483,32 +484,32 @@ func grabBestRelease(
 		if err != nil {
 			return "", err
 		}
-		mutation, err = ensureMutationIntent(job, progress, ReacquireStatusSearching, mutation)
+		mutation, err = ensureMutationIntent(job, progress, StatusSearching, mutation)
 		if err != nil {
 			return "", err
 		}
 		return dispatchReleaseMutation(ctx, instance, job, mutation, release, progress)
 	}
-	return "", fmt.Errorf("Arr returned no downloadable replacement release with reconcilable identity")
+	return "", fmt.Errorf("arr.Arr returned no downloadable replacement release with reconcilable identity")
 }
 
-func searchReplacementReleases(ctx context.Context, instance *Arr, bindings []Binding) ([]Release, error) {
+func searchReplacementReleases(ctx context.Context, instance *arr.Arr, bindings []Binding) ([]arr.Release, error) {
 	var (
-		releases []Release
+		releases []arr.Release
 		err      error
 	)
 	switch instance.Type {
-	case Sonarr:
+	case arr.Sonarr:
 		episodeIDs, seriesID, seasonNumber := sonarrTargets(bindings)
 		if len(episodeIDs) == 1 {
 			releases, err = instance.SearchEpisodeReleases(ctx, episodeIDs[0])
 		} else {
 			if !singleSonarrSeason(bindings, seriesID, seasonNumber) {
-				return nil, fmt.Errorf("interactive Sonarr reacquisition spans multiple seasons")
+				return nil, fmt.Errorf("interactive arr.Sonarr reacquisition spans multiple seasons")
 			}
 			releases, err = instance.SearchSeasonReleases(ctx, seriesID, seasonNumber)
 		}
-	case Radarr:
+	case arr.Radarr:
 		movieIDs := movieTargets(bindings)
 		if len(movieIDs) == 0 {
 			return nil, fmt.Errorf("movie binding has no movie ID")
@@ -523,44 +524,44 @@ func searchReplacementReleases(ctx context.Context, instance *Arr, bindings []Bi
 	return releases, nil
 }
 
-func releaseMutation(bindings []Binding, release Release) (ReacquireMutation, error) {
+func releaseMutation(bindings []Binding, release arr.Release) (Mutation, error) {
 	if len(bindings) == 0 {
-		return ReacquireMutation{}, fmt.Errorf("release mutation requires Arr bindings")
+		return Mutation{}, fmt.Errorf("release mutation requires arr.Arr bindings")
 	}
-	mutation := ReacquireMutation{
-		Key:              mutationKey(ReacquireMutationReleaseGrab, release.GUID, strconv.Itoa(release.IndexerID)),
-		Kind:             ReacquireMutationReleaseGrab,
+	mutation := Mutation{
+		Key:              mutationKey(MutationReleaseGrab, release.GUID, strconv.Itoa(release.IndexerID)),
+		Kind:             MutationReleaseGrab,
 		ReleaseGUID:      release.GUID,
 		ReleaseIndexer:   release.Indexer,
 		ReleaseIndexerID: release.IndexerID,
 	}
 	switch bindings[0].ArrType {
-	case Sonarr:
+	case arr.Sonarr:
 		mutation.EpisodeIDs, mutation.SeriesID, mutation.SeasonNumber = sonarrTargets(bindings)
 		if len(mutation.EpisodeIDs) == 0 {
-			return ReacquireMutation{}, fmt.Errorf("interactive Sonarr reacquisition cannot be reconciled without episode IDs")
+			return Mutation{}, fmt.Errorf("interactive arr.Sonarr reacquisition cannot be reconciled without episode IDs")
 		}
-	case Radarr:
+	case arr.Radarr:
 		movieIDs := movieTargets(bindings)
 		if len(movieIDs) == 0 {
-			return ReacquireMutation{}, fmt.Errorf("interactive Radarr reacquisition cannot be reconciled without a movie ID")
+			return Mutation{}, fmt.Errorf("interactive arr.Radarr reacquisition cannot be reconciled without a movie ID")
 		}
 		mutation.MovieIDs = []int{movieIDs[0]}
 	default:
-		return ReacquireMutation{}, fmt.Errorf("interactive search unsupported for arr type %q", bindings[0].ArrType)
+		return Mutation{}, fmt.Errorf("interactive search unsupported for arr type %q", bindings[0].ArrType)
 	}
 	return mutation, nil
 }
 
 func findPersistedRelease(
 	ctx context.Context,
-	instance *Arr,
+	instance *arr.Arr,
 	bindings []Binding,
-	mutation ReacquireMutation,
-) (Release, error) {
+	mutation Mutation,
+) (arr.Release, error) {
 	releases, err := searchReplacementReleases(ctx, instance, bindings)
 	if err != nil {
-		return Release{}, err
+		return arr.Release{}, err
 	}
 	for _, release := range releases {
 		if release.GUID == mutation.ReleaseGUID &&
@@ -570,48 +571,48 @@ func findPersistedRelease(
 			return release, nil
 		}
 	}
-	return Release{}, fmt.Errorf("previously selected Arr release is no longer available; refusing to substitute another release")
+	return arr.Release{}, fmt.Errorf("previously selected arr.Arr release is no longer available; refusing to substitute another release")
 }
 
 func dispatchReleaseMutation(
 	ctx context.Context,
-	instance *Arr,
-	job *ReacquireJob,
-	mutation ReacquireMutation,
-	release Release,
+	instance *arr.Arr,
+	job *Job,
+	mutation Mutation,
+	release arr.Release,
 	progress JobProgress,
-) (ReacquireStatus, error) {
-	mutation, err := recordMutationAttempt(job, progress, ReacquireStatusSearching, mutation)
+) (Status, error) {
+	mutation, err := recordMutationAttempt(job, progress, StatusSearching, mutation)
 	if err != nil {
 		return "", err
 	}
 	if err := instance.GrabRelease(ctx, release); err != nil {
-		if !errors.Is(err, errMutationOutcomeUnknown) {
+		if !errors.Is(err, arr.ErrMutationOutcomeUnknown) {
 			return "", err
 		}
 		record, found, reconcileErr := reconcileReleaseMutation(ctx, instance, mutation)
 		if reconcileErr == nil && found {
-			if err := confirmMutation(job, progress, ReacquireStatusSearching, mutation, record.ID); err != nil {
+			if err := confirmMutation(job, progress, StatusSearching, mutation, record.ID); err != nil {
 				return "", err
 			}
-			return ReacquireStatusWaitingForDownload, nil
+			return StatusWaitingForDownload, nil
 		}
 		return "", unresolvedMutation(mutation, err, reconcileErr)
 	}
-	if err := confirmMutation(job, progress, ReacquireStatusSearching, mutation, 0); err != nil {
+	if err := confirmMutation(job, progress, StatusSearching, mutation, 0); err != nil {
 		return "", err
 	}
-	return ReacquireStatusWaitingForDownload, nil
+	return StatusWaitingForDownload, nil
 }
 
 func reconcileReleaseMutation(
 	ctx context.Context,
-	instance *Arr,
-	mutation ReacquireMutation,
-) (HistoryRecord, bool, error) {
+	instance *arr.Arr,
+	mutation Mutation,
+) (arr.HistoryRecord, bool, error) {
 	records, err := instance.GrabHistorySince(ctx, mutation.LastDispatchedAt.Add(-mutationClockSkew))
 	if err != nil {
-		return HistoryRecord{}, false, fmt.Errorf("reconcile release grab: %w", err)
+		return arr.HistoryRecord{}, false, fmt.Errorf("reconcile release grab: %w", err)
 	}
 	record, found := findGrabReceipt(records, mutation)
 	return record, found, nil
@@ -663,6 +664,6 @@ func movieTargets(bindings []Binding) []int {
 	return slices.Compact(movieIDs)
 }
 
-func releaseEligible(release Release) bool {
+func releaseEligible(release arr.Release) bool {
 	return !release.Rejected && !release.TemporarilyRejected && len(release.Rejections) == 0 && (release.DownloadAllowed || release.Approved)
 }

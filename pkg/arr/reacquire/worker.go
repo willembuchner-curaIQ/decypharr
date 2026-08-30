@@ -1,10 +1,11 @@
-package arr
+package reacquire
 
 import (
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/sirrobot01/decypharr/pkg/arr"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -13,16 +14,16 @@ import (
 )
 
 const (
-	reacquireMaintenanceInterval = time.Minute
-	reacquireExecutionTimeout    = 2 * time.Minute
-	reacquireWaitingTimeout      = 6 * time.Hour
-	reacquireSuccessRetention    = 24 * time.Hour
-	reacquireFailureRetention    = 7 * 24 * time.Hour
-	reacquireRetryBaseDelay      = time.Second
-	reacquireRetryMaxDelay       = 30 * time.Second
+	maintenanceInterval = time.Minute
+	executionTimeout    = 2 * time.Minute
+	waitingTimeout      = 6 * time.Hour
+	successRetention    = 24 * time.Hour
+	failureRetention    = 7 * 24 * time.Hour
+	retryBaseDelay      = time.Second
+	retryMaxDelay       = 30 * time.Second
 )
 
-func (s *Service) Reacquire(request ReacquireRequest) (*ReacquireJob, error) {
+func (s *Service) Reacquire(request Request) (*Job, error) {
 	release, err := s.beginOperation()
 	if err != nil {
 		return nil, err
@@ -56,9 +57,9 @@ func (s *Service) Reacquire(request ReacquireRequest) (*ReacquireJob, error) {
 		bindings = []Binding{binding}
 	}
 	now := s.now()
-	job := ReacquireJob{
+	job := Job{
 		ID:         uuid.NewString(),
-		Status:     ReacquireStatusQueued,
+		Status:     StatusQueued,
 		Cause:      request.Cause,
 		Strategy:   request.Strategy,
 		ArrName:    binding.ArrName,
@@ -83,15 +84,15 @@ func (s *Service) Reacquire(request ReacquireRequest) (*ReacquireJob, error) {
 	return &result, nil
 }
 
-func (s *Service) Jobs() []ReacquireJob {
+func (s *Service) Jobs() []Job {
 	s.jobsMu.RLock()
 	defer s.jobsMu.RUnlock()
 
-	jobs := make([]ReacquireJob, 0, len(s.jobs))
+	jobs := make([]Job, 0, len(s.jobs))
 	for _, job := range s.jobs {
 		jobs = append(jobs, cloneJob(job))
 	}
-	slices.SortFunc(jobs, func(left, right ReacquireJob) int {
+	slices.SortFunc(jobs, func(left, right Job) int {
 		if result := right.UpdatedAt.Compare(left.UpdatedAt); result != 0 {
 			return result
 		}
@@ -100,15 +101,15 @@ func (s *Service) Jobs() []ReacquireJob {
 	return jobs
 }
 
-func (s *Service) Job(id string) (ReacquireJob, bool) {
+func (s *Service) Job(id string) (Job, bool) {
 	s.jobsMu.RLock()
 	defer s.jobsMu.RUnlock()
 	job, ok := s.jobs[id]
 	return cloneJob(job), ok
 }
 
-func (s *Service) loadJobs(jobs []ReacquireJob) error {
-	slices.SortFunc(jobs, func(left, right ReacquireJob) int {
+func (s *Service) loadJobs(jobs []Job) error {
+	slices.SortFunc(jobs, func(left, right Job) int {
 		return left.UpdatedAt.Compare(right.UpdatedAt)
 	})
 	s.jobsMu.Lock()
@@ -124,7 +125,7 @@ func (s *Service) loadJobs(jobs []ReacquireJob) error {
 		key := keyForJob(job)
 		if previousID, exists := s.activeReacquisitions[key]; exists {
 			previous := s.jobs[previousID]
-			previous.Status = ReacquireStatusCancelled
+			previous.Status = StatusCancelled
 			previous.LastError = "superseded by duplicate active job"
 			previous.UpdatedAt = s.now()
 			previous.CompletedAt = previous.UpdatedAt
@@ -139,7 +140,7 @@ func (s *Service) loadJobs(jobs []ReacquireJob) error {
 }
 
 func (s *Service) run(ctx context.Context) {
-	ticker := time.NewTicker(reacquireMaintenanceInterval)
+	ticker := time.NewTicker(maintenanceInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -169,15 +170,15 @@ func (s *Service) run(ctx context.Context) {
 	}
 }
 
-func (s *Service) runJob(ctx context.Context, handler ReacquireHandler, job ReacquireJob) bool {
-	started, err := s.updateJob(job.ID, ReacquireStatusResolving, func(job *ReacquireJob) {
+func (s *Service) runJob(ctx context.Context, handler Handler, job Job) bool {
+	started, err := s.updateJob(job.ID, StatusResolving, func(job *Job) {
 		job.RetryAt = time.Time{}
 	})
 	if err != nil {
 		return false
 	}
 	progress := &serviceJobProgress{service: s, jobID: job.ID}
-	jobCtx, cancel := context.WithTimeout(ctx, reacquireExecutionTimeout)
+	jobCtx, cancel := context.WithTimeout(ctx, executionTimeout)
 	err = handler.Reacquire(jobCtx, started, progress)
 	if err == nil {
 		err = jobCtx.Err()
@@ -186,13 +187,13 @@ func (s *Service) runJob(ctx context.Context, handler ReacquireHandler, job Reac
 	if ctx.Err() != nil {
 		return true
 	}
-	if errors.Is(err, errMutationOutcomeUnknown) {
+	if errors.Is(err, arr.ErrMutationOutcomeUnknown) {
 		current, ok := s.Job(job.ID)
 		if !ok {
 			return false
 		}
-		delay := reacquireRetryDelay(current, err)
-		queued, updateErr := s.updateJobDurable(job.ID, ReacquireStatusQueued, func(job *ReacquireJob) {
+		delay := retryDelay(current, err)
+		queued, updateErr := s.updateJobDurable(job.ID, StatusQueued, func(job *Job) {
 			job.LastError = err.Error()
 			job.RetryAt = s.now().Add(delay)
 		})
@@ -203,7 +204,7 @@ func (s *Service) runJob(ctx context.Context, handler ReacquireHandler, job Reac
 		return true
 	}
 	if err != nil {
-		_, updateErr := s.updateJob(job.ID, ReacquireStatusFailed, func(job *ReacquireJob) {
+		_, updateErr := s.updateJob(job.ID, StatusFailed, func(job *Job) {
 			job.LastError = err.Error()
 			job.RetryAt = time.Time{}
 		})
@@ -213,17 +214,17 @@ func (s *Service) runJob(ctx context.Context, handler ReacquireHandler, job Reac
 	if !ok || current.Status.Terminal() || progress.waiting.Load() || current.Status.waiting() {
 		return true
 	}
-	_, err = s.updateJob(job.ID, ReacquireStatusReady, func(job *ReacquireJob) {
+	_, err = s.updateJob(job.ID, StatusReady, func(job *Job) {
 		job.LastError = ""
 		job.RetryAt = time.Time{}
 	})
 	return err == nil
 }
 
-func (s *Service) nextJob() (ReacquireJob, bool) {
+func (s *Service) nextJob() (Job, bool) {
 	s.jobsMu.RLock()
 	defer s.jobsMu.RUnlock()
-	var next ReacquireJob
+	var next Job
 	found := false
 	for _, id := range s.activeReacquisitions {
 		job, ok := s.jobs[id]
@@ -238,32 +239,32 @@ func (s *Service) nextJob() (ReacquireJob, bool) {
 	return next, found
 }
 
-func (s *Service) updateJob(id string, status ReacquireStatus, mutate func(*ReacquireJob)) (ReacquireJob, error) {
+func (s *Service) updateJob(id string, status Status, mutate func(*Job)) (Job, error) {
 	return s.updateJobWithDurability(id, status, mutate, false)
 }
 
-func (s *Service) updateJobDurable(id string, status ReacquireStatus, mutate func(*ReacquireJob)) (ReacquireJob, error) {
+func (s *Service) updateJobDurable(id string, status Status, mutate func(*Job)) (Job, error) {
 	return s.updateJobWithDurability(id, status, mutate, true)
 }
 
 func (s *Service) updateJobWithDurability(
 	id string,
-	status ReacquireStatus,
-	mutate func(*ReacquireJob),
+	status Status,
+	mutate func(*Job),
 	durable bool,
-) (ReacquireJob, error) {
+) (Job, error) {
 	if !status.valid() {
-		return ReacquireJob{}, fmt.Errorf("invalid reacquire status %q", status)
+		return Job{}, fmt.Errorf("invalid reacquire status %q", status)
 	}
 	s.jobsMu.Lock()
 	defer s.jobsMu.Unlock()
 
 	original, ok := s.jobs[id]
 	if !ok {
-		return ReacquireJob{}, fmt.Errorf("reacquire job %q not found", id)
+		return Job{}, fmt.Errorf("reacquire job %q not found", id)
 	}
 	if original.Status.Terminal() && status != original.Status {
-		return ReacquireJob{}, fmt.Errorf("reacquire job %q is already %s", id, original.Status)
+		return Job{}, fmt.Errorf("reacquire job %q is already %s", id, original.Status)
 	}
 	job := cloneJob(original)
 	if mutate != nil {
@@ -281,7 +282,7 @@ func (s *Service) updateJobWithDurability(
 	job.CreatedAt = original.CreatedAt
 	job.Status = status
 	job.UpdatedAt = s.now()
-	if status != ReacquireStatusQueued && job.StartedAt.IsZero() {
+	if status != StatusQueued && job.StartedAt.IsZero() {
 		job.StartedAt = job.UpdatedAt
 	}
 	if status.Terminal() {
@@ -295,7 +296,7 @@ func (s *Service) updateJobWithDurability(
 		err = s.jobRepository.Save(job)
 	}
 	if err != nil {
-		return ReacquireJob{}, err
+		return Job{}, err
 	}
 	s.jobs[id] = cloneJob(job)
 	if status.Terminal() {
@@ -309,7 +310,7 @@ func (s *Service) updateJobWithDurability(
 
 // completeWaitingJobs re-checks the waiting jobs an indexing change can satisfy.
 // It takes the whole change set at once: a generation replace carries every
-// binding of an Arr, and checking one binding at a time walks the job table
+// binding of an arr.Arr, and checking one binding at a time walks the job table
 // once per binding.
 func (s *Service) completeWaitingJobs(bindings ...Binding) error {
 	downloadsByArr := make(map[string]map[string]struct{})
@@ -358,20 +359,20 @@ type serviceJobProgress struct {
 	waiting atomic.Bool
 }
 
-func (progress *serviceJobProgress) Update(status ReacquireStatus, mutate func(*ReacquireJob)) error {
+func (progress *serviceJobProgress) Update(status Status, mutate func(*Job)) error {
 	return progress.update(status, mutate, false)
 }
 
-func (progress *serviceJobProgress) UpdateDurable(status ReacquireStatus, mutate func(*ReacquireJob)) error {
+func (progress *serviceJobProgress) UpdateDurable(status Status, mutate func(*Job)) error {
 	return progress.update(status, mutate, true)
 }
 
-func (progress *serviceJobProgress) update(status ReacquireStatus, mutate func(*ReacquireJob), durable bool) error {
+func (progress *serviceJobProgress) update(status Status, mutate func(*Job), durable bool) error {
 	if status.waiting() {
 		progress.waiting.Store(true)
 	}
 	var (
-		job ReacquireJob
+		job Job
 		err error
 	)
 	if durable {
@@ -385,19 +386,19 @@ func (progress *serviceJobProgress) update(status ReacquireStatus, mutate func(*
 	return progress.service.completeJobFromIndex(job)
 }
 
-func reacquireRetryDelay(job ReacquireJob, err error) time.Duration {
+func retryDelay(job Job, err error) time.Duration {
 	attempts := 0
 	for _, mutation := range job.Mutations {
 		attempts = max(attempts, mutation.Attempts)
 	}
-	delay := reacquireRetryBaseDelay
+	delay := retryBaseDelay
 	for range max(0, min(attempts-1, 5)) {
 		delay *= 2
 	}
-	return min(reacquireRetryMaxDelay, max(delay, mutationRetryAfter(err)))
+	return min(retryMaxDelay, max(delay, arr.MutationRetryAfter(err)))
 }
 
-func (s *Service) scheduleRetry(job ReacquireJob) {
+func (s *Service) scheduleRetry(job Job) {
 	if job.RetryAt.IsZero() || s.ctx == nil {
 		return
 	}
@@ -434,34 +435,34 @@ func replacesDownload(downloads map[string]struct{}, jobDownloadID string) bool 
 	return !sameOnly
 }
 
-func (status ReacquireStatus) waiting() bool {
-	return status == ReacquireStatusWaitingForGrab || status == ReacquireStatusWaitingForDownload || status == ReacquireStatusWaitingForImport
+func (status Status) waiting() bool {
+	return status == StatusWaitingForGrab || status == StatusWaitingForDownload || status == StatusWaitingForImport
 }
 
-func (status ReacquireStatus) dispatchable() bool {
-	return status == ReacquireStatusQueued || status == ReacquireStatusResolving || status == ReacquireStatusInvalidating || status == ReacquireStatusBlocklisting || status == ReacquireStatusSearching
+func (status Status) dispatchable() bool {
+	return status == StatusQueued || status == StatusResolving || status == StatusInvalidating || status == StatusBlocklisting || status == StatusSearching
 }
 
-func keyForBinding(binding Binding) reacquireKey {
+func keyForBinding(binding Binding) jobKey {
 	if binding.DownloadID != "" {
-		return reacquireKey{arrName: binding.ArrName, downloadID: binding.DownloadID}
+		return jobKey{arrName: binding.ArrName, downloadID: binding.DownloadID}
 	}
-	return reacquireKey{arrName: binding.ArrName, entryID: binding.EntryID, fileID: binding.EntryFileID}
+	return jobKey{arrName: binding.ArrName, entryID: binding.EntryID, fileID: binding.EntryFileID}
 }
 
-func keyForJob(job ReacquireJob) reacquireKey {
+func keyForJob(job Job) jobKey {
 	if job.DownloadID != "" {
-		return reacquireKey{arrName: job.ArrName, downloadID: job.DownloadID}
+		return jobKey{arrName: job.ArrName, downloadID: job.DownloadID}
 	}
-	return reacquireKey{arrName: job.ArrName, entryID: job.EntryID, fileID: job.FileID}
+	return jobKey{arrName: job.ArrName, entryID: job.EntryID, fileID: job.FileID}
 }
 
-func (s *Service) completeJobFromIndex(job ReacquireJob) error {
+func (s *Service) completeJobFromIndex(job Job) error {
 	replacementDownloadIDs, ready := s.replacementsForJob(job)
 	if !ready {
 		return nil
 	}
-	_, err := s.updateJob(job.ID, ReacquireStatusReady, func(job *ReacquireJob) {
+	_, err := s.updateJob(job.ID, StatusReady, func(job *Job) {
 		job.ReplacementDownloadIDs = replacementDownloadIDs
 		job.ReplacementDownloadID = replacementDownloadIDs[0]
 		job.LastError = ""
@@ -469,7 +470,7 @@ func (s *Service) completeJobFromIndex(job ReacquireJob) error {
 	return err
 }
 
-func (s *Service) replacementsForJob(job ReacquireJob) ([]string, bool) {
+func (s *Service) replacementsForJob(job Job) ([]string, bool) {
 	downloads := make(map[string]struct{})
 	for _, target := range job.Bindings {
 		var candidates []Binding
@@ -533,18 +534,18 @@ func (s *Service) maintainJobs() {
 	s.jobsMu.RLock()
 	for id, job := range s.jobs {
 		switch {
-		case job.Status.waiting() && now.Sub(job.UpdatedAt) >= reacquireWaitingTimeout:
+		case job.Status.waiting() && now.Sub(job.UpdatedAt) >= waitingTimeout:
 			expire = append(expire, id)
-		case job.Status == ReacquireStatusFailed && terminalAge(now, job) >= reacquireFailureRetention:
+		case job.Status == StatusFailed && terminalAge(now, job) >= failureRetention:
 			prune = append(prune, id)
-		case (job.Status == ReacquireStatusReady || job.Status == ReacquireStatusCancelled) && terminalAge(now, job) >= reacquireSuccessRetention:
+		case (job.Status == StatusReady || job.Status == StatusCancelled) && terminalAge(now, job) >= successRetention:
 			prune = append(prune, id)
 		}
 	}
 	s.jobsMu.RUnlock()
 
 	for _, id := range expire {
-		_, _ = s.updateJob(id, ReacquireStatusFailed, func(job *ReacquireJob) {
+		_, _ = s.updateJob(id, StatusFailed, func(job *Job) {
 			job.LastError = "replacement was not imported before the reacquisition timeout"
 		})
 	}
@@ -560,9 +561,9 @@ func (s *Service) pruneTerminalJob(id string, now time.Time) {
 	if !ok || !job.Status.Terminal() {
 		return
 	}
-	retention := reacquireSuccessRetention
-	if job.Status == ReacquireStatusFailed {
-		retention = reacquireFailureRetention
+	retention := successRetention
+	if job.Status == StatusFailed {
+		retention = failureRetention
 	}
 	if terminalAge(now, job) < retention {
 		return
@@ -572,7 +573,7 @@ func (s *Service) pruneTerminalJob(id string, now time.Time) {
 	}
 }
 
-func terminalAge(now time.Time, job ReacquireJob) time.Duration {
+func terminalAge(now time.Time, job Job) time.Duration {
 	at := job.CompletedAt
 	if at.IsZero() {
 		at = job.UpdatedAt

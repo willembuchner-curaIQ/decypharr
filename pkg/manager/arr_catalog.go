@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -19,7 +19,7 @@ type managedArrCatalog struct {
 // ListManagedFiles returns the managed files an Arr owns. A non-empty entryID
 // reads that one entry: a targeted reindex runs after every completed
 // download, so it must never walk the whole library.
-func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryID string) ([]arr.ManagedFile, error) {
+func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryID string) ([]reacquire.ManagedFile, error) {
 	if entryID != "" {
 		entry, err := c.storage.Get(entryID)
 		if err != nil || entry == nil {
@@ -31,7 +31,7 @@ func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryI
 		return c.entryFiles(entry, arrName)
 	}
 
-	files := make([]arr.ManagedFile, 0)
+	files := make([]reacquire.ManagedFile, 0)
 	var missingIDs []*storage.Entry
 	err := c.storage.ForEachBatch(managedCatalogBatch, func(entries []*storage.Entry) error {
 		if err := ctx.Err(); err != nil {
@@ -67,7 +67,7 @@ func (c managedArrCatalog) ListManagedFiles(ctx context.Context, arrName, entryI
 	return files, nil
 }
 
-func (c managedArrCatalog) entryFiles(entry *storage.Entry, arrName string) ([]arr.ManagedFile, error) {
+func (c managedArrCatalog) entryFiles(entry *storage.Entry, arrName string) ([]reacquire.ManagedFile, error) {
 	if needsFileIDs(entry) {
 		if err := c.storage.AddOrUpdate(entry); err != nil {
 			return nil, err
@@ -76,10 +76,10 @@ func (c managedArrCatalog) entryFiles(entry *storage.Entry, arrName string) ([]a
 	return entryManagedFiles(entry, arrName), nil
 }
 
-func entryManagedFiles(entry *storage.Entry, arrName string) []arr.ManagedFile {
+func entryManagedFiles(entry *storage.Entry, arrName string) []reacquire.ManagedFile {
 	folder := entry.GetFolder()
 	downloadPath := entry.DownloadPath()
-	files := make([]arr.ManagedFile, 0, len(entry.Files))
+	files := make([]reacquire.ManagedFile, 0, len(entry.Files))
 	for fileName, file := range entry.Files {
 		if file == nil || file.Deleted || file.ID == "" {
 			continue
@@ -87,7 +87,7 @@ func entryManagedFiles(entry *storage.Entry, arrName string) []arr.ManagedFile {
 		if file.Name != "" {
 			fileName = file.Name
 		}
-		files = append(files, arr.ManagedFile{
+		files = append(files, reacquire.ManagedFile{
 			ArrName:     arrName,
 			EntryID:     entry.InfoHash,
 			EntryName:   entry.Name,

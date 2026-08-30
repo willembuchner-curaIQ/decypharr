@@ -1,7 +1,8 @@
-package arr
+package reacquire
 
 import (
 	"fmt"
+	"github.com/sirrobot01/decypharr/pkg/arr"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,7 +32,7 @@ func TestMatchLibraryFilesRequiresExactIdentity(t *testing.T) {
 	}
 
 	matches := matchLibraryFiles(
-		[]LibraryFile{{ArrFileID: 42, Path: libraryPath, Size: 5}},
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath, Size: 5}},
 		[]ManagedFile{{EntryID: "entry", FileID: "file", Path: managedPath, Size: 5}},
 	)
 	if len(matches) != 1 {
@@ -43,23 +44,23 @@ func TestMatchLibraryFilesRequiresExactIdentity(t *testing.T) {
 }
 
 func TestHistoryBindingCannotReplaceExactCurrentArrFile(t *testing.T) {
-	instance := &Arr{Name: "movies", Type: Radarr}
-	library := []LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
+	instance := &arr.Arr{Name: "movies", Type: arr.Radarr}
+	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
 	managed := []ManagedFile{
 		{EntryID: "current-entry", FileID: "current-file", DownloadID: "current-download", Path: "/downloads/current/movie.mkv"},
 		{EntryID: "old-entry", FileID: "old-file", DownloadID: "old-download", Path: "/downloads/old/movie.mkv"},
 	}
 	exact := []Binding{{
 		ArrName:     "movies",
-		ArrType:     Radarr,
+		ArrType:     arr.Radarr,
 		EntryID:     "current-entry",
 		EntryFileID: "current-file",
 		DownloadID:  "current-download",
 		ArrFileID:   42,
 		MovieID:     9,
-		Confidence:  BindingConfidenceExactPath,
+		Confidence:  ConfidenceExactPath,
 	}}
-	history := []HistoryRecord{{
+	history := []arr.HistoryRecord{{
 		DownloadID: "old-download",
 		EventType:  "downloadFolderImported",
 		MovieID:    9,
@@ -77,12 +78,12 @@ func TestHistoryBindingCannotReplaceExactCurrentArrFile(t *testing.T) {
 }
 
 func TestLatestUnmanagedImportBlocksOlderHistoryBinding(t *testing.T) {
-	instance := &Arr{Name: "movies", Type: Radarr}
-	library := []LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
+	instance := &arr.Arr{Name: "movies", Type: arr.Radarr}
+	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
 	managed := []ManagedFile{{
 		EntryID: "old-entry", FileID: "old-file", DownloadID: "old-download", Path: "/downloads/old/movie.mkv",
 	}}
-	history := []HistoryRecord{
+	history := []arr.HistoryRecord{
 		{
 			DownloadID: "external-download",
 			EventType:  "downloadFolderImported",
@@ -107,7 +108,7 @@ func TestLatestUnmanagedImportBlocksOlderHistoryBinding(t *testing.T) {
 
 	bindings := bindingsFromHistoryRecords(instance, 2, library, managed, nil, history)
 	if len(bindings) != 0 {
-		t.Fatalf("history bindings = %#v, want latest current import to consume the Arr file", bindings)
+		t.Fatalf("history bindings = %#v, want latest current import to consume the arr.Arr file", bindings)
 	}
 }
 
@@ -129,7 +130,7 @@ func TestMatchLibraryFilesRejectsAmbiguousManagedPath(t *testing.T) {
 	}
 
 	matches := matchLibraryFiles(
-		[]LibraryFile{{ArrFileID: 42, Path: libraryPath, Size: 5}},
+		[]arr.LibraryFile{{ArrFileID: 42, Path: libraryPath, Size: 5}},
 		[]ManagedFile{
 			{EntryID: "entry-1", FileID: "file-1", Path: managedPath, Size: 5},
 			{EntryID: "entry-2", FileID: "file-2", Path: managedPath, Size: 5},
@@ -150,35 +151,35 @@ func TestBindingsFromHistoryUsesExactDroppedPath(t *testing.T) {
 	}))
 	defer server.Close()
 
-	instance := &Arr{Name: "movies", Host: server.URL, Token: "secret", Type: Radarr}
-	library := []LibraryFile{{ArrFileID: 42, Path: "/library/Movie (2025)/Movie.mkv", MovieID: 9}}
+	instance := &arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
+	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/Movie (2025)/Movie.mkv", MovieID: 9}}
 	managed := []ManagedFile{{EntryID: "entry", FileID: "file", DownloadID: "download-1", Path: "/downloads/movie.mkv"}}
 	records, err := (&Indexer{}).historyForManaged(t.Context(), instance, managed, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	bindings := bindingsFromHistoryRecords(instance, 3, library, managed, nil, records)
-	if len(bindings) != 1 || bindings[0].Confidence != BindingConfidenceDownloadHistory {
+	if len(bindings) != 1 || bindings[0].Confidence != ConfidenceDownloadHistory {
 		t.Fatalf("bindings = %#v", bindings)
 	}
 	if bindings[0].ArrInstanceFingerprint != instance.InstanceFingerprint() {
-		t.Fatal("history binding did not capture the current Arr instance fingerprint")
+		t.Fatal("history binding did not capture the current arr.Arr instance fingerprint")
 	}
 }
 
 func TestCarryForwardBindingRequiresCurrentInstanceAndPath(t *testing.T) {
-	instance := &Arr{Name: "movies", Host: "http://radarr.example", Type: Radarr}
-	library := []LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
+	instance := &arr.Arr{Name: "movies", Host: "http://radarr.example", Type: arr.Radarr}
+	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
 	managed := []ManagedFile{{EntryID: "entry", FileID: "file", Path: "/downloads/movie.mkv"}}
 	old := Binding{
 		ArrName:     "movies",
-		ArrType:     Radarr,
+		ArrType:     arr.Radarr,
 		EntryID:     "entry",
 		EntryFileID: "file",
 		ArrFileID:   42,
 		LibraryPath: "/library/movie.mkv",
 		MovieID:     9,
-		Confidence:  BindingConfidenceExactPath,
+		Confidence:  ConfidenceExactPath,
 	}
 
 	if bindings := carryForwardBindings(instance, 2, nil, []Binding{old}, library, managed); len(bindings) != 0 {
@@ -213,7 +214,7 @@ func TestMatchLibraryFilesBindsStrmByIdentity(t *testing.T) {
 	}
 
 	matches := matchLibraryFiles(
-		[]LibraryFile{
+		[]arr.LibraryFile{
 			{ArrFileID: 42, Path: libraryPath, Size: 120},
 			{ArrFileID: 43, Path: foreignPath, Size: 120},
 		},

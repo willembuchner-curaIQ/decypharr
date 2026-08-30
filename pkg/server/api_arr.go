@@ -9,7 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 )
 
 func (s *Server) handleListArrReacquireJobs(w http.ResponseWriter, _ *http.Request) {
@@ -47,13 +47,13 @@ func (s *Server) handleArrReacquire(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var request arr.ReacquireRequest
+	var request reacquire.Request
 	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&request); err != nil {
 		s.sendJSONError(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if request.Cause == "" {
-		request.Cause = arr.ReacquireCauseManual
+		request.Cause = reacquire.CauseManual
 	}
 	request.EntryID = strings.TrimSpace(request.EntryID)
 	request.FileID = strings.TrimSpace(request.FileID)
@@ -84,11 +84,11 @@ func (s *Server) handleRefreshArrIndex(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleArrReacquireError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, arr.ErrBindingNotFound):
+	case errors.Is(err, reacquire.ErrBindingNotFound):
 		s.sendJSONError(w, err.Error(), http.StatusNotFound)
-	case errors.Is(err, arr.ErrBindingUnsafe):
+	case errors.Is(err, reacquire.ErrBindingUnsafe):
 		s.sendJSONError(w, err.Error(), http.StatusConflict)
-	case errors.Is(err, arr.ErrServiceNotStarted), errors.Is(err, arr.ErrServiceClosed):
+	case errors.Is(err, reacquire.ErrServiceNotStarted), errors.Is(err, reacquire.ErrServiceClosed):
 		s.sendJSONError(w, err.Error(), http.StatusServiceUnavailable)
 	default:
 		s.logger.Error().Err(err).Msg("Failed to queue Arr reacquisition")
@@ -96,15 +96,15 @@ func (s *Server) handleArrReacquireError(w http.ResponseWriter, err error) {
 	}
 }
 
-func validateArrReacquireRequest(request arr.ReacquireRequest) string {
+func validateArrReacquireRequest(request reacquire.Request) string {
 	switch {
 	case request.EntryID == "":
 		return "entryId is required"
 	case request.FileID == "":
 		return "fileId is required"
-	case request.Cause != arr.ReacquireCauseStream && request.Cause != arr.ReacquireCauseRepair && request.Cause != arr.ReacquireCauseManual:
+	case request.Cause != reacquire.CauseStream && request.Cause != reacquire.CauseRepair && request.Cause != reacquire.CauseManual:
 		return "cause must be stream, repair, or manual"
-	case request.Strategy != "" && request.Strategy != arr.ReacquireStrategyHistoryFailed && request.Strategy != arr.ReacquireStrategyInteractiveBest && request.Strategy != arr.ReacquireStrategyCommandSearch:
+	case request.Strategy != "" && request.Strategy != reacquire.StrategyHistoryFailed && request.Strategy != reacquire.StrategyInteractiveBest && request.Strategy != reacquire.StrategyCommandSearch:
 		return "strategy must be history_failed, interactive_best, or command_search"
 	default:
 		return ""

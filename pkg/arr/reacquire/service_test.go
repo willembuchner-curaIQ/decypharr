@@ -1,7 +1,8 @@
-package arr
+package reacquire
 
 import (
 	"context"
+	"github.com/sirrobot01/decypharr/pkg/arr"
 	"testing"
 	"time"
 )
@@ -12,7 +13,7 @@ func TestIndexReplacesOneArrGeneration(t *testing.T) {
 	index := NewIndex()
 	sonarr := Binding{
 		ArrName:     "sonarr",
-		ArrType:     Sonarr,
+		ArrType:     arr.Sonarr,
 		EntryID:     "old-entry",
 		EntryFileID: "old-file",
 		DownloadID:  "old-download",
@@ -22,7 +23,7 @@ func TestIndexReplacesOneArrGeneration(t *testing.T) {
 	}
 	radarr := Binding{
 		ArrName:     "radarr",
-		ArrType:     Radarr,
+		ArrType:     arr.Radarr,
 		EntryID:     "movie-entry",
 		EntryFileID: "movie-file",
 		DownloadID:  "movie-download",
@@ -47,13 +48,13 @@ func TestIndexReplacesOneArrGeneration(t *testing.T) {
 	}
 
 	if _, ok := index.Lookup("old-entry", "old-file"); ok {
-		t.Fatal("stale Sonarr binding remained indexed")
+		t.Fatal("stale arr.Sonarr binding remained indexed")
 	}
 	if bindings := index.ByEpisodeID("sonarr", 102); len(bindings) != 1 || bindings[0].Generation != 2 {
 		t.Fatalf("episode reverse lookup = %#v", bindings)
 	}
 	if _, ok := index.Lookup("movie-entry", "movie-file"); !ok {
-		t.Fatal("replacing Sonarr generation removed Radarr binding")
+		t.Fatal("replacing arr.Sonarr generation removed arr.Radarr binding")
 	}
 }
 
@@ -61,8 +62,8 @@ type waitingReacquireHandler struct {
 	called chan string
 }
 
-func (handler *waitingReacquireHandler) Reacquire(_ context.Context, job ReacquireJob, progress JobProgress) error {
-	if err := progress.Update(ReacquireStatusWaitingForImport, nil); err != nil {
+func (handler *waitingReacquireHandler) Reacquire(_ context.Context, job Job, progress JobProgress) error {
+	if err := progress.Update(StatusWaitingForImport, nil); err != nil {
 		return err
 	}
 	handler.called <- job.ID
@@ -76,13 +77,13 @@ type delayedWaitingHandler struct {
 
 type unknownMutationHandler struct{}
 
-func (unknownMutationHandler) Reacquire(_ context.Context, _ ReacquireJob, progress JobProgress) error {
+func (unknownMutationHandler) Reacquire(_ context.Context, _ Job, progress JobProgress) error {
 	now := time.Now().UTC()
-	if err := progress.UpdateDurable(ReacquireStatusSearching, func(job *ReacquireJob) {
-		setMutation(job, ReacquireMutation{
+	if err := progress.UpdateDurable(StatusSearching, func(job *Job) {
+		setMutation(job, Mutation{
 			Key:              "movie_search:7",
-			Kind:             ReacquireMutationMovieSearch,
-			State:            ReacquireMutationIntent,
+			Kind:             MutationMovieSearch,
+			State:            MutationIntent,
 			CommandName:      "MoviesSearch",
 			MovieIDs:         []int{7},
 			IntentAt:         now.Add(-time.Second),
@@ -92,13 +93,13 @@ func (unknownMutationHandler) Reacquire(_ context.Context, _ ReacquireJob, progr
 	}); err != nil {
 		return err
 	}
-	return unknownMutationOutcome(context.DeadlineExceeded, time.Hour)
+	return arr.UnknownMutationOutcome(context.DeadlineExceeded, time.Hour)
 }
 
-func (handler *delayedWaitingHandler) Reacquire(_ context.Context, _ ReacquireJob, progress JobProgress) error {
+func (handler *delayedWaitingHandler) Reacquire(_ context.Context, _ Job, progress JobProgress) error {
 	close(handler.started)
 	<-handler.release
-	return progress.Update(ReacquireStatusWaitingForImport, nil)
+	return progress.Update(StatusWaitingForImport, nil)
 }
 
 func TestServiceDeduplicatesAndPersistsReacquireJobs(t *testing.T) {
@@ -114,7 +115,7 @@ func TestServiceDeduplicatesAndPersistsReacquireJobs(t *testing.T) {
 
 	broken := Binding{
 		ArrName:                "radarr",
-		ArrType:                Radarr,
+		ArrType:                arr.Radarr,
 		ArrInstanceFingerprint: testArrInstanceFingerprint,
 		EntryID:                "broken-entry",
 		EntryFileID:            "broken-file",
@@ -122,12 +123,12 @@ func TestServiceDeduplicatesAndPersistsReacquireJobs(t *testing.T) {
 		ArrFileID:              40,
 		LibraryPath:            "/library/movie.mkv",
 		MovieID:                7,
-		Confidence:             BindingConfidenceExactPath,
+		Confidence:             ConfidenceExactPath,
 	}
 	if err := service.UpsertBinding(broken); err != nil {
 		t.Fatal(err)
 	}
-	request := ReacquireRequest{EntryID: broken.EntryID, FileID: broken.EntryFileID, Cause: ReacquireCauseStream}
+	request := Request{EntryID: broken.EntryID, FileID: broken.EntryFileID, Cause: CauseStream}
 	first, err := service.Reacquire(request)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +149,7 @@ func TestServiceDeduplicatesAndPersistsReacquireJobs(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("reacquire handler was not called")
 	}
-	job := waitForJobStatus(t, service, first.ID, ReacquireStatusWaitingForImport)
+	job := waitForJobStatus(t, service, first.ID, StatusWaitingForImport)
 	if !job.CompletedAt.IsZero() {
 		t.Fatal("waiting job was marked complete")
 	}
@@ -161,7 +162,7 @@ func TestServiceDeduplicatesAndPersistsReacquireJobs(t *testing.T) {
 	if err := service.UpsertBinding(replacement); err != nil {
 		t.Fatal(err)
 	}
-	job = waitForJobStatus(t, service, first.ID, ReacquireStatusReady)
+	job = waitForJobStatus(t, service, first.ID, StatusReady)
 	if job.ReplacementDownloadID != replacement.DownloadID {
 		t.Fatalf("replacement download ID = %q", job.ReplacementDownloadID)
 	}
@@ -177,7 +178,7 @@ func TestServiceDeduplicatesAndPersistsReacquireJobs(t *testing.T) {
 	if err := reopened.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if persisted, ok := reopened.Job(first.ID); !ok || persisted.Status != ReacquireStatusReady {
+	if persisted, ok := reopened.Job(first.ID); !ok || persisted.Status != StatusReady {
 		t.Fatalf("persisted job = %#v, found = %v", persisted, ok)
 	}
 	if _, ok := reopened.Lookup(replacement.EntryID, replacement.EntryFileID); !ok {
@@ -196,7 +197,7 @@ func TestServicePersistsUnknownMutationForRestartReconciliation(t *testing.T) {
 	}
 	binding := Binding{
 		ArrName:                "radarr",
-		ArrType:                Radarr,
+		ArrType:                arr.Radarr,
 		ArrInstanceFingerprint: testArrInstanceFingerprint,
 		EntryID:                "entry",
 		EntryFileID:            "file",
@@ -204,30 +205,30 @@ func TestServicePersistsUnknownMutationForRestartReconciliation(t *testing.T) {
 		ArrFileID:              7,
 		LibraryPath:            "/library/movie.mkv",
 		MovieID:                7,
-		Confidence:             BindingConfidenceExactPath,
+		Confidence:             ConfidenceExactPath,
 	}
 	if err := service.UpsertBinding(binding); err != nil {
 		t.Fatal(err)
 	}
-	created, err := service.Reacquire(ReacquireRequest{
+	created, err := service.Reacquire(Request{
 		EntryID: binding.EntryID,
 		FileID:  binding.EntryFileID,
-		Cause:   ReacquireCauseStream,
+		Cause:   CauseStream,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	deadline := time.Now().Add(2 * time.Second)
-	var queued ReacquireJob
+	var queued Job
 	for time.Now().Before(deadline) {
 		queued, _ = service.Job(created.ID)
-		if queued.Status == ReacquireStatusQueued && !queued.RetryAt.IsZero() {
+		if queued.Status == StatusQueued && !queued.RetryAt.IsZero() {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if queued.Status != ReacquireStatusQueued || queued.RetryAt.IsZero() || len(queued.Mutations) != 1 {
+	if queued.Status != StatusQueued || queued.RetryAt.IsZero() || len(queued.Mutations) != 1 {
 		t.Fatalf("queued job = %#v", queued)
 	}
 	if err := service.Close(); err != nil {
@@ -243,7 +244,7 @@ func TestServicePersistsUnknownMutationForRestartReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 	persisted, ok := reopened.Job(created.ID)
-	if !ok || persisted.Status != ReacquireStatusQueued || persisted.RetryAt.IsZero() || len(persisted.Mutations) != 1 {
+	if !ok || persisted.Status != StatusQueued || persisted.RetryAt.IsZero() || len(persisted.Mutations) != 1 {
 		t.Fatalf("persisted job = %#v, found = %v", persisted, ok)
 	}
 }
@@ -261,7 +262,7 @@ func TestWaitingTransitionFindsExistingCompleteEpisodeReplacement(t *testing.T) 
 
 	broken := Binding{
 		ArrName:                "sonarr",
-		ArrType:                Sonarr,
+		ArrType:                arr.Sonarr,
 		ArrInstanceFingerprint: testArrInstanceFingerprint,
 		EntryID:                "broken-entry",
 		EntryFileID:            "broken-file",
@@ -270,7 +271,7 @@ func TestWaitingTransitionFindsExistingCompleteEpisodeReplacement(t *testing.T) 
 		LibraryPath:            "/library/episode.mkv",
 		SeriesID:               7,
 		EpisodeIDs:             []int{101, 102},
-		Confidence:             BindingConfidenceExactPath,
+		Confidence:             ConfidenceExactPath,
 	}
 	if err := service.UpsertBinding(broken); err != nil {
 		t.Fatal(err)
@@ -283,10 +284,10 @@ func TestWaitingTransitionFindsExistingCompleteEpisodeReplacement(t *testing.T) 
 	if err := service.UpsertBinding(sibling); err != nil {
 		t.Fatal(err)
 	}
-	job, err := service.Reacquire(ReacquireRequest{
+	job, err := service.Reacquire(Request{
 		EntryID: broken.EntryID,
 		FileID:  broken.EntryFileID,
-		Cause:   ReacquireCauseStream,
+		Cause:   CauseStream,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +308,7 @@ func TestWaitingTransitionFindsExistingCompleteEpisodeReplacement(t *testing.T) 
 		t.Fatal(err)
 	}
 	close(handler.release)
-	waitForJobStatus(t, service, job.ID, ReacquireStatusWaitingForImport)
+	waitForJobStatus(t, service, job.ID, StatusWaitingForImport)
 
 	second := first
 	second.EntryID = "replacement-entry-2"
@@ -317,7 +318,7 @@ func TestWaitingTransitionFindsExistingCompleteEpisodeReplacement(t *testing.T) 
 	if err := service.UpsertBinding(second); err != nil {
 		t.Fatal(err)
 	}
-	waitForJobStatus(t, service, job.ID, ReacquireStatusWaitingForImport)
+	waitForJobStatus(t, service, job.ID, StatusWaitingForImport)
 
 	third := first
 	third.EntryID = "replacement-entry-3"
@@ -327,7 +328,7 @@ func TestWaitingTransitionFindsExistingCompleteEpisodeReplacement(t *testing.T) 
 	if err := service.UpsertBinding(third); err != nil {
 		t.Fatal(err)
 	}
-	ready := waitForJobStatus(t, service, job.ID, ReacquireStatusReady)
+	ready := waitForJobStatus(t, service, job.ID, StatusReady)
 	if ready.ReplacementDownloadID != "replacement-download" {
 		t.Fatalf("replacement download ID = %q", ready.ReplacementDownloadID)
 	}
@@ -347,7 +348,7 @@ func TestWaitingJobExpiresAndReleasesDeduplicationKey(t *testing.T) {
 	}
 	binding := Binding{
 		ArrName:                "radarr",
-		ArrType:                Radarr,
+		ArrType:                arr.Radarr,
 		ArrInstanceFingerprint: testArrInstanceFingerprint,
 		EntryID:                "entry",
 		EntryFileID:            "file",
@@ -355,21 +356,21 @@ func TestWaitingJobExpiresAndReleasesDeduplicationKey(t *testing.T) {
 		ArrFileID:              7,
 		LibraryPath:            "/library/movie.mkv",
 		MovieID:                8,
-		Confidence:             BindingConfidenceExactPath,
+		Confidence:             ConfidenceExactPath,
 	}
 	if err := service.UpsertBinding(binding); err != nil {
 		t.Fatal(err)
 	}
-	first, err := service.Reacquire(ReacquireRequest{EntryID: "entry", FileID: "file", Cause: ReacquireCauseRepair})
+	first, err := service.Reacquire(Request{EntryID: "entry", FileID: "file", Cause: CauseRepair})
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitForJobStatus(t, service, first.ID, ReacquireStatusWaitingForImport)
+	waitForJobStatus(t, service, first.ID, StatusWaitingForImport)
 
-	service.now = func() time.Time { return base.Add(reacquireWaitingTimeout + time.Minute) }
+	service.now = func() time.Time { return base.Add(waitingTimeout + time.Minute) }
 	service.maintainJobs()
-	waitForJobStatus(t, service, first.ID, ReacquireStatusFailed)
-	second, err := service.Reacquire(ReacquireRequest{EntryID: "entry", FileID: "file", Cause: ReacquireCauseRepair})
+	waitForJobStatus(t, service, first.ID, StatusFailed)
+	second, err := service.Reacquire(Request{EntryID: "entry", FileID: "file", Cause: CauseRepair})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +379,7 @@ func TestWaitingJobExpiresAndReleasesDeduplicationKey(t *testing.T) {
 	}
 }
 
-func waitForJobStatus(t *testing.T, service *Service, id string, status ReacquireStatus) ReacquireJob {
+func waitForJobStatus(t *testing.T, service *Service, id string, status Status) Job {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -390,5 +391,5 @@ func waitForJobStatus(t *testing.T, service *Service, id string, status Reacquir
 	}
 	job, _ := service.Job(id)
 	t.Fatalf("job status = %q, want %q", job.Status, status)
-	return ReacquireJob{}
+	return Job{}
 }

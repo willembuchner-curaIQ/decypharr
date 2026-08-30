@@ -101,7 +101,7 @@ func (a *Arr) GrabRelease(ctx context.Context, release Release) error {
 	if err != nil {
 		err = fmt.Errorf("grab release %q: %w", release.Title, err)
 		if ambiguousMutationRequest(resp, err) {
-			return unknownMutationOutcome(err, 0)
+			return UnknownMutationOutcome(err, 0)
 		}
 		return err
 	}

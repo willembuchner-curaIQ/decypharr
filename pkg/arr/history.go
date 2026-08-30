@@ -4,16 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	gourl "net/url"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
 )
-
-type QueueAction string
 
 const (
 	QueueActionNone              QueueAction = ""                   // leave the item in the queue
@@ -21,54 +17,6 @@ const (
 	QueueActionBlocklist         QueueAction = "blacklist"          // blocklist + remove, do NOT re-search
 	QueueActionBlocklistResearch QueueAction = "blacklist_research" // blocklist + remove + re-search
 )
-
-// actionFromConfig maps a config rule action string to a QueueAction. Unknown
-// or empty strings resolve to QueueActionNone (ignore).
-func actionFromConfig(s string) QueueAction {
-	switch s {
-	case string(QueueActionImport):
-		return QueueActionImport
-	case string(QueueActionBlocklist):
-		return QueueActionBlocklist
-	case string(QueueActionBlocklistResearch):
-		return QueueActionBlocklistResearch
-	default:
-		return QueueActionNone
-	}
-}
-
-// catalogMatchers holds the hardcoded predicates for built-in catalog rules,
-// keyed by config.QueueCleanupRule.ID. text is the lowercased join of every
-// statusMessages title + message for the queue item.
-var catalogMatchers = map[string]func(q QueueSchema, text string) bool{
-	"failed_download": func(q QueueSchema, _ string) bool {
-		return strings.EqualFold(q.Status, "failed")
-	},
-	"title_mismatch": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "title mismatch")
-	},
-	"matched_by_id": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "matched to") && strings.Contains(text, "by id")
-	},
-	"unable_to_parse": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "unable to parse download")
-	},
-	"no_eligible_files": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "no files found are eligible")
-	},
-	"episodes_missing": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "not imported or missing from the release")
-	},
-	"file_empty": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "file is empty")
-	},
-	"invalid_local_path": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "is not a valid local path")
-	},
-	"not_grabbed": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "not in a category")
-	},
-}
 
 type HistorySchema struct {
 	Page          int             `json:"page"`
@@ -91,37 +39,6 @@ type HistoryRecord struct {
 	Date        time.Time         `json:"date,omitzero"`
 }
 
-type QueueResponseScheme struct {
-	Page          int           `json:"page"`
-	PageSize      int           `json:"pageSize"`
-	SortKey       string        `json:"sortKey"`
-	SortDirection string        `json:"sortDirection"`
-	TotalRecords  int           `json:"totalRecords"`
-	Records       []QueueSchema `json:"records"`
-}
-
-type QueueSchema struct {
-	SeriesId              int    `json:"seriesId"`
-	EpisodeId             int    `json:"episodeId"`
-	SeasonNumber          int    `json:"seasonNumber"`
-	Title                 string `json:"title"`
-	Status                string `json:"status"`
-	TrackedDownloadStatus string `json:"trackedDownloadStatus"`
-	TrackedDownloadState  string `json:"trackedDownloadState"`
-	StatusMessages        []struct {
-		Title    string   `json:"title"`
-		Messages []string `json:"messages"`
-	} `json:"statusMessages"`
-	DownloadId                          string `json:"downloadId"`
-	Protocol                            string `json:"protocol"`
-	DownloadClient                      string `json:"downloadClient"`
-	DownloadClientHasPostImportCategory bool   `json:"downloadClientHasPostImportCategory"`
-	Indexer                             string `json:"indexer"`
-	OutputPath                          string `json:"outputPath"`
-	EpisodeHasFile                      bool   `json:"episodeHasFile"`
-	Id                                  int    `json:"id"`
-}
-
 func (a *Arr) GetHistory(downloadId, eventType string) *HistorySchema {
 	query := gourl.Values{}
 	if downloadId != "" {
@@ -139,118 +56,6 @@ func (a *Arr) GetHistory(downloadId, eventType string) *HistorySchema {
 		return nil
 	}
 	return data
-}
-
-func (a *Arr) GetQueue() []QueueSchema {
-	query := gourl.Values{}
-	query.Add("page", "1")
-	query.Add("pageSize", "200")
-	results := make([]QueueSchema, 0)
-
-	for {
-		url := "api/v3/queue" + "?" + query.Encode()
-		var data QueueResponseScheme
-		resp, err := a.Request(http.MethodGet, url, nil, &data)
-		if err != nil {
-			break
-		}
-		if resp.StatusCode != http.StatusOK {
-			break
-		}
-
-		results = append(results, data.Records...)
-
-		if len(results) >= data.TotalRecords {
-			break
-		}
-
-		query.Set("page", strconv.Itoa(data.Page+1))
-	}
-
-	return results
-}
-
-// queueItemText returns the lowercased join of every statusMessages title and
-// message for a queue item — the haystack all message-based rules match against.
-func queueItemText(q QueueSchema) string {
-	var b strings.Builder
-	for _, m := range q.StatusMessages {
-		b.WriteString(m.Title)
-		b.WriteByte(' ')
-		b.WriteString(strings.Join(m.Messages, " "))
-		b.WriteByte(' ')
-	}
-	return strings.ToLower(b.String())
-}
-
-// resolveAction decides what to do with a single queue item given the ordered
-// cleanup rule set. Only failed downloads and items flagged warning/error are
-// considered; everything else is left alone. Rules are evaluated in order and
-// the first match wins. No match resolves to QueueActionNone (ignore).
-func resolveAction(q QueueSchema, rules []config.QueueCleanupRule) QueueAction {
-	status := strings.ToLower(q.TrackedDownloadStatus)
-	if !strings.EqualFold(q.Status, "failed") && status != "warning" && status != "error" {
-		return QueueActionNone
-	}
-
-	text := queueItemText(q)
-	for _, r := range rules {
-		matched := false
-		if r.ID != "" {
-			if m, ok := catalogMatchers[r.ID]; ok {
-				matched = m(q, text)
-			}
-		} else if s := strings.ToLower(strings.TrimSpace(r.Match)); s != "" {
-			matched = strings.Contains(text, s)
-		}
-		if matched {
-			return actionFromConfig(r.Action)
-		}
-	}
-	return QueueActionNone
-}
-
-func (a *Arr) CleanupQueue() error {
-	if a == nil {
-		return fmt.Errorf("arr not configured")
-	}
-	l := logger.New("arr")
-	rules := config.Get().QueueCleanup.Rules
-
-	queue := a.GetQueue()
-	blacklists := make(map[int]bool)        // blocklist + remove, no re-search
-	blacklistResearch := make(map[int]bool) // blocklist + remove + re-search
-	manualImports := make(map[string]bool)  // force manual import
-	for _, q := range queue {
-		switch resolveAction(q, rules) {
-		case QueueActionBlocklist:
-			blacklists[q.Id] = true
-		case QueueActionBlocklistResearch:
-			blacklistResearch[q.Id] = true
-		case QueueActionImport:
-			manualImports[q.DownloadId] = true
-		}
-	}
-
-	if len(blacklistResearch) > 0 {
-		if err := a.removeQueueItems(blacklistResearch, true, false); err != nil {
-			l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: blacklist + research failed")
-		}
-	}
-	if len(blacklists) > 0 {
-		if err := a.removeQueueItems(blacklists, true, true); err != nil {
-			l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: blacklist failed")
-		}
-	}
-	if len(manualImports) > 0 {
-		go func() {
-			if err := a.ManualImportItems(manualImports); err != nil {
-				l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: manual import failed")
-			}
-		}()
-	}
-
-	return nil
 }
 
 // FindGrabHistoryID returns the ID and downloadId of the most recent "grabbed"
@@ -306,39 +111,207 @@ func (a *Arr) MarkHistoryFailed(historyID int) error {
 	return a.MarkHistoryFailedCtx(context.Background(), historyID)
 }
 
-// removeQueueItems bulk-removes queue items from the arr. blocklist controls
-// whether the releases are added to the blocklist; skipRedownload controls
-// whether a re-search is triggered (false = re-search, the "research" action).
-func (a *Arr) removeQueueItems(items map[int]bool, blocklist, skipRedownload bool) error {
-	queueIDs := make([]int, 0, len(items))
-	for id := range items {
-		queueIDs = append(queueIDs, id)
+// DataValue reads one field of a history record's data map. Arr casing is not
+// stable across versions, so the lookup is case-insensitive.
+func (record HistoryRecord) DataValue(key string) (string, bool) {
+	for currentKey, value := range record.Data {
+		if strings.EqualFold(currentKey, key) {
+			return value, true
+		}
 	}
-	payload := struct {
-		Ids []int `json:"ids"`
-	}{
-		Ids: queueIDs,
-	}
-	query := gourl.Values{}
-	query.Add("removeFromClient", "true")
-	query.Add("blocklist", strconv.FormatBool(blocklist))
-	query.Add("skipRedownload", strconv.FormatBool(skipRedownload))
-	query.Add("changeCategory", "false")
-	url := "api/v3/queue/bulk" + "?" + query.Encode()
-
-	_, err := a.Request(http.MethodDelete, url, payload, nil)
-	if err != nil {
-		return err
-	}
-	return nil
+	return "", false
 }
 
-func (a *Arr) ManualImportItems(items map[string]bool) error {
-	for downloadId := range items {
-		if err := a.Import(downloadId); err != nil {
-			// log error
-			fmt.Println(err)
+const (
+	HistoryEventGrabbed        = "grabbed"
+	HistoryEventDownloadFailed = "downloadFailed"
+	historyPageSize            = 100
+	importHistoryPageSize      = 1000
+	importHistoryMaxPages      = 20
+	importHistoryEventType     = 3
+	grabbedHistoryEventType    = 1
+)
+
+// ImportHistory returns the import records for the given download IDs, newest
+// first. The scan is bounded: a large library has far more history than the
+// index needs, so it keeps only wanted records and stops once every download
+// is found or the page budget runs out.
+func (a *Arr) ImportHistory(ctx context.Context, downloadIDs map[string]struct{}) ([]HistoryRecord, error) {
+	if a == nil {
+		return nil, fmt.Errorf("arr not configured")
+	}
+	if len(downloadIDs) == 0 {
+		return nil, nil
+	}
+
+	records := make([]HistoryRecord, 0)
+	found := make(map[string]struct{}, len(downloadIDs))
+	fetched := 0
+	for page := 1; page <= importHistoryMaxPages; page++ {
+		query := url.Values{}
+		query.Set("page", strconv.Itoa(page))
+		query.Set("pageSize", strconv.Itoa(importHistoryPageSize))
+		query.Set("sortKey", "date")
+		query.Set("sortDirection", "descending")
+		query.Set("eventType", strconv.Itoa(importHistoryEventType))
+
+		var history HistorySchema
+		resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &history)
+		if err != nil {
+			return nil, fmt.Errorf("import history lookup: %w", err)
 		}
+		if err := expectStatus(resp, http.StatusOK); err != nil {
+			return nil, fmt.Errorf("import history lookup: %w", err)
+		}
+
+		fetched += len(history.Records)
+		for _, record := range history.Records {
+			if _, wanted := downloadIDs[record.DownloadID]; !wanted {
+				continue
+			}
+			if !strings.EqualFold(record.EventType, "downloadFolderImported") {
+				continue
+			}
+			records = append(records, record)
+			found[record.DownloadID] = struct{}{}
+		}
+		if len(found) == len(downloadIDs) || len(history.Records) == 0 || fetched >= history.TotalRecords {
+			break
+		}
+	}
+	return records, nil
+}
+
+func (a *Arr) HistoryByDownloadID(ctx context.Context, downloadID, eventType string) ([]HistoryRecord, error) {
+	if a == nil {
+		return nil, fmt.Errorf("arr not configured")
+	}
+	downloadID = strings.TrimSpace(downloadID)
+	if downloadID == "" {
+		return nil, fmt.Errorf("history lookup: download ID is required")
+	}
+
+	records := make([]HistoryRecord, 0)
+	fetched := 0
+	for page := 1; ; page++ {
+		query := url.Values{}
+		query.Set("page", strconv.Itoa(page))
+		query.Set("pageSize", strconv.Itoa(historyPageSize))
+		query.Set("sortKey", "date")
+		query.Set("sortDirection", "descending")
+		query.Set("downloadId", downloadID)
+
+		var history HistorySchema
+		resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &history)
+		if err != nil {
+			return nil, fmt.Errorf("history lookup for download %q: %w", downloadID, err)
+		}
+		if err := expectStatus(resp, http.StatusOK); err != nil {
+			return nil, fmt.Errorf("history lookup for download %q: %w", downloadID, err)
+		}
+
+		fetched += len(history.Records)
+		for _, record := range history.Records {
+			if record.DownloadID != downloadID {
+				continue
+			}
+			if eventType == "" || strings.EqualFold(record.EventType, eventType) {
+				records = append(records, record)
+			}
+		}
+
+		if len(history.Records) == 0 || fetched >= history.TotalRecords {
+			break
+		}
+	}
+	return records, nil
+}
+
+func (a *Arr) FindGrabHistoryByDownloadID(ctx context.Context, downloadID string) (HistoryRecord, bool, error) {
+	return a.findHistoryByDownloadID(ctx, downloadID, HistoryEventGrabbed)
+}
+
+func (a *Arr) FindDownloadFailedHistoryByDownloadID(ctx context.Context, downloadID string) (HistoryRecord, bool, error) {
+	return a.findHistoryByDownloadID(ctx, downloadID, HistoryEventDownloadFailed)
+}
+
+func (a *Arr) GrabHistorySince(ctx context.Context, since time.Time) ([]HistoryRecord, error) {
+	if a == nil {
+		return nil, fmt.Errorf("arr not configured")
+	}
+	records := make([]HistoryRecord, 0)
+	fetched := 0
+	for page := 1; ; page++ {
+		query := url.Values{}
+		query.Set("page", strconv.Itoa(page))
+		query.Set("pageSize", strconv.Itoa(historyPageSize))
+		query.Set("sortKey", "date")
+		query.Set("sortDirection", "descending")
+		query.Set("eventType", strconv.Itoa(grabbedHistoryEventType))
+
+		var history HistorySchema
+		resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &history)
+		if err != nil {
+			return nil, fmt.Errorf("grab history lookup: %w", err)
+		}
+		if err := expectStatus(resp, http.StatusOK); err != nil {
+			return nil, fmt.Errorf("grab history lookup: %w", err)
+		}
+
+		fetched += len(history.Records)
+		pageReachedOlderRecord := false
+		for _, record := range history.Records {
+			if !strings.EqualFold(record.EventType, HistoryEventGrabbed) {
+				continue
+			}
+			if !record.Date.IsZero() && record.Date.Before(since) {
+				pageReachedOlderRecord = true
+				continue
+			}
+			records = append(records, record)
+		}
+		if pageReachedOlderRecord || len(history.Records) == 0 || fetched >= history.TotalRecords {
+			break
+		}
+	}
+	return records, nil
+}
+
+func (a *Arr) HasDownloadFailedHistory(ctx context.Context, downloadID string) (bool, error) {
+	_, found, err := a.FindDownloadFailedHistoryByDownloadID(ctx, downloadID)
+	return found, err
+}
+
+func (a *Arr) findHistoryByDownloadID(ctx context.Context, downloadID, eventType string) (HistoryRecord, bool, error) {
+	records, err := a.HistoryByDownloadID(ctx, downloadID, eventType)
+	if err != nil {
+		return HistoryRecord{}, false, err
+	}
+	if len(records) == 0 {
+		return HistoryRecord{}, false, nil
+	}
+	return records[0], true, nil
+}
+
+func (a *Arr) MarkHistoryFailedCtx(ctx context.Context, historyID int) error {
+	if a == nil {
+		return fmt.Errorf("arr not configured")
+	}
+	if historyID <= 0 {
+		return fmt.Errorf("mark history failed: invalid history ID %d", historyID)
+	}
+
+	endpoint := fmt.Sprintf("api/v3/history/failed/%d", historyID)
+	resp, err := a.requestMutationCtx(ctx, http.MethodPost, endpoint, nil, nil)
+	if err != nil {
+		err = fmt.Errorf("mark history %d failed: %w", historyID, err)
+		if ambiguousMutationRequest(resp, err) {
+			return UnknownMutationOutcome(err, 0)
+		}
+		return err
+	}
+	if err := expectSuccess(resp); err != nil {
+		return fmt.Errorf("mark history %d failed: %w", historyID, err)
 	}
 	return nil
 }

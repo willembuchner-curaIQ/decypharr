@@ -6,6 +6,7 @@ import (
 	"github.com/go-co-op/gocron/v2"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/hearsay"
@@ -50,7 +51,7 @@ func (m *Manager) Arr() *arr.Storage {
 	return m.arr
 }
 
-func (m *Manager) ArrService() *arr.Service {
+func (m *Manager) ArrService() *reacquire.Service {
 	return m.arrService
 }
 

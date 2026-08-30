@@ -18,6 +18,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
 	"github.com/sirrobot01/decypharr/pkg/hearsay"
@@ -37,8 +38,8 @@ type Manager struct {
 	repair       *repair.Service
 	clients      *xsync.Map[string, debrid.Client]
 	arr          *arr.Storage
-	arrService   *arr.Service
-	arrIndexer   *arr.Indexer
+	arrService   *reacquire.Service
+	arrIndexer   *reacquire.Indexer
 	logger       zerolog.Logger
 	ready        chan struct{}
 	readyOnce    sync.Once
@@ -280,9 +281,9 @@ func (m *Manager) init() {
 }
 
 func (m *Manager) initArrServices() {
-	service, err := arr.NewService(arr.ServiceOptions{
+	service, err := reacquire.NewService(reacquire.ServiceOptions{
 		Directory: filepath.Join(config.GetMainPath(), "db"),
-		Handler:   arr.NewReacquireHandler(m.arr, m),
+		Handler:   reacquire.NewHandler(m.arr, m),
 	})
 	if err != nil {
 		m.logger.Error().Err(err).Msg("Failed to initialize Arr reacquisition service")
@@ -292,7 +293,7 @@ func (m *Manager) initArrServices() {
 		return
 	}
 	m.arrService = service
-	m.arrIndexer = arr.NewIndexer(m.arr, managedArrCatalog{storage: m.storage}, service)
+	m.arrIndexer = reacquire.NewIndexer(m.arr, managedArrCatalog{storage: m.storage}, service)
 	m.SetArrRecovery(service)
 }
 

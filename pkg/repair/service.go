@@ -13,6 +13,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
+	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	"github.com/sirrobot01/decypharr/pkg/hearsay"
 	"github.com/sirrobot01/decypharr/pkg/notifications"
@@ -70,7 +71,7 @@ type Backend interface {
 }
 
 type Reacquirer interface {
-	Reacquire(arr.ReacquireRequest) (*arr.ReacquireJob, error)
+	Reacquire(reacquire.Request) (*reacquire.Job, error)
 }
 
 type Dependencies struct {
