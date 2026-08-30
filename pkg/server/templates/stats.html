@@ -1261,6 +1261,18 @@
 
             nntpProviders.forEach(provider => {
                 const speedTest = provider.speed_test;
+                const providerMaxConns = Math.max(Number(provider.max_connections) || 0, 0);
+                const providerActive = Math.max(Number(provider.active) || 0, 0);
+                const providerIdle = Math.max(Number(provider.idle) || 0, 0);
+                const providerActivePercent = providerMaxConns > 0
+                    ? Math.min((providerActive / providerMaxConns) * 100, 100)
+                    : 0;
+                const providerIdlePercent = providerMaxConns > 0
+                    ? Math.min((providerIdle / providerMaxConns) * 100, 100 - providerActivePercent)
+                    : 0;
+                const providerUtilizationPercent = providerMaxConns > 0
+                    ? Math.min(((providerActive + providerIdle) / providerMaxConns) * 100, 100)
+                    : 0;
                 let speedResultHtml = '';
                 if (speedTest && speedTest.tested_at) {
                     const testedAt = new Date(speedTest.tested_at).toLocaleTimeString();
@@ -1283,7 +1295,7 @@
                                         <span class="font-medium text-xs">${provider.host}</span>
                                         <span class="badge ${provider.ssl ? 'badge-success' : 'badge-warning'} badge-xs">${provider.ssl ? 'SSL' : 'Plain'}</span>
                                     </div>
-                                    <p class="text-xs text-base-content/70">${provider.username ? provider.username + ' · ' : ''}${provider.max_connections || 0} connections</p>
+                                    <p class="text-xs text-base-content/70">${provider.username ? provider.username + ' · ' : ''}${providerMaxConns} connections</p>
                                 </div>
                                 <div class="flex flex-col items-end gap-1">
                                     ${speedResultHtml}
@@ -1294,6 +1306,28 @@
                                         onclick="runSpeedTest('${provider.id || provider.host}');">
                                         Test Speed
                                     </button>
+                                </div>
+                            </div>
+                            <div class="mt-3">
+                                <div class="flex items-center justify-between mb-1 text-xs">
+                                    <span class="font-medium">Pool Utilization</span>
+                                    <span class="font-mono">${providerUtilizationPercent.toFixed(1)}%</span>
+                                </div>
+                                <div class="w-full bg-base-300 rounded-full h-2 relative overflow-hidden">
+                                    <div class="absolute h-full bg-success transition-all duration-300"
+                                         style="width: ${providerActivePercent}%"></div>
+                                    <div class="absolute h-full bg-primary/80 transition-all duration-300"
+                                         style="left: ${providerActivePercent}%; width: ${providerIdlePercent}%"></div>
+                                </div>
+                                <div class="flex gap-3 mt-1 text-xs text-base-content/70 flex-wrap">
+                                    <span class="flex items-center gap-1">
+                                        <span class="w-2 h-2 bg-success rounded"></span>
+                                        Active: ${providerActive}
+                                    </span>
+                                    <span class="flex items-center gap-1">
+                                        <span class="w-2 h-2 bg-primary/80 rounded"></span>
+                                        Idle: ${providerIdle}
+                                    </span>
                                 </div>
                             </div>
                             <div id="speed-result-${sanitizeProviderId(provider.id || provider.host)}" class="text-xs mt-1"></div>
