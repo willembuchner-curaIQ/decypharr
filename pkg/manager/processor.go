@@ -21,7 +21,7 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 	if importReq == nil || importReq.Magnet == nil {
 		return fmt.Errorf("magnet is required")
 	}
-	if importReq.Arr == nil {
+	if importReq.Arr.Name == "" {
 		return fmt.Errorf("arr is required")
 	}
 

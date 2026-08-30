@@ -83,7 +83,7 @@ func (r *Service) healBrokenEntry(ctx context.Context, run *storage.RepairRun, s
 		if ctx != nil && ctx.Err() != nil {
 			break
 		}
-		if r.repairArrFiles(ctx, r.arrInstance(arrName), files) {
+		if r.repairArrFiles(ctx, arrName, files) {
 			initiated += len(files)
 			repaired[arrName] = struct{}{}
 			continue
@@ -106,9 +106,9 @@ func (r *Service) healBrokenEntry(ctx context.Context, run *storage.RepairRun, s
 	statsMu.Unlock()
 }
 
-func (r *Service) arrInstance(name string) *arr.Arr {
+func (r *Service) arrInstance(name string) (arr.Arr, bool) {
 	if r.arrs == nil {
-		return nil
+		return arr.Arr{}, false
 	}
 	return r.arrs.Get(name)
 }
@@ -118,7 +118,7 @@ func (r *Service) arrInstance(name string) *arr.Arr {
 // drives; every other kind is left untouched instead of failing every sweep.
 func (r *Service) reacquirable(broken storage.BrokenFile) bool {
 	kind := broken.ArrKind
-	if instance := r.arrInstance(broken.ArrName); instance != nil {
+	if instance, ok := r.arrInstance(broken.ArrName); ok {
 		kind = arrKindFromType(instance.Type)
 	}
 	return kind == "" || kind == storage.ArrKindSonarr || kind == storage.ArrKindRadarr
@@ -163,8 +163,12 @@ func arrMediaID(kind arr.Type, content arr.ContentFile) int {
 // repairArrFiles is the pre-index repair path. It runs only for broken files
 // the Arr binding index cannot resolve, so libraries the indexer cannot map
 // still recover instead of silently staying broken.
-func (r *Service) repairArrFiles(ctx context.Context, a *arr.Arr, files []arr.ContentFile) bool {
-	if a == nil {
+// repairArrFiles is the pre-index repair path. It runs only for broken files
+// the Arr binding index cannot resolve, so libraries the indexer cannot map
+// still recover instead of silently staying broken.
+func (r *Service) repairArrFiles(ctx context.Context, arrName string, files []arr.ContentFile) bool {
+	instance, ok := r.arrInstance(arrName)
+	if !ok {
 		return false
 	}
 	historyIDs := make(map[int]struct{})
@@ -173,12 +177,12 @@ func (r *Service) repairArrFiles(ctx context.Context, a *arr.Arr, files []arr.Co
 		if ctx != nil && ctx.Err() != nil {
 			return false
 		}
-		mediaID := arrMediaID(a.Type, file)
+		mediaID := arrMediaID(instance.Type, file)
 		if mediaID == 0 {
 			needSearch = append(needSearch, file)
 			continue
 		}
-		historyID, _, err := a.FindGrabHistoryID(mediaID)
+		historyID, _, err := r.arrs.LatestGrabID(ctx, arrName, mediaID)
 		if err != nil || historyID == 0 {
 			needSearch = append(needSearch, file)
 			continue
@@ -186,21 +190,21 @@ func (r *Service) repairArrFiles(ctx context.Context, a *arr.Arr, files []arr.Co
 		historyIDs[historyID] = struct{}{}
 	}
 
-	if err := a.DeleteFiles(ctx, files); err != nil {
-		r.logger.Warn().Err(err).Str("arr", a.Name).Msg("Repair: DeleteFiles failed")
+	if err := r.arrs.DeleteFiles(ctx, arrName, files); err != nil {
+		r.logger.Warn().Err(err).Str("arr", arrName).Msg("Repair: bulk delete failed")
 		return false
 	}
 	for historyID := range historyIDs {
 		if ctx != nil && ctx.Err() != nil {
 			break
 		}
-		if err := a.MarkHistoryFailed(historyID); err != nil {
-			r.logger.Warn().Err(err).Str("arr", a.Name).Int("history_id", historyID).Msg("Repair: MarkHistoryFailed failed")
+		if err := r.arrs.FailHistory(ctx, arrName, historyID); err != nil {
+			r.logger.Warn().Err(err).Str("arr", arrName).Int("history_id", historyID).Msg("Repair: blocklisting the grab failed")
 		}
 	}
 	if len(needSearch) > 0 {
-		if err := a.SearchMissing(ctx, needSearch); err != nil {
-			r.logger.Warn().Err(err).Str("arr", a.Name).Msg("Repair: SearchMissing fallback failed")
+		if err := r.arrs.SearchMissing(ctx, arrName, needSearch); err != nil {
+			r.logger.Warn().Err(err).Str("arr", arrName).Msg("Repair: re-search fallback failed")
 		}
 	}
 	return true

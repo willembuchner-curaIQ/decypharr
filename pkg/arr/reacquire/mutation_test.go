@@ -2,9 +2,10 @@ package reacquire
 
 import (
 	"errors"
-	"github.com/sirrobot01/decypharr/pkg/arr"
 	"testing"
 	"time"
+
+	"github.com/sirrobot01/decypharr/pkg/arr"
 )
 
 type failingDurableProgress struct {
@@ -73,11 +74,11 @@ func TestFindGrabReceiptRequiresGuidIndexerMediaAndTime(t *testing.T) {
 		LastDispatchedAt: dispatchedAt,
 	}
 	records := []arr.HistoryRecord{
-		{ID: 1, EventType: arr.HistoryEventGrabbed, Date: dispatchedAt.Add(time.Second), SeriesID: 7, EpisodeID: 101, SourceTitle: "same title"},
-		{ID: 2, EventType: arr.HistoryEventGrabbed, Date: dispatchedAt.Add(time.Second), SeriesID: 7, EpisodeID: 101, Data: map[string]string{"guid": "release-guid", "indexer": "Other"}},
-		{ID: 3, EventType: arr.HistoryEventGrabbed, Date: dispatchedAt.Add(time.Second), SeriesID: 7, EpisodeID: 102, Data: map[string]string{"guid": "release-guid", "indexer": "Indexer"}},
-		{ID: 4, EventType: arr.HistoryEventGrabbed, Date: dispatchedAt.Add(-time.Minute), SeriesID: 7, EpisodeID: 101, Data: map[string]string{"guid": "release-guid", "indexer": "Indexer"}},
-		{ID: 5, EventType: arr.HistoryEventGrabbed, Date: dispatchedAt.Add(time.Second), SeriesID: 7, EpisodeID: 101, Data: map[string]string{"Guid": "release-guid", "Indexer": "Indexer"}},
+		{ID: 1, EventType: arr.EventGrabbed, Date: dispatchedAt.Add(time.Second), SeriesID: 7, EpisodeID: 101, SourceTitle: "same title"},
+		{ID: 2, EventType: arr.EventGrabbed, Date: dispatchedAt.Add(time.Second), SeriesID: 7, EpisodeID: 101, Data: map[string]string{"guid": "release-guid", "indexer": "Other"}},
+		{ID: 3, EventType: arr.EventGrabbed, Date: dispatchedAt.Add(time.Second), SeriesID: 7, EpisodeID: 102, Data: map[string]string{"guid": "release-guid", "indexer": "Indexer"}},
+		{ID: 4, EventType: arr.EventGrabbed, Date: dispatchedAt.Add(-time.Minute), SeriesID: 7, EpisodeID: 101, Data: map[string]string{"guid": "release-guid", "indexer": "Indexer"}},
+		{ID: 5, EventType: arr.EventGrabbed, Date: dispatchedAt.Add(time.Second), SeriesID: 7, EpisodeID: 101, Data: map[string]string{"Guid": "release-guid", "Indexer": "Indexer"}},
 	}
 	record, found := findGrabReceipt(records, mutation)
 	if !found || record.ID != 5 {

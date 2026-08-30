@@ -33,8 +33,8 @@ func TestFindGrabHistoryID(t *testing.T) {
 			}))
 			defer server.Close()
 
-			a := &Arr{Host: server.URL, Token: "arr-secret", Type: test.arrType}
-			id, downloadID, err := a.FindGrabHistoryID(test.mediaID)
+			s := testService(Arr{Host: server.URL, Token: "arr-secret", Type: test.arrType})
+			id, downloadID, err := s.LatestGrabID(t.Context(), "arr", test.mediaID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -51,8 +51,8 @@ func TestFindGrabHistoryIDReturnsEmptyWhenNoGrabExists(t *testing.T) {
 	}))
 	defer server.Close()
 
-	a := &Arr{Host: server.URL, Token: "secret", Type: Sonarr}
-	id, downloadID, err := a.FindGrabHistoryID(3)
+	s := testService(Arr{Host: server.URL, Token: "secret", Type: Sonarr})
+	id, downloadID, err := s.LatestGrabID(t.Context(), "arr", 3)
 	if err != nil || id != 0 || downloadID != "" {
 		t.Fatalf("history = (%d, %q, %v), want empty", id, downloadID, err)
 	}
@@ -84,8 +84,8 @@ func TestHistoryByDownloadIDPaginatesAndFiltersEvent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	a := &Arr{Host: server.URL, Token: "secret", Type: Sonarr}
-	record, found, err := a.FindGrabHistoryByDownloadID(t.Context(), "download-1")
+	s := testService(Arr{Host: server.URL, Token: "secret", Type: Sonarr})
+	record, found, err := s.GrabHistory(t.Context(), "arr", "download-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +106,8 @@ func TestMarkHistoryFailedCtxValidatesStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	a := &Arr{Host: server.URL, Token: "secret", Type: Radarr}
-	if err := a.MarkHistoryFailedCtx(t.Context(), 42); err == nil {
+	s := testService(Arr{Host: server.URL, Token: "secret", Type: Radarr})
+	if err := s.FailHistory(t.Context(), "arr", 42); err == nil {
 		t.Fatal("expected non-success status error")
 	}
 }
@@ -121,8 +121,8 @@ func TestImportHistoryRequestsImportEvents(t *testing.T) {
 	}))
 	defer server.Close()
 
-	a := &Arr{Host: server.URL, Token: "secret", Type: Radarr}
-	records, err := a.ImportHistory(t.Context(), map[string]struct{}{"download-1": {}})
+	s := testService(Arr{Host: server.URL, Token: "secret", Type: Radarr})
+	records, err := s.ImportHistory(t.Context(), "arr", map[string]struct{}{"download-1": {}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,13 +139,13 @@ func TestImportHistorySkipsUnwantedDownloads(t *testing.T) {
 	}))
 	defer server.Close()
 
-	a := &Arr{Host: server.URL, Token: "secret", Type: Radarr}
-	records, err := a.ImportHistory(t.Context(), nil)
+	s := testService(Arr{Host: server.URL, Token: "secret", Type: Radarr})
+	records, err := s.ImportHistory(t.Context(), "arr", nil)
 	if err != nil || len(records) != 0 || requests != 0 {
 		t.Fatalf("records = %#v, requests = %d, err = %v", records, requests, err)
 	}
 
-	records, err = a.ImportHistory(t.Context(), map[string]struct{}{"download-1": {}})
+	records, err = s.ImportHistory(t.Context(), "arr", map[string]struct{}{"download-1": {}})
 	if err != nil {
 		t.Fatal(err)
 	}

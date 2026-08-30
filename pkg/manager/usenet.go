@@ -24,7 +24,7 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 	if req == nil || len(req.NZBContent) == 0 {
 		return "", fmt.Errorf("NZB content is empty")
 	}
-	if req.Arr == nil {
+	if req.Arr.Name == "" {
 		return "", fmt.Errorf("arr is required")
 	}
 

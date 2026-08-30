@@ -79,7 +79,7 @@ func TestAddNewNZBQueuesBeforeNetworkParsing(t *testing.T) {
 		"release.nzb",
 		t.TempDir(),
 		[]byte("network parsing must happen in the worker"),
-		&arr.Arr{Name: "sonarr"},
+		arr.Arr{Name: "sonarr"},
 		config.DownloadActionSymlink,
 		"",
 		ImportTypeSABnzbd,

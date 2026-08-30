@@ -1,6 +1,7 @@
 package arr
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 
 	"golang.org/x/sync/errgroup"
 )
+
+const sonarrLibraryConcurrency = 4
 
 // LibraryFile is the Arr-side identity of an imported media file.
 type LibraryFile struct {
@@ -20,13 +23,11 @@ type LibraryFile struct {
 	MovieID      int    `json:"movie_id,omitempty"`
 }
 
-const sonarrLibraryConcurrency = 4
-
-type sonarrSeriesSummary struct {
+type sonarrSeries struct {
 	ID int `json:"id"`
 }
 
-type sonarrLibraryFile struct {
+type sonarrEpisodeFile struct {
 	ID           int    `json:"id"`
 	SeriesID     int    `json:"seriesId"`
 	SeasonNumber int    `json:"seasonNumber"`
@@ -34,13 +35,13 @@ type sonarrLibraryFile struct {
 	Size         int64  `json:"size"`
 }
 
-type sonarrEpisodeSummary struct {
+type sonarrEpisode struct {
 	ID            int `json:"id"`
 	SeriesID      int `json:"seriesId"`
 	EpisodeFileID int `json:"episodeFileId"`
 }
 
-type radarrMovieSummary struct {
+type radarrMovie struct {
 	ID        int `json:"id"`
 	MovieFile struct {
 		ID      int    `json:"id"`
@@ -50,157 +51,31 @@ type radarrMovieSummary struct {
 	} `json:"movieFile"`
 }
 
-func (a *Arr) ListLibraryFiles(ctx context.Context) ([]LibraryFile, error) {
-	if a == nil {
-		return nil, fmt.Errorf("arr not configured")
+// LibraryFiles enumerates every imported file an instance owns.
+func (s *Service) LibraryFiles(ctx context.Context, name string) ([]LibraryFile, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return nil, err
 	}
-
-	switch a.Type {
+	switch instance.Type {
 	case Sonarr:
-		return a.listSonarrLibraryFiles(ctx)
+		return s.sonarrLibraryFiles(ctx, instance)
 	case Radarr:
-		return a.listRadarrLibraryFiles(ctx)
+		return s.radarrLibraryFiles(ctx, instance)
 	default:
-		return nil, fmt.Errorf("list library files: unsupported arr type %q", a.Type)
+		return nil, fmt.Errorf("%w: %s", ErrUnsupportedType, instance.Type)
 	}
 }
 
-func (a *Arr) listSonarrLibraryFiles(ctx context.Context) ([]LibraryFile, error) {
-	var series []sonarrSeriesSummary
-	resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/series", nil, &series)
-	if err != nil {
-		return nil, fmt.Errorf("list sonarr series: %w", err)
-	}
-	if err := expectStatus(resp, http.StatusOK); err != nil {
-		return nil, fmt.Errorf("list sonarr series: %w", err)
-	}
-	if len(series) == 0 {
-		return nil, nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	bySeries := make([][]LibraryFile, len(series))
-	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(sonarrLibraryConcurrency)
-	for i, item := range series {
-		group.Go(func() error {
-			files, err := a.listSonarrSeriesFiles(groupCtx, item.ID)
-			if err != nil {
-				return err
-			}
-			bySeries[i] = files
-			return nil
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return nil, err
-	}
-
-	files := make([]LibraryFile, 0)
-	for _, seriesFiles := range bySeries {
-		files = append(files, seriesFiles...)
-	}
-	return files, nil
-}
-
-func (a *Arr) listSonarrSeriesFiles(ctx context.Context, seriesID int) ([]LibraryFile, error) {
-	var files []sonarrLibraryFile
-	endpoint := fmt.Sprintf("api/v3/episodefile?seriesId=%d", seriesID)
-	resp, err := a.RequestCtx(ctx, http.MethodGet, endpoint, nil, &files)
-	if err != nil {
-		return nil, fmt.Errorf("list episode files for series %d: %w", seriesID, err)
-	}
-	if err := expectStatus(resp, http.StatusOK); err != nil {
-		return nil, fmt.Errorf("list episode files for series %d: %w", seriesID, err)
-	}
-
-	episodesByFile, err := a.sonarrEpisodeIDsByFile(ctx, seriesID)
+// LibraryFilesForHistory enumerates only the series or movies the given history
+// records touch, so a targeted index does not walk the whole library.
+func (s *Service) LibraryFilesForHistory(ctx context.Context, name string, records []HistoryRecord) ([]LibraryFile, error) {
+	instance, err := s.instance(name)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]LibraryFile, 0, len(files))
-	for _, file := range files {
-		if file.ID <= 0 || file.Path == "" {
-			continue
-		}
-		episodeIDs := episodesByFile[file.ID]
-		slices.Sort(episodeIDs)
-		episodeIDs = slices.Compact(episodeIDs)
-		fileSeriesID := file.SeriesID
-		if fileSeriesID == 0 {
-			fileSeriesID = seriesID
-		}
-		result = append(result, LibraryFile{
-			ArrFileID:    file.ID,
-			Path:         file.Path,
-			Size:         file.Size,
-			SeriesID:     fileSeriesID,
-			SeasonNumber: file.SeasonNumber,
-			EpisodeIDs:   slices.Clone(episodeIDs),
-		})
-	}
-	return result, nil
-}
-
-func (a *Arr) sonarrEpisodeIDsByFile(ctx context.Context, seriesID int) (map[int][]int, error) {
-	var episodes []sonarrEpisodeSummary
-	endpoint := fmt.Sprintf("api/v3/episode?seriesId=%d", seriesID)
-	resp, err := a.RequestCtx(ctx, http.MethodGet, endpoint, nil, &episodes)
-	if err != nil {
-		return nil, fmt.Errorf("list episodes for series %d: %w", seriesID, err)
-	}
-	if err := expectStatus(resp, http.StatusOK); err != nil {
-		return nil, fmt.Errorf("list episodes for series %d: %w", seriesID, err)
-	}
-
-	episodesByFile := make(map[int][]int)
-	for _, episode := range episodes {
-		if episode.ID <= 0 || episode.EpisodeFileID <= 0 {
-			continue
-		}
-		episodesByFile[episode.EpisodeFileID] = append(episodesByFile[episode.EpisodeFileID], episode.ID)
-	}
-	for fileID, episodeIDs := range episodesByFile {
-		slices.Sort(episodeIDs)
-		episodesByFile[fileID] = slices.Compact(episodeIDs)
-	}
-	return episodesByFile, nil
-}
-
-func (a *Arr) listRadarrLibraryFiles(ctx context.Context) ([]LibraryFile, error) {
-	var movies []radarrMovieSummary
-	resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/movie", nil, &movies)
-	if err != nil {
-		return nil, fmt.Errorf("list radarr movies: %w", err)
-	}
-	if err := expectStatus(resp, http.StatusOK); err != nil {
-		return nil, fmt.Errorf("list radarr movies: %w", err)
-	}
-
-	files := make([]LibraryFile, 0, len(movies))
-	for _, movie := range movies {
-		if movie.MovieFile.ID <= 0 || movie.MovieFile.Path == "" {
-			continue
-		}
-		movieID := movie.MovieFile.MovieID
-		if movieID == 0 {
-			movieID = movie.ID
-		}
-		files = append(files, LibraryFile{
-			ArrFileID: movie.MovieFile.ID,
-			Path:      movie.MovieFile.Path,
-			Size:      movie.MovieFile.Size,
-			MovieID:   movieID,
-		})
-	}
-	return files, nil
-}
-
-func (a *Arr) ListTargetLibraryFiles(ctx context.Context, records []HistoryRecord) ([]LibraryFile, error) {
-	switch a.Type {
+	switch instance.Type {
 	case Sonarr:
 		seriesIDs := make(map[int]struct{})
 		episodeIDs := make(map[int]struct{})
@@ -212,7 +87,7 @@ func (a *Arr) ListTargetLibraryFiles(ctx context.Context, records []HistoryRecor
 			}
 		}
 		for episodeID := range episodeIDs {
-			seriesID, err := a.sonarrSeriesIDForEpisode(ctx, episodeID)
+			seriesID, err := s.sonarrSeriesForEpisode(ctx, instance, episodeID)
 			if err != nil {
 				return nil, err
 			}
@@ -220,9 +95,9 @@ func (a *Arr) ListTargetLibraryFiles(ctx context.Context, records []HistoryRecor
 				seriesIDs[seriesID] = struct{}{}
 			}
 		}
-		files := make([]LibraryFile, 0)
+		files := make([]LibraryFile, 0, len(seriesIDs))
 		for seriesID := range seriesIDs {
-			seriesFiles, err := a.listSonarrSeriesFiles(ctx, seriesID)
+			seriesFiles, err := s.sonarrSeriesFiles(ctx, instance, seriesID)
 			if err != nil {
 				return nil, err
 			}
@@ -238,7 +113,7 @@ func (a *Arr) ListTargetLibraryFiles(ctx context.Context, records []HistoryRecor
 		}
 		files := make([]LibraryFile, 0, len(movieIDs))
 		for movieID := range movieIDs {
-			file, found, err := a.radarrMovieFile(ctx, movieID)
+			file, found, err := s.radarrMovieFile(ctx, instance, movieID)
 			if err != nil {
 				return nil, err
 			}
@@ -248,50 +123,161 @@ func (a *Arr) ListTargetLibraryFiles(ctx context.Context, records []HistoryRecor
 		}
 		return files, nil
 	default:
-		return nil, fmt.Errorf("list targeted library files: unsupported arr type %q", a.Type)
+		return nil, fmt.Errorf("%w: %s", ErrUnsupportedType, instance.Type)
 	}
 }
 
-func (a *Arr) sonarrSeriesIDForEpisode(ctx context.Context, episodeID int) (int, error) {
-	var episode sonarrEpisodeSummary
-	endpoint := fmt.Sprintf("api/v3/episode/%d", episodeID)
-	resp, err := a.RequestCtx(ctx, http.MethodGet, endpoint, nil, &episode)
+func (s *Service) sonarrLibraryFiles(ctx context.Context, instance Arr) ([]LibraryFile, error) {
+	var series []sonarrSeries
+	resp, err := s.get(ctx, instance, "api/v3/series", &series)
 	if err != nil {
-		return 0, fmt.Errorf("get Sonarr episode %d: %w", episodeID, err)
+		return nil, fmt.Errorf("list sonarr series: %w", err)
+	}
+	if err := expectStatus(resp, http.StatusOK); err != nil {
+		return nil, fmt.Errorf("list sonarr series: %w", err)
+	}
+	if len(series) == 0 {
+		return nil, nil
+	}
+
+	bySeries := make([][]LibraryFile, len(series))
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(sonarrLibraryConcurrency)
+	for i, item := range series {
+		group.Go(func() error {
+			files, err := s.sonarrSeriesFiles(groupCtx, instance, item.ID)
+			if err != nil {
+				return err
+			}
+			bySeries[i] = files
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return slices.Concat(bySeries...), nil
+}
+
+func (s *Service) sonarrSeriesFiles(ctx context.Context, instance Arr, seriesID int) ([]LibraryFile, error) {
+	var episodeFiles []sonarrEpisodeFile
+	endpoint := fmt.Sprintf("api/v3/episodefile?seriesId=%d", seriesID)
+	resp, err := s.get(ctx, instance, endpoint, &episodeFiles)
+	if err != nil {
+		return nil, fmt.Errorf("list episode files for series %d: %w", seriesID, err)
+	}
+	if err := expectStatus(resp, http.StatusOK); err != nil {
+		return nil, fmt.Errorf("list episode files for series %d: %w", seriesID, err)
+	}
+
+	episodesByFile, err := s.sonarrEpisodeIDs(ctx, instance, seriesID)
+	if err != nil {
+		return nil, err
+	}
+
+	files := make([]LibraryFile, 0, len(episodeFiles))
+	for _, file := range episodeFiles {
+		if file.ID <= 0 || file.Path == "" {
+			continue
+		}
+		files = append(files, LibraryFile{
+			ArrFileID:    file.ID,
+			Path:         file.Path,
+			Size:         file.Size,
+			SeriesID:     cmp.Or(file.SeriesID, seriesID),
+			SeasonNumber: file.SeasonNumber,
+			EpisodeIDs:   episodesByFile[file.ID],
+		})
+	}
+	return files, nil
+}
+
+func (s *Service) sonarrEpisodeIDs(ctx context.Context, instance Arr, seriesID int) (map[int][]int, error) {
+	var episodes []sonarrEpisode
+	endpoint := fmt.Sprintf("api/v3/episode?seriesId=%d", seriesID)
+	resp, err := s.get(ctx, instance, endpoint, &episodes)
+	if err != nil {
+		return nil, fmt.Errorf("list episodes for series %d: %w", seriesID, err)
+	}
+	if err := expectStatus(resp, http.StatusOK); err != nil {
+		return nil, fmt.Errorf("list episodes for series %d: %w", seriesID, err)
+	}
+
+	byFile := make(map[int][]int)
+	for _, episode := range episodes {
+		if episode.ID <= 0 || episode.EpisodeFileID <= 0 {
+			continue
+		}
+		byFile[episode.EpisodeFileID] = append(byFile[episode.EpisodeFileID], episode.ID)
+	}
+	for fileID, ids := range byFile {
+		slices.Sort(ids)
+		byFile[fileID] = slices.Compact(ids)
+	}
+	return byFile, nil
+}
+
+func (s *Service) sonarrSeriesForEpisode(ctx context.Context, instance Arr, episodeID int) (int, error) {
+	var episode sonarrEpisode
+	endpoint := fmt.Sprintf("api/v3/episode/%d", episodeID)
+	resp, err := s.get(ctx, instance, endpoint, &episode)
+	if err != nil {
+		return 0, fmt.Errorf("get sonarr episode %d: %w", episodeID, err)
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return 0, nil
 	}
 	if err := expectStatus(resp, http.StatusOK); err != nil {
-		return 0, fmt.Errorf("get Sonarr episode %d: %w", episodeID, err)
+		return 0, fmt.Errorf("get sonarr episode %d: %w", episodeID, err)
 	}
 	return episode.SeriesID, nil
 }
 
-func (a *Arr) radarrMovieFile(ctx context.Context, movieID int) (LibraryFile, bool, error) {
-	var movie radarrMovieSummary
-	endpoint := fmt.Sprintf("api/v3/movie/%d", movieID)
-	resp, err := a.RequestCtx(ctx, http.MethodGet, endpoint, nil, &movie)
+func (s *Service) radarrLibraryFiles(ctx context.Context, instance Arr) ([]LibraryFile, error) {
+	var movies []radarrMovie
+	resp, err := s.get(ctx, instance, "api/v3/movie", &movies)
 	if err != nil {
-		return LibraryFile{}, false, fmt.Errorf("get Radarr movie %d: %w", movieID, err)
+		return nil, fmt.Errorf("list radarr movies: %w", err)
+	}
+	if err := expectStatus(resp, http.StatusOK); err != nil {
+		return nil, fmt.Errorf("list radarr movies: %w", err)
+	}
+
+	files := make([]LibraryFile, 0, len(movies))
+	for _, movie := range movies {
+		if movie.MovieFile.ID <= 0 || movie.MovieFile.Path == "" {
+			continue
+		}
+		files = append(files, LibraryFile{
+			ArrFileID: movie.MovieFile.ID,
+			Path:      movie.MovieFile.Path,
+			Size:      movie.MovieFile.Size,
+			MovieID:   cmp.Or(movie.MovieFile.MovieID, movie.ID),
+		})
+	}
+	return files, nil
+}
+
+func (s *Service) radarrMovieFile(ctx context.Context, instance Arr, movieID int) (LibraryFile, bool, error) {
+	var movie radarrMovie
+	endpoint := fmt.Sprintf("api/v3/movie/%d", movieID)
+	resp, err := s.get(ctx, instance, endpoint, &movie)
+	if err != nil {
+		return LibraryFile{}, false, fmt.Errorf("get radarr movie %d: %w", movieID, err)
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		return LibraryFile{}, false, nil
 	}
 	if err := expectStatus(resp, http.StatusOK); err != nil {
-		return LibraryFile{}, false, fmt.Errorf("get Radarr movie %d: %w", movieID, err)
+		return LibraryFile{}, false, fmt.Errorf("get radarr movie %d: %w", movieID, err)
 	}
 	if movie.MovieFile.ID <= 0 || movie.MovieFile.Path == "" {
 		return LibraryFile{}, false, nil
-	}
-	fileMovieID := movie.MovieFile.MovieID
-	if fileMovieID == 0 {
-		fileMovieID = movie.ID
 	}
 	return LibraryFile{
 		ArrFileID: movie.MovieFile.ID,
 		Path:      movie.MovieFile.Path,
 		Size:      movie.MovieFile.Size,
-		MovieID:   fileMovieID,
+		MovieID:   cmp.Or(movie.MovieFile.MovieID, movie.ID),
 	}, true, nil
 }

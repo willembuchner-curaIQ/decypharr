@@ -141,14 +141,14 @@ func (d *Downloader) notifyCompleted(entry *storage.Entry) {
 
 func (d *Downloader) triggerArrRefresh(entry *storage.Entry) {
 	go func() {
-		a := d.manager.arr.GetOrCreate(entry.Category)
-		if a == nil || a.Host == "" || a.Token == "" {
+		instance := d.manager.arr.GetOrCreate(entry.Category)
+		if !instance.Reachable() {
 			return
 		}
-		if err := a.Refresh(); err != nil {
+		if err := d.manager.arr.RefreshMonitoredDownloads(context.Background(), instance.Name); err != nil {
 			d.logger.Debug().
 				Err(err).
-				Str("arr", a.Name).
+				Str("arr", instance.Name).
 				Str("entry", entry.Name).
 				Msg("Failed to trigger Arr refresh")
 		}

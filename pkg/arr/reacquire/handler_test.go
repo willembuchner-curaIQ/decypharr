@@ -56,7 +56,7 @@ func TestReacquireHandlerFailsExactDownloadAndWaitsForArr(t *testing.T) {
 	defer server.Close()
 
 	registry := newTestArrStorage()
-	instance := &arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
+	instance := arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
 	registry.AddOrUpdate(instance)
 	handler := NewHandler(registry)
 	progress := &recordedProgress{}
@@ -70,7 +70,7 @@ func TestReacquireHandlerFailsExactDownloadAndWaitsForArr(t *testing.T) {
 		Bindings: []Binding{{
 			ArrName:                "movies",
 			ArrType:                arr.Radarr,
-			ArrInstanceFingerprint: instance.InstanceFingerprint(),
+			ArrInstanceFingerprint: instance.Fingerprint(),
 			EntryID:                "entry-1",
 			EntryFileID:            "file-1",
 			DownloadID:             "download-1",
@@ -110,7 +110,7 @@ func TestReacquireHandlerRefusesStaleArrFileIdentity(t *testing.T) {
 	defer server.Close()
 
 	registry := newTestArrStorage()
-	instance := &arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
+	instance := arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
 	registry.AddOrUpdate(instance)
 	job := Job{
 		ArrName:  "movies",
@@ -121,7 +121,7 @@ func TestReacquireHandlerRefusesStaleArrFileIdentity(t *testing.T) {
 		Bindings: []Binding{{
 			ArrName:                "movies",
 			ArrType:                arr.Radarr,
-			ArrInstanceFingerprint: instance.InstanceFingerprint(),
+			ArrInstanceFingerprint: instance.Fingerprint(),
 			EntryID:                "entry-1",
 			EntryFileID:            "file-1",
 			ArrFileID:              42,
@@ -132,10 +132,10 @@ func TestReacquireHandlerRefusesStaleArrFileIdentity(t *testing.T) {
 	}
 	err := NewHandler(registry).Reacquire(t.Context(), job, &recordedProgress{})
 	if err == nil {
-		t.Fatal("expected stale arr.Arr identity to be rejected")
+		t.Fatal("expected stale Arr identity to be rejected")
 	}
 	if deleted.Load() {
-		t.Fatal("stale arr.Arr file was deleted")
+		t.Fatal("stale Arr file was deleted")
 	}
 }
 
@@ -149,7 +149,7 @@ func TestReacquireHandlerRefusesChangedArrInstance(t *testing.T) {
 	defer server.Close()
 
 	registry := newTestArrStorage()
-	registry.AddOrUpdate(&arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr})
+	registry.AddOrUpdate(arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr})
 	job := Job{
 		ArrName:  "movies",
 		ArrType:  arr.Radarr,
@@ -170,10 +170,10 @@ func TestReacquireHandlerRefusesChangedArrInstance(t *testing.T) {
 	}
 	err := NewHandler(registry).Reacquire(t.Context(), job, &recordedProgress{})
 	if err == nil {
-		t.Fatal("expected changed arr.Arr instance to be rejected")
+		t.Fatal("expected changed Arr instance to be rejected")
 	}
 	if requests.Load() != 0 {
-		t.Fatalf("changed arr.Arr instance received %d requests", requests.Load())
+		t.Fatalf("changed Arr instance received %d requests", requests.Load())
 	}
 }
 
@@ -226,9 +226,9 @@ func TestSearchBindingsReconcilesPersistedCommandWithoutRedispatch(t *testing.T)
 		Attempts:         1,
 	}
 	job := Job{Mutations: []Mutation{mutation}}
-	status, err := searchBindings(
+	status, err := newTestHandler(server.URL).searchBindings(
 		t.Context(),
-		&arr.Arr{Host: server.URL, Token: "secret", Type: arr.Radarr},
+		testInstance(server.URL),
 		&job,
 		[]Binding{{ArrType: arr.Radarr, MovieID: 9}},
 		&recordedProgress{},
@@ -270,9 +270,9 @@ func TestSearchBindingsWaitsForCommandVisibilityBeforeRedispatch(t *testing.T) {
 		Attempts:         1,
 	}
 	job := Job{Mutations: []Mutation{mutation}}
-	_, err := searchBindings(
+	_, err := newTestHandler(server.URL).searchBindings(
 		t.Context(),
-		&arr.Arr{Host: server.URL, Token: "secret", Type: arr.Radarr},
+		testInstance(server.URL),
 		&job,
 		[]Binding{{ArrType: arr.Radarr, MovieID: 9}},
 		&recordedProgress{},
@@ -299,9 +299,9 @@ func TestPreexistingFailedHistoryUsesExplicitSearch(t *testing.T) {
 	defer server.Close()
 
 	job := Job{}
-	status, err := (&arrHandler{}).failHistory(
+	status, err := newTestHandler(server.URL).failHistory(
 		t.Context(),
-		&arr.Arr{Host: server.URL, Token: "secret", Type: arr.Radarr},
+		testInstance(server.URL),
 		&job,
 		[]Binding{{ArrType: arr.Radarr, MovieID: 9}},
 		exactDownloadFailure{found: true, alreadyFailed: true, downloadID: "download-1", failedID: 18},
@@ -316,8 +316,18 @@ func TestPreexistingFailedHistoryUsesExplicitSearch(t *testing.T) {
 	}
 }
 
-func newTestArrStorage() *arr.Storage {
-	return arr.NewStorage()
+func testInstance(host string) arr.Arr {
+	return arr.Arr{Name: "movies", Host: host, Token: "secret", Type: arr.Radarr}
+}
+
+func newTestHandler(host string) *arrHandler {
+	arrs := arr.New()
+	arrs.AddOrUpdate(testInstance(host))
+	return &arrHandler{arrs: arrs}
+}
+
+func newTestArrStorage() *arr.Service {
+	return arr.New()
 }
 
 func configureArrHTTPTest(t *testing.T) {

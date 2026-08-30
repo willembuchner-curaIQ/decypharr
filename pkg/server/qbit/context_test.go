@@ -29,17 +29,17 @@ func newAuthenticationTestQBit(t *testing.T) *QBit {
 
 func TestAuthenticateDoesNotOverwriteArrWithClientCredentials(t *testing.T) {
 	q := newAuthenticationTestQBit(t)
-	existing := arr.New("whisparr", "http://whisparr:6969", "arr-api-key", false, nil, "", string(arr.SourceAuto))
+	existing := arr.Arr{Name: "whisparr", Host: "http://whisparr:6969", Token: "arr-api-key"}
 	q.manager.Arr().AddOrUpdate(existing)
 
-	got, err := q.authenticate("whisparr", "homarr-user", "homarr-password")
+	got, err := q.authenticate(t.Context(), "whisparr", "homarr-user", "homarr-password")
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
 	if got.Host != existing.Host || got.Token != existing.Token {
 		t.Fatalf("authenticated Arr = host %q token %q, want host %q token %q", got.Host, got.Token, existing.Host, existing.Token)
 	}
-	stored := q.manager.Arr().Get("whisparr")
+	stored, _ := q.manager.Arr().Get("whisparr")
 	if stored.Host != existing.Host || stored.Token != existing.Token {
 		t.Fatalf("stored Arr = host %q token %q, want host %q token %q", stored.Host, stored.Token, existing.Host, existing.Token)
 	}
@@ -56,7 +56,7 @@ func TestAuthenticateDiscoversValidatedArrCredentials(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	got, err := q.authenticate("whisparr", server.URL, "arr-api-key")
+	got, err := q.authenticate(t.Context(), "whisparr", server.URL, "arr-api-key")
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -66,8 +66,8 @@ func TestAuthenticateDiscoversValidatedArrCredentials(t *testing.T) {
 	if got.Type != arr.Sonarr {
 		t.Fatalf("Arr type = %q, want the type the instance reported", got.Type)
 	}
-	stored := q.manager.Arr().Get("whisparr")
-	if stored == nil || stored.Host != server.URL || stored.Token != "arr-api-key" {
+	stored, ok := q.manager.Arr().Get("whisparr")
+	if !ok || stored.Host != server.URL || stored.Token != "arr-api-key" {
 		t.Fatalf("stored Arr = %#v", stored)
 	}
 }

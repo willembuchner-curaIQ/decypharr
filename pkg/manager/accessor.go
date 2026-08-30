@@ -47,7 +47,7 @@ func (m *Manager) Strm() *Strm {
 }
 
 // Arr returns the Arr storage instance
-func (m *Manager) Arr() *arr.Storage {
+func (m *Manager) Arr() *arr.Service {
 	return m.arr
 }
 

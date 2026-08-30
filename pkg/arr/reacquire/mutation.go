@@ -203,7 +203,7 @@ func confirmMutation(job *Job, progress JobProgress, status Status, mutation Mut
 	mutation.ReceiptID = receiptID
 	mutation.ConfirmedAt = time.Now().UTC()
 	if err := persistMutation(job, progress, status, mutation); err != nil {
-		return arr.UnknownMutationOutcome(fmt.Errorf("persist confirmed arr.Arr mutation: %w", err), 0)
+		return arr.UnknownMutationOutcome(fmt.Errorf("persist confirmed Arr mutation: %w", err), 0)
 	}
 	return nil
 }
@@ -221,7 +221,7 @@ func mutationRedispatchError(mutation Mutation) error {
 	}
 	if mutation.Attempts >= maxMutationAttempts {
 		return fmt.Errorf(
-			"arr.Arr mutation %q was not observed after %d dispatch attempts; refusing another automatic dispatch",
+			"arr mutation %q was not observed after %d dispatch attempts; refusing another automatic dispatch",
 			mutation.Key,
 			mutation.Attempts,
 		)
@@ -232,7 +232,7 @@ func mutationRedispatchError(mutation Mutation) error {
 func unresolvedMutation(mutation Mutation, dispatchErr, reconcileErr error) error {
 	cause := dispatchErr
 	if reconcileErr != nil {
-		cause = errors.Join(dispatchErr, fmt.Errorf("reconcile arr.Arr mutation: %w", reconcileErr))
+		cause = errors.Join(dispatchErr, fmt.Errorf("reconcile Arr mutation: %w", reconcileErr))
 	}
 	return arr.UnknownMutationOutcome(cause, mutationVisibilityRemaining(mutation))
 }
@@ -240,7 +240,7 @@ func unresolvedMutation(mutation Mutation, dispatchErr, reconcileErr error) erro
 func unavailableMutationReconciliation(mutation Mutation, err error) error {
 	if mutationVisibilityRemaining(mutation) == 0 && mutation.Attempts >= maxMutationAttempts {
 		return fmt.Errorf(
-			"arr.Arr mutation %q reached %d dispatch attempts and reconciliation is unavailable; refusing another automatic dispatch: %w",
+			"arr mutation %q reached %d dispatch attempts and reconciliation is unavailable; refusing another automatic dispatch: %w",
 			mutation.Key,
 			mutation.Attempts,
 			err,
@@ -291,13 +291,13 @@ func equalNormalizedIDs(left, right []int) bool {
 
 func findGrabReceipt(records []arr.HistoryRecord, mutation Mutation) (arr.HistoryRecord, bool) {
 	for _, record := range records {
-		if !strings.EqualFold(record.EventType, arr.HistoryEventGrabbed) ||
+		if !strings.EqualFold(record.EventType, arr.EventGrabbed) ||
 			record.Date.IsZero() ||
 			record.Date.Before(mutation.LastDispatchedAt.Add(-mutationClockSkew)) {
 			continue
 		}
-		guid, guidFound := historyDataValue(record.Data, "guid")
-		indexer, indexerFound := historyDataValue(record.Data, "indexer")
+		guid, guidFound := record.DataValue("guid")
+		indexer, indexerFound := record.DataValue("indexer")
 		if !guidFound || !indexerFound || guid != mutation.ReleaseGUID || indexer != mutation.ReleaseIndexer {
 			continue
 		}
@@ -316,13 +316,4 @@ func grabScopeMatches(record arr.HistoryRecord, mutation Mutation) bool {
 		return record.SeriesID == mutation.SeriesID && slices.Contains(mutation.EpisodeIDs, record.EpisodeID)
 	}
 	return false
-}
-
-func historyDataValue(data map[string]string, key string) (string, bool) {
-	for currentKey, value := range data {
-		if strings.EqualFold(currentKey, key) {
-			return value, true
-		}
-	}
-	return "", false
 }

@@ -2,13 +2,14 @@ package reacquire
 
 import (
 	"fmt"
-	"github.com/sirrobot01/decypharr/pkg/arr"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sirrobot01/decypharr/pkg/arr"
 
 	"github.com/sirrobot01/decypharr/pkg/strm"
 )
@@ -44,7 +45,7 @@ func TestMatchLibraryFilesRequiresExactIdentity(t *testing.T) {
 }
 
 func TestHistoryBindingCannotReplaceExactCurrentArrFile(t *testing.T) {
-	instance := &arr.Arr{Name: "movies", Type: arr.Radarr}
+	instance := arr.Arr{Name: "movies", Type: arr.Radarr}
 	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
 	managed := []ManagedFile{
 		{EntryID: "current-entry", FileID: "current-file", DownloadID: "current-download", Path: "/downloads/current/movie.mkv"},
@@ -78,7 +79,7 @@ func TestHistoryBindingCannotReplaceExactCurrentArrFile(t *testing.T) {
 }
 
 func TestLatestUnmanagedImportBlocksOlderHistoryBinding(t *testing.T) {
-	instance := &arr.Arr{Name: "movies", Type: arr.Radarr}
+	instance := arr.Arr{Name: "movies", Type: arr.Radarr}
 	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
 	managed := []ManagedFile{{
 		EntryID: "old-entry", FileID: "old-file", DownloadID: "old-download", Path: "/downloads/old/movie.mkv",
@@ -108,7 +109,7 @@ func TestLatestUnmanagedImportBlocksOlderHistoryBinding(t *testing.T) {
 
 	bindings := bindingsFromHistoryRecords(instance, 2, library, managed, nil, history)
 	if len(bindings) != 0 {
-		t.Fatalf("history bindings = %#v, want latest current import to consume the arr.Arr file", bindings)
+		t.Fatalf("history bindings = %#v, want latest current import to consume the Arr file", bindings)
 	}
 }
 
@@ -151,10 +152,12 @@ func TestBindingsFromHistoryUsesExactDroppedPath(t *testing.T) {
 	}))
 	defer server.Close()
 
-	instance := &arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
+	instance := arr.Arr{Name: "movies", Host: server.URL, Token: "secret", Type: arr.Radarr}
+	arrs := arr.New()
+	arrs.AddOrUpdate(instance)
 	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/Movie (2025)/Movie.mkv", MovieID: 9}}
 	managed := []ManagedFile{{EntryID: "entry", FileID: "file", DownloadID: "download-1", Path: "/downloads/movie.mkv"}}
-	records, err := (&Indexer{}).historyForManaged(t.Context(), instance, managed, nil)
+	records, err := (&Indexer{arrs: arrs}).historyForManaged(t.Context(), instance, managed, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,13 +165,13 @@ func TestBindingsFromHistoryUsesExactDroppedPath(t *testing.T) {
 	if len(bindings) != 1 || bindings[0].Confidence != ConfidenceDownloadHistory {
 		t.Fatalf("bindings = %#v", bindings)
 	}
-	if bindings[0].ArrInstanceFingerprint != instance.InstanceFingerprint() {
-		t.Fatal("history binding did not capture the current arr.Arr instance fingerprint")
+	if bindings[0].ArrInstanceFingerprint != instance.Fingerprint() {
+		t.Fatal("history binding did not capture the current Arr instance fingerprint")
 	}
 }
 
 func TestCarryForwardBindingRequiresCurrentInstanceAndPath(t *testing.T) {
-	instance := &arr.Arr{Name: "movies", Host: "http://radarr.example", Type: arr.Radarr}
+	instance := arr.Arr{Name: "movies", Host: "http://radarr.example", Type: arr.Radarr}
 	library := []arr.LibraryFile{{ArrFileID: 42, Path: "/library/movie.mkv", MovieID: 9}}
 	managed := []ManagedFile{{EntryID: "entry", FileID: "file", Path: "/downloads/movie.mkv"}}
 	old := Binding{
@@ -185,14 +188,14 @@ func TestCarryForwardBindingRequiresCurrentInstanceAndPath(t *testing.T) {
 	if bindings := carryForwardBindings(instance, 2, nil, []Binding{old}, library, managed); len(bindings) != 0 {
 		t.Fatal("legacy binding was carried forward without a fresh identity match")
 	}
-	old.ArrInstanceFingerprint = instance.InstanceFingerprint()
+	old.ArrInstanceFingerprint = instance.Fingerprint()
 	old.LibraryPath = "/library/old.mkv"
 	if bindings := carryForwardBindings(instance, 2, nil, []Binding{old}, library, managed); len(bindings) != 0 {
 		t.Fatal("binding was carried forward after its library path changed")
 	}
 	old.LibraryPath = library[0].Path
 	bindings := carryForwardBindings(instance, 2, nil, []Binding{old}, library, managed)
-	if len(bindings) != 1 || bindings[0].ArrInstanceFingerprint != instance.InstanceFingerprint() {
+	if len(bindings) != 1 || bindings[0].ArrInstanceFingerprint != instance.Fingerprint() {
 		t.Fatalf("current binding was not carried forward: %#v", bindings)
 	}
 }

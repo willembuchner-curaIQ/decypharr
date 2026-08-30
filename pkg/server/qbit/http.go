@@ -17,7 +17,7 @@ func (q *QBit) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	username := r.FormValue("username")
 	password := r.FormValue("password")
-	_, err := q.authenticate(getCategory(ctx), username, password)
+	_, err := q.authenticate(ctx, getCategory(ctx), username, password)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
@@ -119,9 +119,9 @@ func (q *QBit) handleTorrentsAdd(w http.ResponseWriter, r *http.Request) {
 	debridName := r.FormValue("debrid")
 	category := r.FormValue("category")
 	_arr := getArrFromContext(ctx)
-	if _arr == nil {
+	if _arr.Name == "" {
 		// Arr is not in context
-		_arr = arr.New(category, "", "", false, nil, "", "")
+		_arr = arr.Arr{Name: category}
 	}
 	atleastOne := false
 

@@ -26,8 +26,8 @@ func TestListSonarrLibraryFilesPreservesMultiEpisodeFiles(t *testing.T) {
 	}))
 	defer server.Close()
 
-	a := &Arr{Host: server.URL, Token: "secret", Type: Sonarr}
-	files, err := a.ListLibraryFiles(t.Context())
+	s := testService(Arr{Host: server.URL, Token: "secret", Type: Sonarr})
+	files, err := s.LibraryFiles(t.Context(), "arr")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,8 +46,8 @@ func TestListRadarrLibraryFiles(t *testing.T) {
 	}))
 	defer server.Close()
 
-	a := &Arr{Host: server.URL, Token: "secret", Type: Radarr}
-	files, err := a.ListLibraryFiles(t.Context())
+	s := testService(Arr{Host: server.URL, Token: "secret", Type: Radarr})
+	files, err := s.LibraryFiles(t.Context(), "arr")
 	if err != nil {
 		t.Fatal(err)
 	}

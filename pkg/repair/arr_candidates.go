@@ -77,14 +77,14 @@ func (r *Service) enumerateArrCandidates(ctx context.Context, cfg config.RepairC
 	return candidates, nil
 }
 
-func (r *Service) collectArrMediaCandidates(ctx context.Context, a *arr.Arr, mediaID string) (map[string]*candidate, error) {
+func (r *Service) collectArrMediaCandidates(ctx context.Context, instance arr.Arr, mediaID string) (map[string]*candidate, error) {
 	candidates := make(map[string]*candidate)
-	a = r.resolveArrType(ctx, a)
-	media, err := a.GetMedia(ctx, mediaID)
+	kind := r.arrs.ResolveType(ctx, instance.Name)
+	media, err := r.arrs.Media(ctx, instance.Name, mediaID)
 	if err != nil {
 		return nil, err
 	}
-	managedFiles := r.managedArrFileIndex(a.Name)
+	managedFiles := r.managedArrFileIndex(instance.Name)
 	var stats arrFileCollectionStats
 	for _, content := range media {
 		select {
@@ -105,8 +105,8 @@ func (r *Service) collectArrMediaCandidates(ctx context.Context, a *arr.Arr, med
 				found = &candidate{
 					name:       name,
 					item:       item,
-					arrName:    a.Name,
-					arrKind:    arrKindFromType(a.Type),
+					arrName:    instance.Name,
+					arrKind:    arrKindFromType(kind),
 					contentMap: make(map[string]arr.ContentFile),
 				}
 				candidates[name] = found
@@ -168,56 +168,42 @@ func mergeCandidates(dst, src map[string]*candidate) {
 	}
 }
 
-func (r *Service) eligibleArrs(filter []string) []*arr.Arr {
+func (r *Service) eligibleArrs(filter []string) []arr.Arr {
 	wanted := make(map[string]struct{}, len(filter))
 	for _, name := range filter {
 		if name = strings.TrimSpace(name); name != "" {
 			wanted[name] = struct{}{}
 		}
 	}
-	eligible := make([]*arr.Arr, 0)
-	for _, a := range r.arrs.GetAll() {
-		if a == nil || a.Host == "" || a.Token == "" || a.SkipRepair {
+	eligible := make([]arr.Arr, 0)
+	if r.arrs == nil {
+		return eligible
+	}
+	for _, instance := range r.arrs.All() {
+		if !instance.Reachable() || instance.SkipRepair {
 			continue
 		}
 		if len(wanted) > 0 {
-			if _, ok := wanted[a.Name]; !ok {
+			if _, ok := wanted[instance.Name]; !ok {
 				continue
 			}
 		}
-		eligible = append(eligible, a)
+		eligible = append(eligible, instance)
 	}
 	return eligible
 }
 
-// resolveArrType narrows an instance the name and host could not identify, so
-// candidates are classified with the application the instance actually runs.
-func (r *Service) resolveArrType(ctx context.Context, a *arr.Arr) *arr.Arr {
-	if a == nil || r.arrs == nil || a.Type == arr.Sonarr || a.Type == arr.Radarr {
-		return a
-	}
-	kind, err := a.DetectType(ctx)
-	if err != nil {
-		r.logger.Debug().Err(err).Str("arr", a.Name).Msg("Sweep: could not detect arr type")
-		return a
-	}
-	if resolved := r.arrs.ResolveType(a.Name, kind); resolved != nil {
-		return resolved
-	}
-	return a
-}
-
 func (r *Service) attachArrContext(ctx context.Context, candidate *candidate) {
-	for _, a := range r.eligibleArrs(nil) {
+	for _, instance := range r.eligibleArrs(nil) {
 		if ctx.Err() != nil {
 			return
 		}
-		a = r.resolveArrType(ctx, a)
-		media, err := a.GetMedia(ctx, "")
+		kind := r.arrs.ResolveType(ctx, instance.Name)
+		media, err := r.arrs.Media(ctx, instance.Name, "")
 		if err != nil {
 			continue
 		}
-		managedFiles := r.managedArrFileIndex(a.Name)
+		managedFiles := r.managedArrFileIndex(instance.Name)
 		for _, content := range media {
 			grouped, _ := collectArrFiles(content, managedFiles)
 			for entryPath, files := range grouped {
@@ -227,8 +213,8 @@ func (r *Service) attachArrContext(ctx context.Context, candidate *candidate) {
 				if candidate.contentMap == nil {
 					candidate.contentMap = make(map[string]arr.ContentFile)
 				}
-				candidate.arrName = a.Name
-				candidate.arrKind = arrKindFromType(a.Type)
+				candidate.arrName = instance.Name
+				candidate.arrKind = arrKindFromType(kind)
 				for _, file := range files {
 					file.EntryName = candidate.name
 					candidate.contentMap[file.TargetPath] = file

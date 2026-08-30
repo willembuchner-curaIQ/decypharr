@@ -35,15 +35,15 @@ func TestSearchAndGrabMovieRelease(t *testing.T) {
 	}))
 	defer server.Close()
 
-	a := &Arr{Host: server.URL, Token: "secret", Type: Radarr}
-	releases, err := a.SearchMovieReleases(t.Context(), 19)
+	s := testService(Arr{Host: server.URL, Token: "secret", Type: Radarr})
+	releases, err := s.MovieReleases(t.Context(), "arr", 19)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(releases) != 1 || !releases[0].DownloadAllowed {
 		t.Fatalf("releases = %#v", releases)
 	}
-	if err := a.GrabRelease(t.Context(), releases[0]); err != nil {
+	if err := s.GrabRelease(t.Context(), "arr", releases[0]); err != nil {
 		t.Fatal(err)
 	}
 }

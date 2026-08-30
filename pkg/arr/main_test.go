@@ -17,3 +17,11 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(directory)
 	os.Exit(code)
 }
+
+// testService registers one instance named "arr" and returns the service.
+func testService(instance Arr) *Service {
+	instance.Name = "arr"
+	service := New()
+	service.arrs[instance.Name] = instance
+	return service
+}

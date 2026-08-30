@@ -174,7 +174,7 @@ func (c *Collector) collect() *Snapshot {
 	}
 
 	// --- Arrs ---
-	arrs := c.mgr.Arr().GetAll()
+	arrs := c.mgr.Arr().All()
 	arrNames := make([]string, 0, len(arrs))
 	for _, a := range arrs {
 		arrNames = append(arrNames, a.Name)

@@ -5,17 +5,24 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	gourl "net/url"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	QueueActionNone              QueueAction = ""                   // leave the item in the queue
-	QueueActionImport            QueueAction = "import"             // force a manual import
-	QueueActionBlocklist         QueueAction = "blacklist"          // blocklist + remove, do NOT re-search
-	QueueActionBlocklistResearch QueueAction = "blacklist_research" // blocklist + remove + re-search
+	EventGrabbed        = "grabbed"
+	EventImported       = "downloadFolderImported"
+	EventDownloadFailed = "downloadFailed"
+
+	eventTypeGrabbed  = 1
+	eventTypeImported = 3
+
+	historyPageSize = 100
+	// importHistoryPageSize is large because an import scan reads history it
+	// mostly discards; importHistoryMaxPages bounds that read.
+	importHistoryPageSize = 1000
+	importHistoryMaxPages = 20
 )
 
 type HistorySchema struct {
@@ -39,129 +46,43 @@ type HistoryRecord struct {
 	Date        time.Time         `json:"date,omitzero"`
 }
 
-func (a *Arr) GetHistory(downloadId, eventType string) *HistorySchema {
-	query := gourl.Values{}
-	if downloadId != "" {
-		query.Add("downloadId", downloadId)
-	}
-	query.Add("eventType", eventType)
-	query.Add("pageSize", "100")
-	url := "api/v3/history" + "?" + query.Encode()
-	var data *HistorySchema
-	resp, err := a.Request(http.MethodGet, url, nil, &data)
-	if err != nil {
-		return nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-	return data
-}
-
-// FindGrabHistoryID returns the ID and downloadId of the most recent "grabbed"
-// history record for the given episode (Sonarr) or movie (Radarr). Returns
-// (0, "", nil) when no grab record is found (e.g. history trimmed, manual import).
-func (a *Arr) FindGrabHistoryID(mediaDBID int) (int, string, error) {
-	if a == nil {
-		return 0, "", fmt.Errorf("arr not configured")
-	}
-	if mediaDBID <= 0 {
-		return 0, "", nil
-	}
-
-	query := gourl.Values{}
-	query.Add("page", "1")
-	query.Add("pageSize", "50")
-	query.Add("sortKey", "date")
-	query.Add("sortDirection", "descending")
-	query.Add("eventType", "1") // 1 = grabbed
-
-	switch a.Type {
-	case Sonarr:
-		query.Add("episodeId", strconv.Itoa(mediaDBID))
-	case Radarr:
-		query.Add("movieIds", strconv.Itoa(mediaDBID))
-	default:
-		return 0, "", nil
-	}
-
-	var data HistorySchema
-	url := "api/v3/history?" + query.Encode()
-	resp, err := a.Request(http.MethodGet, url, nil, &data)
-	if err != nil {
-		return 0, "", err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return 0, "", fmt.Errorf("history lookup failed: %s", resp.Status)
-	}
-	if len(data.Records) == 0 {
-		return 0, "", nil
-	}
-	record := data.Records[0]
-	return record.ID, record.DownloadID, nil
-}
-
-// MarkHistoryFailed marks a grab history record as failed. This blocklists
-// the release in the arr and, if redownload is enabled, triggers a re-search
-// for whatever is currently missing from that grab's scope.
-func (a *Arr) MarkHistoryFailed(historyID int) error {
-	if historyID <= 0 {
-		return nil
-	}
-	return a.MarkHistoryFailedCtx(context.Background(), historyID)
-}
-
-// DataValue reads one field of a history record's data map. Arr casing is not
-// stable across versions, so the lookup is case-insensitive.
-func (record HistoryRecord) DataValue(key string) (string, bool) {
-	for currentKey, value := range record.Data {
-		if strings.EqualFold(currentKey, key) {
+// DataValue reads one field of a record's data map. Arr casing is not stable
+// across versions, so the lookup ignores case.
+func (r HistoryRecord) DataValue(key string) (string, bool) {
+	for current, value := range r.Data {
+		if strings.EqualFold(current, key) {
 			return value, true
 		}
 	}
 	return "", false
 }
 
-const (
-	HistoryEventGrabbed        = "grabbed"
-	HistoryEventDownloadFailed = "downloadFailed"
-	historyPageSize            = 100
-	importHistoryPageSize      = 1000
-	importHistoryMaxPages      = 20
-	importHistoryEventType     = 3
-	grabbedHistoryEventType    = 1
-)
-
-// ImportHistory returns the import records for the given download IDs, newest
-// first. The scan is bounded: a large library has far more history than the
-// index needs, so it keeps only wanted records and stops once every download
-// is found or the page budget runs out.
-func (a *Arr) ImportHistory(ctx context.Context, downloadIDs map[string]struct{}) ([]HistoryRecord, error) {
-	if a == nil {
-		return nil, fmt.Errorf("arr not configured")
+// ImportHistory returns the import records for the given downloads, newest
+// first. It stops once every download is found or the page budget runs out: a
+// large library holds far more history than a scan needs.
+func (s *Service) ImportHistory(ctx context.Context, name string, downloadIDs map[string]struct{}) ([]HistoryRecord, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return nil, err
 	}
 	if len(downloadIDs) == 0 {
 		return nil, nil
 	}
 
-	records := make([]HistoryRecord, 0)
+	records := make([]HistoryRecord, 0, len(downloadIDs))
 	found := make(map[string]struct{}, len(downloadIDs))
 	fetched := 0
 	for page := 1; page <= importHistoryMaxPages; page++ {
-		query := url.Values{}
-		query.Set("page", strconv.Itoa(page))
-		query.Set("pageSize", strconv.Itoa(importHistoryPageSize))
-		query.Set("sortKey", "date")
-		query.Set("sortDirection", "descending")
-		query.Set("eventType", strconv.Itoa(importHistoryEventType))
-
-		var history HistorySchema
-		resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &history)
-		if err != nil {
-			return nil, fmt.Errorf("import history lookup: %w", err)
+		query := url.Values{
+			"page":          {strconv.Itoa(page)},
+			"pageSize":      {strconv.Itoa(importHistoryPageSize)},
+			"sortKey":       {"date"},
+			"sortDirection": {"descending"},
+			"eventType":     {strconv.Itoa(eventTypeImported)},
 		}
-		if err := expectStatus(resp, http.StatusOK); err != nil {
-			return nil, fmt.Errorf("import history lookup: %w", err)
+		history, err := s.history(ctx, instance, query)
+		if err != nil {
+			return nil, fmt.Errorf("import history: %w", err)
 		}
 
 		fetched += len(history.Records)
@@ -169,7 +90,7 @@ func (a *Arr) ImportHistory(ctx context.Context, downloadIDs map[string]struct{}
 			if _, wanted := downloadIDs[record.DownloadID]; !wanted {
 				continue
 			}
-			if !strings.EqualFold(record.EventType, "downloadFolderImported") {
+			if !strings.EqualFold(record.EventType, EventImported) {
 				continue
 			}
 			records = append(records, record)
@@ -182,9 +103,12 @@ func (a *Arr) ImportHistory(ctx context.Context, downloadIDs map[string]struct{}
 	return records, nil
 }
 
-func (a *Arr) HistoryByDownloadID(ctx context.Context, downloadID, eventType string) ([]HistoryRecord, error) {
-	if a == nil {
-		return nil, fmt.Errorf("arr not configured")
+// DownloadHistory returns every record for one download, newest first. An empty
+// eventType returns all of them.
+func (s *Service) DownloadHistory(ctx context.Context, name, downloadID, eventType string) ([]HistoryRecord, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return nil, err
 	}
 	downloadID = strings.TrimSpace(downloadID)
 	if downloadID == "" {
@@ -194,20 +118,16 @@ func (a *Arr) HistoryByDownloadID(ctx context.Context, downloadID, eventType str
 	records := make([]HistoryRecord, 0)
 	fetched := 0
 	for page := 1; ; page++ {
-		query := url.Values{}
-		query.Set("page", strconv.Itoa(page))
-		query.Set("pageSize", strconv.Itoa(historyPageSize))
-		query.Set("sortKey", "date")
-		query.Set("sortDirection", "descending")
-		query.Set("downloadId", downloadID)
-
-		var history HistorySchema
-		resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &history)
-		if err != nil {
-			return nil, fmt.Errorf("history lookup for download %q: %w", downloadID, err)
+		query := url.Values{
+			"page":          {strconv.Itoa(page)},
+			"pageSize":      {strconv.Itoa(historyPageSize)},
+			"sortKey":       {"date"},
+			"sortDirection": {"descending"},
+			"downloadId":    {downloadID},
 		}
-		if err := expectStatus(resp, http.StatusOK); err != nil {
-			return nil, fmt.Errorf("history lookup for download %q: %w", downloadID, err)
+		history, err := s.history(ctx, instance, query)
+		if err != nil {
+			return nil, fmt.Errorf("history for download %q: %w", downloadID, err)
 		}
 
 		fetched += len(history.Records)
@@ -219,7 +139,6 @@ func (a *Arr) HistoryByDownloadID(ctx context.Context, downloadID, eventType str
 				records = append(records, record)
 			}
 		}
-
 		if len(history.Records) == 0 || fetched >= history.TotalRecords {
 			break
 		}
@@ -227,91 +146,136 @@ func (a *Arr) HistoryByDownloadID(ctx context.Context, downloadID, eventType str
 	return records, nil
 }
 
-func (a *Arr) FindGrabHistoryByDownloadID(ctx context.Context, downloadID string) (HistoryRecord, bool, error) {
-	return a.findHistoryByDownloadID(ctx, downloadID, HistoryEventGrabbed)
+// GrabHistory returns the record of the grab that produced a download.
+func (s *Service) GrabHistory(ctx context.Context, name, downloadID string) (HistoryRecord, bool, error) {
+	return s.firstHistory(ctx, name, downloadID, EventGrabbed)
 }
 
-func (a *Arr) FindDownloadFailedHistoryByDownloadID(ctx context.Context, downloadID string) (HistoryRecord, bool, error) {
-	return a.findHistoryByDownloadID(ctx, downloadID, HistoryEventDownloadFailed)
+// FailedHistory returns the download-failed record for a download, which is
+// how a blocklist already applied is recognised.
+func (s *Service) FailedHistory(ctx context.Context, name, downloadID string) (HistoryRecord, bool, error) {
+	return s.firstHistory(ctx, name, downloadID, EventDownloadFailed)
 }
 
-func (a *Arr) GrabHistorySince(ctx context.Context, since time.Time) ([]HistoryRecord, error) {
-	if a == nil {
-		return nil, fmt.Errorf("arr not configured")
-	}
-	records := make([]HistoryRecord, 0)
-	fetched := 0
-	for page := 1; ; page++ {
-		query := url.Values{}
-		query.Set("page", strconv.Itoa(page))
-		query.Set("pageSize", strconv.Itoa(historyPageSize))
-		query.Set("sortKey", "date")
-		query.Set("sortDirection", "descending")
-		query.Set("eventType", strconv.Itoa(grabbedHistoryEventType))
-
-		var history HistorySchema
-		resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/history?"+query.Encode(), nil, &history)
-		if err != nil {
-			return nil, fmt.Errorf("grab history lookup: %w", err)
-		}
-		if err := expectStatus(resp, http.StatusOK); err != nil {
-			return nil, fmt.Errorf("grab history lookup: %w", err)
-		}
-
-		fetched += len(history.Records)
-		pageReachedOlderRecord := false
-		for _, record := range history.Records {
-			if !strings.EqualFold(record.EventType, HistoryEventGrabbed) {
-				continue
-			}
-			if !record.Date.IsZero() && record.Date.Before(since) {
-				pageReachedOlderRecord = true
-				continue
-			}
-			records = append(records, record)
-		}
-		if pageReachedOlderRecord || len(history.Records) == 0 || fetched >= history.TotalRecords {
-			break
-		}
-	}
-	return records, nil
-}
-
-func (a *Arr) HasDownloadFailedHistory(ctx context.Context, downloadID string) (bool, error) {
-	_, found, err := a.FindDownloadFailedHistoryByDownloadID(ctx, downloadID)
-	return found, err
-}
-
-func (a *Arr) findHistoryByDownloadID(ctx context.Context, downloadID, eventType string) (HistoryRecord, bool, error) {
-	records, err := a.HistoryByDownloadID(ctx, downloadID, eventType)
-	if err != nil {
+func (s *Service) firstHistory(ctx context.Context, name, downloadID, eventType string) (HistoryRecord, bool, error) {
+	records, err := s.DownloadHistory(ctx, name, downloadID, eventType)
+	if err != nil || len(records) == 0 {
 		return HistoryRecord{}, false, err
-	}
-	if len(records) == 0 {
-		return HistoryRecord{}, false, nil
 	}
 	return records[0], true, nil
 }
 
-func (a *Arr) MarkHistoryFailedCtx(ctx context.Context, historyID int) error {
-	if a == nil {
-		return fmt.Errorf("arr not configured")
+// LatestGrabID returns the most recent grab record for one episode or movie.
+// It returns zero when history no longer holds the grab.
+func (s *Service) LatestGrabID(ctx context.Context, name string, mediaID int) (int, string, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return 0, "", err
+	}
+	if mediaID <= 0 {
+		return 0, "", nil
+	}
+
+	query := url.Values{
+		"page":          {"1"},
+		"pageSize":      {"50"},
+		"sortKey":       {"date"},
+		"sortDirection": {"descending"},
+		"eventType":     {strconv.Itoa(eventTypeGrabbed)},
+	}
+	switch instance.Type {
+	case Sonarr:
+		query.Set("episodeId", strconv.Itoa(mediaID))
+	case Radarr:
+		query.Set("movieIds", strconv.Itoa(mediaID))
+	default:
+		return 0, "", nil
+	}
+
+	history, err := s.history(ctx, instance, query)
+	if err != nil {
+		return 0, "", err
+	}
+	if len(history.Records) == 0 {
+		return 0, "", nil
+	}
+	return history.Records[0].ID, history.Records[0].DownloadID, nil
+}
+
+// GrabHistorySince returns the grabs an instance recorded since a point in
+// time, which is how a release grab is reconciled after an unclear response.
+func (s *Service) GrabHistorySince(ctx context.Context, name string, since time.Time) ([]HistoryRecord, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return nil, err
+	}
+
+	records := make([]HistoryRecord, 0)
+	fetched := 0
+	for page := 1; ; page++ {
+		query := url.Values{
+			"page":          {strconv.Itoa(page)},
+			"pageSize":      {strconv.Itoa(historyPageSize)},
+			"sortKey":       {"date"},
+			"sortDirection": {"descending"},
+			"eventType":     {strconv.Itoa(eventTypeGrabbed)},
+		}
+		history, err := s.history(ctx, instance, query)
+		if err != nil {
+			return nil, fmt.Errorf("grab history: %w", err)
+		}
+
+		fetched += len(history.Records)
+		reachedOlder := false
+		for _, record := range history.Records {
+			if !strings.EqualFold(record.EventType, EventGrabbed) {
+				continue
+			}
+			if !record.Date.IsZero() && record.Date.Before(since) {
+				reachedOlder = true
+				continue
+			}
+			records = append(records, record)
+		}
+		if reachedOlder || len(history.Records) == 0 || fetched >= history.TotalRecords {
+			return records, nil
+		}
+	}
+}
+
+// FailHistory marks a grab as failed. The Arr blocklists the release and, when
+// its own redownload is enabled, searches for a replacement.
+func (s *Service) FailHistory(ctx context.Context, name string, historyID int) error {
+	instance, err := s.instance(name)
+	if err != nil {
+		return err
 	}
 	if historyID <= 0 {
-		return fmt.Errorf("mark history failed: invalid history ID %d", historyID)
+		return fmt.Errorf("fail history: invalid history ID %d", historyID)
 	}
 
 	endpoint := fmt.Sprintf("api/v3/history/failed/%d", historyID)
-	resp, err := a.requestMutationCtx(ctx, http.MethodPost, endpoint, nil, nil)
+	resp, err := s.mutate(ctx, instance, http.MethodPost, endpoint, nil, nil)
 	if err != nil {
-		err = fmt.Errorf("mark history %d failed: %w", historyID, err)
-		if ambiguousMutationRequest(resp, err) {
-			return UnknownMutationOutcome(err, 0)
+		if dispatched(resp, err) {
+			return UnknownMutationOutcome(fmt.Errorf("fail history %d: %w", historyID, err), 0)
 		}
-		return err
+		return fmt.Errorf("fail history %d: %w", historyID, err)
 	}
 	if err := expectSuccess(resp); err != nil {
-		return fmt.Errorf("mark history %d failed: %w", historyID, err)
+		return fmt.Errorf("fail history %d: %w", historyID, err)
 	}
 	return nil
+}
+
+func (s *Service) history(ctx context.Context, instance Arr, query url.Values) (HistorySchema, error) {
+	var history HistorySchema
+	resp, err := s.get(ctx, instance, "api/v3/history?"+query.Encode(), &history)
+	if err != nil {
+		return HistorySchema{}, err
+	}
+	if err := expectStatus(resp, http.StatusOK); err != nil {
+		return HistorySchema{}, err
+	}
+	return history, nil
 }

@@ -78,7 +78,7 @@ type Dependencies struct {
 	Scheduler     gocron.Scheduler
 	Backend       Backend
 	Storage       *storage.Storage
-	Arrs          *arr.Storage
+	Arrs          *arr.Service
 	Reacquirer    Reacquirer
 	Usenet        *usenet.Usenet
 	Notifications *notifications.Service
@@ -90,7 +90,7 @@ type Service struct {
 	scheduler     gocron.Scheduler
 	backend       Backend
 	storage       *storage.Storage
-	arrs          *arr.Storage
+	arrs          *arr.Service
 	reacquirer    Reacquirer
 	usenet        *usenet.Usenet
 	notifications *notifications.Service

@@ -146,8 +146,8 @@ func newRepairTestStorage(t *testing.T) *storage.Storage {
 
 func TestHealBrokenEntrySkipsArrsWithoutReacquisition(t *testing.T) {
 	store := newRepairTestStorage(t)
-	registry := arr.NewStorage()
-	registry.AddOrUpdate(arr.New("lidarr", "http://lidarr.test", "token", false, nil, "", "manual"))
+	registry := arr.New()
+	registry.AddOrUpdate(arr.Arr{Name: "lidarr", Host: "http://lidarr.test", Token: "token"})
 
 	reacquirer := &fakeReacquirer{reacquire: func(reacquire.Request) (*reacquire.Job, error) {
 		return nil, errors.New("must not be called")
@@ -206,8 +206,8 @@ func TestHealBrokenEntryFallsBackToLegacyRepairWhenUnmapped(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	store := newRepairTestStorage(t)
-	registry := arr.NewStorage()
-	registry.AddOrUpdate(arr.New("sonarr", server.URL, "token", false, nil, "", "manual"))
+	registry := arr.New()
+	registry.AddOrUpdate(arr.Arr{Name: "sonarr", Host: server.URL, Token: "token"})
 
 	reacquirer := &fakeReacquirer{reacquire: func(reacquire.Request) (*reacquire.Job, error) {
 		return nil, reacquire.ErrBindingNotFound

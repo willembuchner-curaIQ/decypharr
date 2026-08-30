@@ -64,7 +64,7 @@ func TestIndexRetainedBytesPerBinding(t *testing.T) {
 		t.Skip("allocates a library-sized index")
 	}
 	const count = 100_000
-	fingerprint := (&arr.Arr{Type: arr.Sonarr, Host: "http://sonarr.example:8989"}).InstanceFingerprint()
+	fingerprint := (arr.Arr{Type: arr.Sonarr, Host: "http://sonarr.example:8989"}).Fingerprint()
 
 	baseline := heapAlloc()
 	bindings := libraryBindings(count, fingerprint)

@@ -5,10 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/sirrobot01/decypharr/pkg/arr"
 	"slices"
 	"sync/atomic"
 	"time"
+
+	"github.com/sirrobot01/decypharr/pkg/arr"
 
 	"github.com/google/uuid"
 )

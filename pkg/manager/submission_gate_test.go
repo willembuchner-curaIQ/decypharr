@@ -111,7 +111,7 @@ func TestTorrentSubmissionKeyNormalizesProviderAndHash(t *testing.T) {
 		" TorBox ",
 		"/downloads",
 		&utils.Magnet{InfoHash: " ABCDEF "},
-		arr.New("sonarr", "", "", false, nil, "", ""),
+		arr.Arr{Name: "sonarr", Host: "", Token: ""},
 		"",
 		nil,
 		"",

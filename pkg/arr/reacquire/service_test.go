@@ -2,9 +2,10 @@ package reacquire
 
 import (
 	"context"
-	"github.com/sirrobot01/decypharr/pkg/arr"
 	"testing"
 	"time"
+
+	"github.com/sirrobot01/decypharr/pkg/arr"
 )
 
 const testArrInstanceFingerprint = "v1:test-instance"
@@ -48,13 +49,13 @@ func TestIndexReplacesOneArrGeneration(t *testing.T) {
 	}
 
 	if _, ok := index.Lookup("old-entry", "old-file"); ok {
-		t.Fatal("stale arr.Sonarr binding remained indexed")
+		t.Fatal("stale Sonarr binding remained indexed")
 	}
 	if bindings := index.ByEpisodeID("sonarr", 102); len(bindings) != 1 || bindings[0].Generation != 2 {
 		t.Fatalf("episode reverse lookup = %#v", bindings)
 	}
 	if _, ok := index.Lookup("movie-entry", "movie-file"); !ok {
-		t.Fatal("replacing arr.Sonarr generation removed arr.Radarr binding")
+		t.Fatal("replacing Sonarr generation removed Radarr binding")
 	}
 }
 

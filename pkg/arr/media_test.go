@@ -31,8 +31,8 @@ func TestDeleteManagedFile(t *testing.T) {
 			}))
 			defer server.Close()
 
-			a := &Arr{Host: server.URL, Token: "secret", Type: test.arrType}
-			err := a.DeleteManagedFile(t.Context(), 17)
+			s := testService(Arr{Host: server.URL, Token: "secret", Type: test.arrType})
+			err := s.DeleteLibraryFile(t.Context(), "arr", 17)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("error = %v, wantErr %v", err, test.wantErr)
 			}
@@ -49,8 +49,8 @@ func TestGetDownloadClientConfig(t *testing.T) {
 	}))
 	defer server.Close()
 
-	a := &Arr{Host: server.URL, Token: "secret", Type: Sonarr}
-	config, err := a.GetDownloadClientConfig(t.Context())
+	s := testService(Arr{Host: server.URL, Token: "secret", Type: Sonarr})
+	config, err := s.DownloadClientConfig(t.Context(), "arr")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,30 +64,30 @@ func TestExplicitSearchCommands(t *testing.T) {
 		name     string
 		arrType  Type
 		wantBody map[string]any
-		run      func(contextArr *Arr) (Command, error)
+		run      func(service *Service) (Command, error)
 	}{
 		{
 			name:     "episodes",
 			arrType:  Sonarr,
 			wantBody: map[string]any{"name": "EpisodeSearch", "episodeIds": []any{float64(4), float64(9)}},
-			run: func(a *Arr) (Command, error) {
-				return a.SearchEpisodes(t.Context(), []int{9, 4, 9})
+			run: func(s *Service) (Command, error) {
+				return s.SearchEpisodes(t.Context(), "arr", []int{9, 4, 9})
 			},
 		},
 		{
 			name:     "season",
 			arrType:  Sonarr,
 			wantBody: map[string]any{"name": "SeasonSearch", "seriesId": float64(8), "seasonNumber": float64(0)},
-			run: func(a *Arr) (Command, error) {
-				return a.SearchSeason(t.Context(), 8, 0)
+			run: func(s *Service) (Command, error) {
+				return s.SearchSeason(t.Context(), "arr", 8, 0)
 			},
 		},
 		{
 			name:     "movies",
 			arrType:  Radarr,
 			wantBody: map[string]any{"name": "MoviesSearch", "movieIds": []any{float64(3), float64(7)}},
-			run: func(a *Arr) (Command, error) {
-				return a.SearchMovies(t.Context(), []int{7, 3})
+			run: func(s *Service) (Command, error) {
+				return s.SearchMovies(t.Context(), "arr", []int{7, 3})
 			},
 		},
 	} {
@@ -109,8 +109,8 @@ func TestExplicitSearchCommands(t *testing.T) {
 			}))
 			defer server.Close()
 
-			a := &Arr{Host: server.URL, Token: "secret", Type: test.arrType}
-			command, err := test.run(a)
+			s := testService(Arr{Host: server.URL, Token: "secret", Type: test.arrType})
+			command, err := test.run(s)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -122,7 +122,8 @@ func TestExplicitSearchCommands(t *testing.T) {
 }
 
 func TestMutationRequestClassifiesOnlyPossiblyDispatchedErrorsAsUnknown(t *testing.T) {
-	_, err := (&Arr{Type: Radarr}).SearchMovies(t.Context(), []int{7})
+	unconfigured := testService(Arr{Type: Radarr})
+	_, err := unconfigured.SearchMovies(t.Context(), "arr", []int{7})
 	if err == nil || errors.Is(err, ErrMutationOutcomeUnknown) {
 		t.Fatalf("preflight error = %v", err)
 	}
@@ -130,7 +131,8 @@ func TestMutationRequestClassifiesOnlyPossiblyDispatchedErrorsAsUnknown(t *testi
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	host := server.URL
 	server.Close()
-	_, err = (&Arr{Host: host, Token: "secret", Type: Radarr}).SearchMovies(t.Context(), []int{7})
+	unreachable := testService(Arr{Host: host, Token: "secret", Type: Radarr})
+	_, err = unreachable.SearchMovies(t.Context(), "arr", []int{7})
 	if !errors.Is(err, ErrMutationOutcomeUnknown) {
 		t.Fatalf("transport error = %v, want unknown outcome", err)
 	}

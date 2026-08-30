@@ -37,7 +37,7 @@ type Manager struct {
 	migrator     *Migrator
 	repair       *repair.Service
 	clients      *xsync.Map[string, debrid.Client]
-	arr          *arr.Storage
+	arr          *arr.Service
 	arrService   *reacquire.Service
 	arrIndexer   *reacquire.Indexer
 	logger       zerolog.Logger
@@ -167,7 +167,7 @@ func New() *Manager {
 		logger:                 _logger,
 		migrationJobs:          xsync.NewMap[string, *storage.SwitcherJob](),
 		config:                 cfg,
-		arr:                    arr.NewStorage(),
+		arr:                    arr.New(),
 		queue:                  newQueue(strg, cfg.RemoveStalledAfter),
 		ctx:                    ctx,
 		ready:                  make(chan struct{}),

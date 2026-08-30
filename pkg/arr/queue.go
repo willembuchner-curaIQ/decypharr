@@ -1,65 +1,24 @@
 package arr
 
 import (
+	"context"
 	"fmt"
 	"net/http"
-	gourl "net/url"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
 )
 
 type QueueAction string
 
-// actionFromConfig maps a config rule action string to a QueueAction. Unknown
-// or empty strings resolve to QueueActionNone (ignore).
-func actionFromConfig(s string) QueueAction {
-	switch s {
-	case string(QueueActionImport):
-		return QueueActionImport
-	case string(QueueActionBlocklist):
-		return QueueActionBlocklist
-	case string(QueueActionBlocklistResearch):
-		return QueueActionBlocklistResearch
-	default:
-		return QueueActionNone
-	}
-}
-
-// catalogMatchers holds the hardcoded predicates for built-in catalog rules,
-// keyed by config.QueueCleanupRule.ID. text is the lowercased join of every
-// statusMessages title + message for the queue item.
-var catalogMatchers = map[string]func(q QueueSchema, text string) bool{
-	"failed_download": func(q QueueSchema, _ string) bool {
-		return strings.EqualFold(q.Status, "failed")
-	},
-	"title_mismatch": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "title mismatch")
-	},
-	"matched_by_id": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "matched to") && strings.Contains(text, "by id")
-	},
-	"unable_to_parse": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "unable to parse download")
-	},
-	"no_eligible_files": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "no files found are eligible")
-	},
-	"episodes_missing": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "not imported or missing from the release")
-	},
-	"file_empty": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "file is empty")
-	},
-	"invalid_local_path": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "is not a valid local path")
-	},
-	"not_grabbed": func(_ QueueSchema, text string) bool {
-		return strings.Contains(text, "not in a category")
-	},
-}
+const (
+	QueueActionNone              QueueAction = ""
+	QueueActionImport            QueueAction = "import"
+	QueueActionBlocklist         QueueAction = "blacklist"
+	QueueActionBlocklistResearch QueueAction = "blacklist_research"
+)
 
 type QueueResponseScheme struct {
 	Page          int           `json:"page"`
@@ -92,151 +51,166 @@ type QueueSchema struct {
 	Id                                  int    `json:"id"`
 }
 
-func (a *Arr) GetQueue() []QueueSchema {
-	query := gourl.Values{}
-	query.Add("page", "1")
-	query.Add("pageSize", "200")
-	results := make([]QueueSchema, 0)
+// catalogMatchers are the predicates for the built-in cleanup rules, keyed by
+// config.QueueCleanupRule.ID. text is the lowercased join of a queue item's
+// status message titles and messages.
+var catalogMatchers = map[string]func(item QueueSchema, text string) bool{
+	"failed_download": func(item QueueSchema, _ string) bool {
+		return strings.EqualFold(item.Status, "failed")
+	},
+	"title_mismatch": func(_ QueueSchema, text string) bool {
+		return strings.Contains(text, "title mismatch")
+	},
+	"matched_by_id": func(_ QueueSchema, text string) bool {
+		return strings.Contains(text, "matched to") && strings.Contains(text, "by id")
+	},
+	"unable_to_parse": func(_ QueueSchema, text string) bool {
+		return strings.Contains(text, "unable to parse download")
+	},
+	"no_eligible_files": func(_ QueueSchema, text string) bool {
+		return strings.Contains(text, "no files found are eligible")
+	},
+	"episodes_missing": func(_ QueueSchema, text string) bool {
+		return strings.Contains(text, "not imported or missing from the release")
+	},
+	"file_empty": func(_ QueueSchema, text string) bool {
+		return strings.Contains(text, "file is empty")
+	},
+	"invalid_local_path": func(_ QueueSchema, text string) bool {
+		return strings.Contains(text, "is not a valid local path")
+	},
+	"not_grabbed": func(_ QueueSchema, text string) bool {
+		return strings.Contains(text, "not in a category")
+	},
+}
 
-	for {
-		url := "api/v3/queue" + "?" + query.Encode()
-		var data QueueResponseScheme
-		resp, err := a.Request(http.MethodGet, url, nil, &data)
+func (s *Service) Queue(ctx context.Context, name string) ([]QueueSchema, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return nil, err
+	}
+
+	items := make([]QueueSchema, 0)
+	for page := 1; ; page++ {
+		query := url.Values{"page": {strconv.Itoa(page)}, "pageSize": {"200"}}
+		var response QueueResponseScheme
+		resp, err := s.get(ctx, instance, "api/v3/queue?"+query.Encode(), &response)
 		if err != nil {
-			break
+			return items, err
 		}
-		if resp.StatusCode != http.StatusOK {
-			break
-		}
-
-		results = append(results, data.Records...)
-
-		if len(results) >= data.TotalRecords {
-			break
+		if err := expectStatus(resp, http.StatusOK); err != nil {
+			return items, err
 		}
 
-		query.Set("page", strconv.Itoa(data.Page+1))
+		items = append(items, response.Records...)
+		if len(response.Records) == 0 || len(items) >= response.TotalRecords {
+			return items, nil
+		}
 	}
-
-	return results
 }
 
-// queueItemText returns the lowercased join of every statusMessages title and
-// message for a queue item — the haystack all message-based rules match against.
-func queueItemText(q QueueSchema) string {
-	var b strings.Builder
-	for _, m := range q.StatusMessages {
-		b.WriteString(m.Title)
-		b.WriteByte(' ')
-		b.WriteString(strings.Join(m.Messages, " "))
-		b.WriteByte(' ')
+// CleanupQueue applies the configured cleanup rules to one instance's queue.
+func (s *Service) CleanupQueue(ctx context.Context, name string) error {
+	items, err := s.Queue(ctx, name)
+	if err != nil {
+		return err
 	}
-	return strings.ToLower(b.String())
+
+	rules := config.Get().QueueCleanup.Rules
+	var blocklist, blocklistResearch []int
+	var manualImports []string
+	for _, item := range items {
+		switch resolveQueueAction(item, rules) {
+		case QueueActionBlocklist:
+			blocklist = append(blocklist, item.Id)
+		case QueueActionBlocklistResearch:
+			blocklistResearch = append(blocklistResearch, item.Id)
+		case QueueActionImport:
+			manualImports = append(manualImports, item.DownloadId)
+		}
+	}
+
+	if len(blocklistResearch) > 0 {
+		if err := s.removeQueueItems(ctx, name, blocklistResearch, false); err != nil {
+			s.logger.Error().Err(err).Str("arr", name).Msg("Queue cleanup: blocklist and research failed")
+		}
+	}
+	if len(blocklist) > 0 {
+		if err := s.removeQueueItems(ctx, name, blocklist, true); err != nil {
+			s.logger.Error().Err(err).Str("arr", name).Msg("Queue cleanup: blocklist failed")
+		}
+	}
+	for _, downloadID := range manualImports {
+		if err := s.ManualImport(ctx, name, downloadID); err != nil {
+			s.logger.Error().Err(err).Str("arr", name).Msg("Queue cleanup: manual import failed")
+		}
+	}
+	return nil
 }
 
-// resolveAction decides what to do with a single queue item given the ordered
-// cleanup rule set. Only failed downloads and items flagged warning/error are
-// considered; everything else is left alone. Rules are evaluated in order and
-// the first match wins. No match resolves to QueueActionNone (ignore).
-func resolveAction(q QueueSchema, rules []config.QueueCleanupRule) QueueAction {
-	status := strings.ToLower(q.TrackedDownloadStatus)
-	if !strings.EqualFold(q.Status, "failed") && status != "warning" && status != "error" {
+// resolveQueueAction picks what to do with one queue item. Only failed items
+// and those flagged warning or error are considered, and the first matching
+// rule wins.
+func resolveQueueAction(item QueueSchema, rules []config.QueueCleanupRule) QueueAction {
+	status := strings.ToLower(item.TrackedDownloadStatus)
+	if !strings.EqualFold(item.Status, "failed") && status != "warning" && status != "error" {
 		return QueueActionNone
 	}
 
-	text := queueItemText(q)
-	for _, r := range rules {
+	var builder strings.Builder
+	for _, message := range item.StatusMessages {
+		builder.WriteString(message.Title)
+		builder.WriteByte(' ')
+		builder.WriteString(strings.Join(message.Messages, " "))
+		builder.WriteByte(' ')
+	}
+	text := strings.ToLower(builder.String())
+
+	for _, rule := range rules {
 		matched := false
-		if r.ID != "" {
-			if m, ok := catalogMatchers[r.ID]; ok {
-				matched = m(q, text)
+		if rule.ID != "" {
+			if match, ok := catalogMatchers[rule.ID]; ok {
+				matched = match(item, text)
 			}
-		} else if s := strings.ToLower(strings.TrimSpace(r.Match)); s != "" {
-			matched = strings.Contains(text, s)
+		} else if needle := strings.ToLower(strings.TrimSpace(rule.Match)); needle != "" {
+			matched = strings.Contains(text, needle)
 		}
-		if matched {
-			return actionFromConfig(r.Action)
+		if !matched {
+			continue
+		}
+		switch QueueAction(rule.Action) {
+		case QueueActionImport, QueueActionBlocklist, QueueActionBlocklistResearch:
+			return QueueAction(rule.Action)
+		default:
+			return QueueActionNone
 		}
 	}
 	return QueueActionNone
 }
 
-func (a *Arr) CleanupQueue() error {
-	if a == nil {
-		return fmt.Errorf("arr not configured")
-	}
-	l := logger.New("arr")
-	rules := config.Get().QueueCleanup.Rules
-
-	queue := a.GetQueue()
-	blacklists := make(map[int]bool)        // blocklist + remove, no re-search
-	blacklistResearch := make(map[int]bool) // blocklist + remove + re-search
-	manualImports := make(map[string]bool)  // force manual import
-	for _, q := range queue {
-		switch resolveAction(q, rules) {
-		case QueueActionBlocklist:
-			blacklists[q.Id] = true
-		case QueueActionBlocklistResearch:
-			blacklistResearch[q.Id] = true
-		case QueueActionImport:
-			manualImports[q.DownloadId] = true
-		}
-	}
-
-	if len(blacklistResearch) > 0 {
-		if err := a.removeQueueItems(blacklistResearch, true, false); err != nil {
-			l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: blacklist + research failed")
-		}
-	}
-	if len(blacklists) > 0 {
-		if err := a.removeQueueItems(blacklists, true, true); err != nil {
-			l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: blacklist failed")
-		}
-	}
-	if len(manualImports) > 0 {
-		go func() {
-			if err := a.ManualImportItems(manualImports); err != nil {
-				l.Error().Err(err).Str("arr", a.Name).Msg("queue cleanup: manual import failed")
-			}
-		}()
-	}
-
-	return nil
-}
-
-// removeQueueItems bulk-removes queue items from the arr. blocklist controls
-// whether the releases are added to the blocklist; skipRedownload controls
-// whether a re-search is triggered (false = re-search, the "research" action).
-func (a *Arr) removeQueueItems(items map[int]bool, blocklist, skipRedownload bool) error {
-	queueIDs := make([]int, 0, len(items))
-	for id := range items {
-		queueIDs = append(queueIDs, id)
-	}
-	payload := struct {
-		Ids []int `json:"ids"`
-	}{
-		Ids: queueIDs,
-	}
-	query := gourl.Values{}
-	query.Add("removeFromClient", "true")
-	query.Add("blocklist", strconv.FormatBool(blocklist))
-	query.Add("skipRedownload", strconv.FormatBool(skipRedownload))
-	query.Add("changeCategory", "false")
-	url := "api/v3/queue/bulk" + "?" + query.Encode()
-
-	_, err := a.Request(http.MethodDelete, url, payload, nil)
+// removeQueueItems blocklists and removes queue items. skipRedownload keeps the
+// Arr from searching for a replacement.
+func (s *Service) removeQueueItems(ctx context.Context, name string, ids []int, skipRedownload bool) error {
+	instance, err := s.instance(name)
 	if err != nil {
 		return err
 	}
-	return nil
-}
+	query := url.Values{
+		"removeFromClient": {"true"},
+		"blocklist":        {"true"},
+		"skipRedownload":   {strconv.FormatBool(skipRedownload)},
+		"changeCategory":   {"false"},
+	}
+	payload := struct {
+		Ids []int `json:"ids"`
+	}{Ids: ids}
 
-func (a *Arr) ManualImportItems(items map[string]bool) error {
-	for downloadId := range items {
-		if err := a.Import(downloadId); err != nil {
-			// log error
-			fmt.Println(err)
-		}
+	resp, err := s.mutate(ctx, instance, http.MethodDelete, "api/v3/queue/bulk?"+query.Encode(), payload, nil)
+	if err != nil {
+		return fmt.Errorf("remove queue items: %w", err)
+	}
+	if err := expectSuccess(resp); err != nil {
+		return fmt.Errorf("remove queue items: %w", err)
 	}
 	return nil
 }

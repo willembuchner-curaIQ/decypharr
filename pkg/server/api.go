@@ -32,7 +32,7 @@ type mountCachePurger interface {
 }
 
 func (s *Server) handleGetArrs(w http.ResponseWriter, r *http.Request) {
-	utils.JSONResponse(w, s.manager.Arr().GetAll(), http.StatusOK)
+	utils.JSONResponse(w, s.manager.Arr().All(), http.StatusOK)
 }
 
 func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
@@ -65,10 +65,11 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 		rmTrackerUrls = true
 	}
 
-	_arr := s.manager.Arr().Get(arrName)
-	if _arr == nil {
-		// These are not found in the config. They are throwaway arrs.
-		_arr = arr.New(arrName, "", "", false, downloadUncached, "", "")
+	// A category with no configured Arr is a throwaway that only routes the
+	// download.
+	instance, known := s.manager.Arr().Get(arrName)
+	if !known {
+		instance = arr.Arr{Name: arrName}
 	}
 
 	// Unified task type for all content types
@@ -170,7 +171,7 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "torrent":
-			importReq := manager.NewTorrentRequest(debridName, downloadFolder, task.magnet, _arr, config.DownloadAction(action), downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
+			importReq := manager.NewTorrentRequest(debridName, downloadFolder, task.magnet, instance, config.DownloadAction(action), downloadUncached, callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
 			if err := s.manager.AddNewTorrent(ctx, importReq); err != nil {
 				s.logger.Error().Err(err).Str("source", task.source).Msg("Failed to add torrent")
 				importReq.Error = err.Error()
@@ -179,7 +180,7 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 			return importReq
 
 		case "nzb":
-			importReq := manager.NewNZBRequest(task.name, downloadFolder, task.nzbContent, _arr, config.DownloadAction(action), callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
+			importReq := manager.NewNZBRequest(task.name, downloadFolder, task.nzbContent, instance, config.DownloadAction(action), callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
 			nzoID, err := s.manager.AddNewNZB(ctx, importReq)
 			if err != nil {
 				s.logger.Error().Err(err).Str("source", task.source).Msg("Failed to add NZB")

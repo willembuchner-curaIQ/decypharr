@@ -202,14 +202,14 @@ func cloneJob(job Job) Job {
 	return job
 }
 
-func validateMutationInstance(instance *arr.Arr, bindings []Binding) error {
-	fingerprint := instance.InstanceFingerprint()
+func validateMutationInstance(instance arr.Arr, bindings []Binding) error {
+	fingerprint := instance.Fingerprint()
 	if fingerprint == "" {
-		return errors.New("Arr instance identity is unavailable")
+		return errors.New("arr instance identity is unavailable")
 	}
 	for _, binding := range bindings {
 		if binding.ArrInstanceFingerprint != fingerprint {
-			return errors.New("Arr instance changed since binding was indexed")
+			return errors.New("arr instance changed since binding was indexed")
 		}
 	}
 	return nil

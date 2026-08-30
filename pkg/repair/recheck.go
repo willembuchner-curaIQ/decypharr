@@ -121,7 +121,7 @@ func (r *Service) RecheckMedia(ctx context.Context, arrName, mediaID string, fix
 	return run, nil
 }
 
-func (r *Service) executeRecheckMedia(ctx context.Context, run *storage.RepairRun, arrs []*arr.Arr, arrName, mediaID string, fix bool) {
+func (r *Service) executeRecheckMedia(ctx context.Context, run *storage.RepairRun, arrs []arr.Arr, arrName, mediaID string, fix bool) {
 	candidates := make(map[string]*candidate)
 	var lastErr error
 	for _, a := range arrs {
@@ -182,19 +182,19 @@ func (r *Service) executeRecheckMedia(ctx context.Context, run *storage.RepairRu
 		Msg("RecheckMedia: completed")
 }
 
-func (r *Service) resolveArrsForMedia(arrName string) ([]*arr.Arr, error) {
+func (r *Service) resolveArrsForMedia(arrName string) ([]arr.Arr, error) {
 	if arrName != "" {
-		a := r.arrs.Get(arrName)
-		if a == nil {
+		instance, ok := r.arrs.Get(arrName)
+		if !ok {
 			return nil, fmt.Errorf("arr %q not found", arrName)
 		}
-		if a.Host == "" || a.Token == "" {
+		if !instance.Reachable() {
 			return nil, fmt.Errorf("arr %q is not configured", arrName)
 		}
-		if a.SkipRepair {
+		if instance.SkipRepair {
 			return nil, fmt.Errorf("arr %q has skip_repair set", arrName)
 		}
-		return []*arr.Arr{a}, nil
+		return []arr.Arr{instance}, nil
 	}
 	all := r.eligibleArrs(nil)
 	if len(all) == 0 {

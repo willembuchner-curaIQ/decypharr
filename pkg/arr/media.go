@@ -32,7 +32,7 @@ type CommandBody struct {
 	MovieIDs     []int  `json:"movieIds,omitempty"`
 }
 
-type managedFileResource struct {
+type mediaFile struct {
 	ID           int    `json:"id"`
 	Path         string `json:"path"`
 	Size         int64  `json:"size"`
@@ -41,58 +41,39 @@ type managedFileResource struct {
 	MovieID      int    `json:"movieId"`
 }
 
-func (a *Arr) GetDownloadClientConfig(ctx context.Context) (DownloadClientConfig, error) {
-	if a == nil {
-		return DownloadClientConfig{}, fmt.Errorf("arr not configured")
+func (s *Service) DownloadClientConfig(ctx context.Context, name string) (DownloadClientConfig, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return DownloadClientConfig{}, err
 	}
 
-	var config DownloadClientConfig
-	resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/config/downloadclient", nil, &config)
+	var clientConfig DownloadClientConfig
+	resp, err := s.get(ctx, instance, "api/v3/config/downloadclient", &clientConfig)
 	if err != nil {
 		return DownloadClientConfig{}, fmt.Errorf("get download client config: %w", err)
 	}
 	if err := expectStatus(resp, http.StatusOK); err != nil {
 		return DownloadClientConfig{}, fmt.Errorf("get download client config: %w", err)
 	}
-	return config, nil
+	return clientConfig, nil
 }
 
-func (a *Arr) DeleteManagedFile(ctx context.Context, fileID int) error {
-	if a == nil {
-		return fmt.Errorf("arr not configured")
-	}
-
-	switch a.Type {
-	case Sonarr:
-		return a.DeleteEpisodeFile(ctx, fileID)
-	case Radarr:
-		return a.DeleteMovieFile(ctx, fileID)
-	default:
-		return fmt.Errorf("delete managed file: unsupported arr type %q", a.Type)
-	}
-}
-
-func (a *Arr) ManagedFile(ctx context.Context, fileID int) (LibraryFile, bool, error) {
-	if a == nil {
-		return LibraryFile{}, false, fmt.Errorf("arr not configured")
+// LibraryFile reads one imported file by its Arr file ID.
+func (s *Service) LibraryFile(ctx context.Context, name string, fileID int) (LibraryFile, bool, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return LibraryFile{}, false, err
 	}
 	if fileID <= 0 {
-		return LibraryFile{}, false, fmt.Errorf("get managed file: invalid file ID %d", fileID)
+		return LibraryFile{}, false, fmt.Errorf("get arr file: invalid file ID %d", fileID)
+	}
+	resource, err := fileResource(instance.Type)
+	if err != nil {
+		return LibraryFile{}, false, err
 	}
 
-	var resource string
-	switch a.Type {
-	case Sonarr:
-		resource = "episodefile"
-	case Radarr:
-		resource = "moviefile"
-	default:
-		return LibraryFile{}, false, fmt.Errorf("get managed file: unsupported arr type %q", a.Type)
-	}
-
-	var file managedFileResource
-	endpoint := fmt.Sprintf("api/v3/%s/%d", resource, fileID)
-	resp, err := a.RequestCtx(ctx, http.MethodGet, endpoint, nil, &file)
+	var file mediaFile
+	resp, err := s.get(ctx, instance, fmt.Sprintf("api/v3/%s/%d", resource, fileID), &file)
 	if err != nil {
 		return LibraryFile{}, false, fmt.Errorf("get %s %d: %w", resource, fileID, err)
 	}
@@ -102,6 +83,7 @@ func (a *Arr) ManagedFile(ctx context.Context, fileID int) (LibraryFile, bool, e
 	if err := expectStatus(resp, http.StatusOK); err != nil {
 		return LibraryFile{}, false, fmt.Errorf("get %s %d: %w", resource, fileID, err)
 	}
+
 	libraryFile := LibraryFile{
 		ArrFileID:    file.ID,
 		Path:         file.Path,
@@ -110,37 +92,32 @@ func (a *Arr) ManagedFile(ctx context.Context, fileID int) (LibraryFile, bool, e
 		SeasonNumber: file.SeasonNumber,
 		MovieID:      file.MovieID,
 	}
-	if a.Type == Sonarr {
-		episodesByFile, err := a.sonarrEpisodeIDsByFile(ctx, file.SeriesID)
+	if instance.Type == Sonarr {
+		episodesByFile, err := s.sonarrEpisodeIDs(ctx, instance, file.SeriesID)
 		if err != nil {
 			return LibraryFile{}, false, err
 		}
-		libraryFile.EpisodeIDs = slices.Clone(episodesByFile[file.ID])
+		libraryFile.EpisodeIDs = episodesByFile[file.ID]
 	}
 	return libraryFile, true, nil
 }
 
-func (a *Arr) DeleteEpisodeFile(ctx context.Context, fileID int) error {
-	if err := a.requireType(Sonarr); err != nil {
+// DeleteLibraryFile removes one imported file. A file the Arr no longer has is
+// treated as deleted.
+func (s *Service) DeleteLibraryFile(ctx context.Context, name string, fileID int) error {
+	instance, err := s.instance(name)
+	if err != nil {
 		return err
 	}
-	return a.deleteFile(ctx, "episodefile", fileID)
-}
-
-func (a *Arr) DeleteMovieFile(ctx context.Context, fileID int) error {
-	if err := a.requireType(Radarr); err != nil {
-		return err
-	}
-	return a.deleteFile(ctx, "moviefile", fileID)
-}
-
-func (a *Arr) deleteFile(ctx context.Context, resource string, fileID int) error {
 	if fileID <= 0 {
-		return fmt.Errorf("delete %s: invalid file ID %d", resource, fileID)
+		return fmt.Errorf("delete arr file: invalid file ID %d", fileID)
+	}
+	resource, err := fileResource(instance.Type)
+	if err != nil {
+		return err
 	}
 
-	endpoint := fmt.Sprintf("api/v3/%s/%d", resource, fileID)
-	resp, err := a.RequestCtx(ctx, http.MethodDelete, endpoint, nil, nil)
+	resp, err := s.mutate(ctx, instance, http.MethodDelete, fmt.Sprintf("api/v3/%s/%d", resource, fileID), nil, nil)
 	if err != nil {
 		return fmt.Errorf("delete %s %d: %w", resource, fileID, err)
 	}
@@ -153,57 +130,71 @@ func (a *Arr) deleteFile(ctx context.Context, resource string, fileID int) error
 	return nil
 }
 
-func (a *Arr) SearchEpisodes(ctx context.Context, episodeIDs []int) (Command, error) {
-	if err := a.requireType(Sonarr); err != nil {
+func (s *Service) SearchEpisodes(ctx context.Context, name string, episodeIDs []int) (Command, error) {
+	instance, err := s.instanceOfType(name, Sonarr)
+	if err != nil {
 		return Command{}, err
 	}
-	ids, err := normalizedIDs(episodeIDs)
+	ids, err := uniqueIDs(episodeIDs)
 	if err != nil {
 		return Command{}, fmt.Errorf("episode search: %w", err)
 	}
-	return a.postCommand(ctx, struct {
+	return s.command(ctx, instance, struct {
 		Name       string `json:"name"`
 		EpisodeIDs []int  `json:"episodeIds"`
 	}{Name: "EpisodeSearch", EpisodeIDs: ids})
 }
 
-func (a *Arr) SearchSeason(ctx context.Context, seriesID, seasonNumber int) (Command, error) {
-	if err := a.requireType(Sonarr); err != nil {
+func (s *Service) SearchSeason(ctx context.Context, name string, seriesID, seasonNumber int) (Command, error) {
+	instance, err := s.instanceOfType(name, Sonarr)
+	if err != nil {
 		return Command{}, err
 	}
-	if seriesID <= 0 {
-		return Command{}, fmt.Errorf("season search: invalid series ID %d", seriesID)
+	if seriesID <= 0 || seasonNumber < 0 {
+		return Command{}, fmt.Errorf("season search: invalid series %d season %d", seriesID, seasonNumber)
 	}
-	if seasonNumber < 0 {
-		return Command{}, fmt.Errorf("season search: invalid season number %d", seasonNumber)
-	}
-	return a.postCommand(ctx, struct {
+	return s.command(ctx, instance, struct {
 		Name         string `json:"name"`
 		SeriesID     int    `json:"seriesId"`
 		SeasonNumber int    `json:"seasonNumber"`
 	}{Name: "SeasonSearch", SeriesID: seriesID, SeasonNumber: seasonNumber})
 }
 
-func (a *Arr) SearchMovies(ctx context.Context, movieIDs []int) (Command, error) {
-	if err := a.requireType(Radarr); err != nil {
+func (s *Service) SearchMovies(ctx context.Context, name string, movieIDs []int) (Command, error) {
+	instance, err := s.instanceOfType(name, Radarr)
+	if err != nil {
 		return Command{}, err
 	}
-	ids, err := normalizedIDs(movieIDs)
+	ids, err := uniqueIDs(movieIDs)
 	if err != nil {
 		return Command{}, fmt.Errorf("movie search: %w", err)
 	}
-	return a.postCommand(ctx, struct {
+	return s.command(ctx, instance, struct {
 		Name     string `json:"name"`
 		MovieIDs []int  `json:"movieIds"`
 	}{Name: "MoviesSearch", MovieIDs: ids})
 }
 
-func (a *Arr) Commands(ctx context.Context) ([]Command, error) {
-	if a == nil {
-		return nil, fmt.Errorf("arr not configured")
+// RefreshMonitoredDownloads asks the Arr to re-read its download client.
+func (s *Service) RefreshMonitoredDownloads(ctx context.Context, name string) error {
+	instance, err := s.instance(name)
+	if err != nil {
+		return err
 	}
+	_, err = s.command(ctx, instance, struct {
+		Name string `json:"name"`
+	}{Name: "RefreshMonitoredDownloads"})
+	return err
+}
+
+func (s *Service) Commands(ctx context.Context, name string) ([]Command, error) {
+	instance, err := s.instance(name)
+	if err != nil {
+		return nil, err
+	}
+
 	var commands []Command
-	resp, err := a.RequestCtx(ctx, http.MethodGet, "api/v3/command", nil, &commands)
+	resp, err := s.get(ctx, instance, "api/v3/command", &commands)
 	if err != nil {
 		return nil, fmt.Errorf("list arr commands: %w", err)
 	}
@@ -213,15 +204,14 @@ func (a *Arr) Commands(ctx context.Context) ([]Command, error) {
 	return commands, nil
 }
 
-func (a *Arr) postCommand(ctx context.Context, payload any) (Command, error) {
+func (s *Service) command(ctx context.Context, instance Arr, payload any) (Command, error) {
 	var command Command
-	resp, err := a.requestMutationCtx(ctx, http.MethodPost, "api/v3/command", payload, &command)
+	resp, err := s.mutate(ctx, instance, http.MethodPost, "api/v3/command", payload, &command)
 	if err != nil {
-		err = fmt.Errorf("submit arr command: %w", err)
-		if ambiguousMutationRequest(resp, err) {
-			return Command{}, UnknownMutationOutcome(err, 0)
+		if dispatched(resp, err) {
+			return Command{}, UnknownMutationOutcome(fmt.Errorf("submit arr command: %w", err), 0)
 		}
-		return Command{}, err
+		return Command{}, fmt.Errorf("submit arr command: %w", err)
 	}
 	if err := expectSuccess(resp); err != nil {
 		return Command{}, fmt.Errorf("submit arr command: %w", err)
@@ -229,53 +219,27 @@ func (a *Arr) postCommand(ctx context.Context, payload any) (Command, error) {
 	return command, nil
 }
 
-func (a *Arr) requireType(want Type) error {
-	if a == nil {
-		return fmt.Errorf("arr not configured")
+func fileResource(kind Type) (string, error) {
+	switch kind {
+	case Sonarr:
+		return "episodefile", nil
+	case Radarr:
+		return "moviefile", nil
+	default:
+		return "", fmt.Errorf("%w: %s", ErrUnsupportedType, kind)
 	}
-	if a.Type != want {
-		return fmt.Errorf("arr %q is %s, want %s", a.Name, a.Type, want)
-	}
-	return nil
 }
 
-func normalizedIDs(ids []int) ([]int, error) {
+func uniqueIDs(ids []int) ([]int, error) {
 	if len(ids) == 0 {
 		return nil, fmt.Errorf("at least one ID is required")
 	}
-
-	result := make([]int, 0, len(ids))
-	seen := make(map[int]struct{}, len(ids))
 	for _, id := range ids {
 		if id <= 0 {
 			return nil, fmt.Errorf("invalid ID %d", id)
 		}
-		if _, ok := seen[id]; ok {
-			continue
-		}
-		seen[id] = struct{}{}
-		result = append(result, id)
 	}
-	slices.Sort(result)
-	return result, nil
-}
-
-func expectStatus(resp *http.Response, allowed ...int) error {
-	if resp == nil {
-		return fmt.Errorf("arr returned no response")
-	}
-	if slices.Contains(allowed, resp.StatusCode) {
-		return nil
-	}
-	return fmt.Errorf("arr returned %s", resp.Status)
-}
-
-func expectSuccess(resp *http.Response) error {
-	if resp == nil {
-		return fmt.Errorf("arr returned no response")
-	}
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		return nil
-	}
-	return fmt.Errorf("arr returned %s", resp.Status)
+	unique := slices.Clone(ids)
+	slices.Sort(unique)
+	return slices.Compact(unique), nil
 }
