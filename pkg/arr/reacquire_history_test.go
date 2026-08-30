@@ -71,11 +71,37 @@ func TestImportHistoryRequestsImportEvents(t *testing.T) {
 	defer server.Close()
 
 	a := &Arr{Host: server.URL, Token: "secret", Type: Radarr}
-	records, err := a.ImportHistory(t.Context())
+	records, err := a.ImportHistory(t.Context(), map[string]struct{}{"download-1": {}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(records) != 1 || records[0].Data["droppedPath"] != "/downloads/movie.mkv" {
 		t.Fatalf("records = %#v", records)
+	}
+}
+
+func TestImportHistorySkipsUnwantedDownloads(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		_, _ = fmt.Fprint(w, `{"page":1,"totalRecords":100000,"records":[{"id":8,"downloadId":"other","eventType":"downloadFolderImported"}]}`)
+	}))
+	defer server.Close()
+
+	a := &Arr{Host: server.URL, Token: "secret", Type: Radarr}
+	records, err := a.ImportHistory(t.Context(), nil)
+	if err != nil || len(records) != 0 || requests != 0 {
+		t.Fatalf("records = %#v, requests = %d, err = %v", records, requests, err)
+	}
+
+	records, err = a.ImportHistory(t.Context(), map[string]struct{}{"download-1": {}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records = %#v, want only wanted downloads", records)
+	}
+	if requests != importHistoryMaxPages {
+		t.Fatalf("requests = %d, want the page budget %d", requests, importHistoryMaxPages)
 	}
 }

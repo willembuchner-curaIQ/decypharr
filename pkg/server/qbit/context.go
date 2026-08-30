@@ -165,9 +165,14 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 	}
 
 	arrValidated := false
+	validatedType := a.Type
 	if username != "" && password != "" {
 		candidate := arr.New(category, username, password, a.SkipRepair, a.DownloadUncached, a.SelectedDebrid, string(arr.SourceAuto))
 		arrValidated = candidate.Validate() == nil
+		if arrValidated {
+			// Validate resolves the application the instance actually runs.
+			validatedType = candidate.Type
+		}
 	}
 
 	if !arrValidated && cfg.UseAuth {
@@ -181,6 +186,7 @@ func (q *QBit) authenticate(category, username, password string) (*arr.Arr, erro
 		updated := *a
 		updated.Host = username
 		updated.Token = password
+		updated.Type = validatedType
 		q.manager.Arr().AddOrUpdate(&updated)
 		a = &updated
 	}

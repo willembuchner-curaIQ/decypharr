@@ -48,11 +48,11 @@ func TestAuthenticateDoesNotOverwriteArrWithClientCredentials(t *testing.T) {
 func TestAuthenticateDiscoversValidatedArrCredentials(t *testing.T) {
 	q := newAuthenticationTestQBit(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/health" || r.Header.Get("X-Api-Key") != "arr-api-key" {
+		if r.URL.Path != "/api/v3/system/status" || r.Header.Get("X-Api-Key") != "arr-api-key" {
 			http.Error(w, "unexpected Arr validation request", http.StatusBadRequest)
 			return
 		}
-		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"appName":"Sonarr"}`))
 	}))
 	t.Cleanup(server.Close)
 
@@ -62,6 +62,9 @@ func TestAuthenticateDiscoversValidatedArrCredentials(t *testing.T) {
 	}
 	if got.Host != server.URL || got.Token != "arr-api-key" || got.Source != arr.SourceAuto {
 		t.Fatalf("authenticated Arr = %#v", got)
+	}
+	if got.Type != arr.Sonarr {
+		t.Fatalf("Arr type = %q, want the type the instance reported", got.Type)
 	}
 	stored := q.manager.Arr().Get("whisparr")
 	if stored == nil || stored.Host != server.URL || stored.Token != "arr-api-key" {

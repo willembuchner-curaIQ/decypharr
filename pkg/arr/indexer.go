@@ -40,8 +40,10 @@ type ManagedFile struct {
 }
 
 // ManagedCatalog exposes managed files without coupling pkg/arr to storage.
+// A non-empty entry ID must return only that entry's files: a targeted index
+// runs after every completed download and must not walk the whole library.
 type ManagedCatalog interface {
-	ListManagedFiles(context.Context, string) ([]ManagedFile, error)
+	ListManagedFiles(ctx context.Context, arrName, entryID string) ([]ManagedFile, error)
 }
 
 type bindingWriter interface {
@@ -247,13 +249,12 @@ func (indexer *Indexer) handle(ctx context.Context, request indexRequest) {
 }
 
 func (indexer *Indexer) reconcile(ctx context.Context, instance *Arr, entryID string) (bool, error) {
-	managed, err := indexer.catalog.ListManagedFiles(ctx, instance.Name)
+	managed, err := indexer.catalog.ListManagedFiles(ctx, instance.Name, entryID)
 	if err != nil {
 		return false, err
 	}
 	var history []HistoryRecord
 	if entryID != "" {
-		managed = filterManagedEntry(managed, entryID)
 		history, err = indexer.historyForManaged(ctx, instance, managed, nil)
 		if err != nil {
 			return false, err
@@ -276,8 +277,8 @@ func (indexer *Indexer) reconcile(ctx context.Context, instance *Arr, entryID st
 		if reader, ok := indexer.writer.(bindingSnapshotReader); ok {
 			bindings = carryForwardBindings(instance, generation, bindings, reader.BindingsByArr(instance.Name), library, managed)
 		}
-		if hasUnmatchedManagedFiles(managed, bindings) {
-			history, err := instance.ImportHistory(ctx)
+		if unmatched := unmatchedDownloadIDs(managed, bindings); len(unmatched) > 0 {
+			history, err := instance.ImportHistory(ctx, unmatched)
 			if err != nil {
 				return false, err
 			}
@@ -313,37 +314,12 @@ func (indexer *Indexer) retry(ctx context.Context, request indexRequest, delay t
 	})
 }
 
-func filterManagedEntry(files []ManagedFile, entryID string) []ManagedFile {
-	result := files[:0]
-	for _, file := range files {
-		if file.EntryID == entryID {
-			result = append(result, file)
-		}
-	}
-	return result
-}
-
 func bindingsFromMatches(instance *Arr, generation uint64, matches []libraryMatch) []Binding {
 	bindings := make([]Binding, 0, len(matches))
 	for _, match := range matches {
 		bindings = append(bindings, bindingFromFiles(instance, generation, BindingConfidenceExactPath, match.library, match.managed))
 	}
 	return bindings
-}
-
-func (indexer *Indexer) bindingsFromHistory(
-	ctx context.Context,
-	instance *Arr,
-	generation uint64,
-	library []LibraryFile,
-	managed []ManagedFile,
-	existing []Binding,
-) ([]Binding, error) {
-	records, err := indexer.historyForManaged(ctx, instance, managed, existing)
-	if err != nil {
-		return nil, err
-	}
-	return bindingsFromHistoryRecords(instance, generation, library, managed, existing, records), nil
 }
 
 func (indexer *Indexer) historyForManaged(
@@ -440,14 +416,20 @@ func bindingsFromHistoryRecords(
 	return bindings
 }
 
-func hasUnmatchedManagedFiles(managed []ManagedFile, bindings []Binding) bool {
+// unmatchedDownloadIDs returns the downloads whose managed files no exact path
+// match covered, which is the only history the index still needs to look up.
+func unmatchedDownloadIDs(managed []ManagedFile, bindings []Binding) map[string]struct{} {
 	matched := bindingKeys(bindings)
+	downloadIDs := make(map[string]struct{})
 	for _, file := range managed {
-		if _, ok := matched[entryFileKey{entryID: file.EntryID, fileID: file.FileID}]; !ok {
-			return true
+		if _, ok := matched[entryFileKey{entryID: file.EntryID, fileID: file.FileID}]; ok {
+			continue
+		}
+		if file.DownloadID != "" {
+			downloadIDs[file.DownloadID] = struct{}{}
 		}
 	}
-	return false
+	return downloadIDs
 }
 
 func bindingKeys(bindings []Binding) map[entryFileKey]struct{} {

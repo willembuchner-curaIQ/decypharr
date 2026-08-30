@@ -149,17 +149,13 @@ func TestBindingsFromHistoryUsesExactDroppedPath(t *testing.T) {
 	defer server.Close()
 
 	instance := &Arr{Name: "movies", Host: server.URL, Token: "secret", Type: Radarr}
-	bindings, err := (&Indexer{}).bindingsFromHistory(
-		t.Context(),
-		instance,
-		3,
-		[]LibraryFile{{ArrFileID: 42, Path: "/library/Movie (2025)/Movie.mkv", MovieID: 9}},
-		[]ManagedFile{{EntryID: "entry", FileID: "file", DownloadID: "download-1", Path: "/downloads/movie.mkv"}},
-		nil,
-	)
+	library := []LibraryFile{{ArrFileID: 42, Path: "/library/Movie (2025)/Movie.mkv", MovieID: 9}}
+	managed := []ManagedFile{{EntryID: "entry", FileID: "file", DownloadID: "download-1", Path: "/downloads/movie.mkv"}}
+	records, err := (&Indexer{}).historyForManaged(t.Context(), instance, managed, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	bindings := bindingsFromHistoryRecords(instance, 3, library, managed, nil, records)
 	if len(bindings) != 1 || bindings[0].Confidence != BindingConfidenceDownloadHistory {
 		t.Fatalf("bindings = %#v", bindings)
 	}

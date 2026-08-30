@@ -15,18 +15,27 @@ const (
 	HistoryEventDownloadFailed = "downloadFailed"
 	historyPageSize            = 100
 	importHistoryPageSize      = 1000
+	importHistoryMaxPages      = 20
 	importHistoryEventType     = 3
 	grabbedHistoryEventType    = 1
 )
 
-func (a *Arr) ImportHistory(ctx context.Context) ([]HistoryRecord, error) {
+// ImportHistory returns the import records for the given download IDs, newest
+// first. The scan is bounded: a large library has far more history than the
+// index needs, so it keeps only wanted records and stops once every download
+// is found or the page budget runs out.
+func (a *Arr) ImportHistory(ctx context.Context, downloadIDs map[string]struct{}) ([]HistoryRecord, error) {
 	if a == nil {
 		return nil, fmt.Errorf("arr not configured")
 	}
+	if len(downloadIDs) == 0 {
+		return nil, nil
+	}
 
 	records := make([]HistoryRecord, 0)
+	found := make(map[string]struct{}, len(downloadIDs))
 	fetched := 0
-	for page := 1; ; page++ {
+	for page := 1; page <= importHistoryMaxPages; page++ {
 		query := url.Values{}
 		query.Set("page", strconv.Itoa(page))
 		query.Set("pageSize", strconv.Itoa(importHistoryPageSize))
@@ -45,11 +54,16 @@ func (a *Arr) ImportHistory(ctx context.Context) ([]HistoryRecord, error) {
 
 		fetched += len(history.Records)
 		for _, record := range history.Records {
-			if strings.EqualFold(record.EventType, "downloadFolderImported") {
-				records = append(records, record)
+			if _, wanted := downloadIDs[record.DownloadID]; !wanted {
+				continue
 			}
+			if !strings.EqualFold(record.EventType, "downloadFolderImported") {
+				continue
+			}
+			records = append(records, record)
+			found[record.DownloadID] = struct{}{}
 		}
-		if len(history.Records) == 0 || fetched >= history.TotalRecords {
+		if len(found) == len(downloadIDs) || len(history.Records) == 0 || fetched >= history.TotalRecords {
 			break
 		}
 	}
