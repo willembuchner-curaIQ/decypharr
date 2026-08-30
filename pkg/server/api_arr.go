@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	json "github.com/bytedance/sonic"
@@ -11,6 +12,10 @@ import (
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr/reacquire"
 )
+
+// arrBindingSearchMax bounds a binding search: the index can hold hundreds of
+// thousands of bindings and the picker only shows a page of them.
+const arrBindingSearchMax = 50
 
 func (s *Server) handleListArrReacquireJobs(w http.ResponseWriter, _ *http.Request) {
 	service := s.manager.ArrService()
@@ -109,4 +114,28 @@ func validateArrReacquireRequest(request reacquire.Request) string {
 	default:
 		return ""
 	}
+}
+
+func (s *Server) handleGetArrIndex(w http.ResponseWriter, _ *http.Request) {
+	service := s.manager.ArrService()
+	if service == nil {
+		s.sendJSONError(w, "Arr reacquisition service is not available", http.StatusServiceUnavailable)
+		return
+	}
+	utils.JSONResponse(w, service.IndexSummary(), http.StatusOK)
+}
+
+func (s *Server) handleSearchArrBindings(w http.ResponseWriter, r *http.Request) {
+	service := s.manager.ArrService()
+	if service == nil {
+		s.sendJSONError(w, "Arr reacquisition service is not available", http.StatusServiceUnavailable)
+		return
+	}
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || limit <= 0 || limit > arrBindingSearchMax {
+		limit = arrBindingSearchMax
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	arrName := strings.TrimSpace(r.URL.Query().Get("arr"))
+	utils.JSONResponse(w, service.SearchBindings(arrName, query, limit), http.StatusOK)
 }

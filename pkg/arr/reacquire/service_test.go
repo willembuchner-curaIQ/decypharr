@@ -394,3 +394,37 @@ func waitForJobStatus(t *testing.T, service *Service, id string, status Status) 
 	t.Fatalf("job status = %q, want %q", job.Status, status)
 	return Job{}
 }
+
+func TestIndexSummaryAndSearch(t *testing.T) {
+	index := NewIndex()
+	bindings := []Binding{
+		{ArrName: "sonarr", ArrType: arr.Sonarr, EntryID: "e1", EntryFileID: "f1",
+			EntryName: "The Expanse S03", EntryFileName: "The.Expanse.S03E01.mkv",
+			ArrFileID: 1, LibraryPath: "/library/a.mkv", ArrInstanceFingerprint: "v1:a",
+			Confidence: ConfidenceExactPath, SeriesID: 4},
+		{ArrName: "sonarr", ArrType: arr.Sonarr, EntryID: "e2", EntryFileID: "f2",
+			EntryName: "Severance S01", EntryFileName: "Severance.S01E02.mkv"},
+	}
+	if err := index.ReplaceArrGeneration("sonarr", 9, bindings); err != nil {
+		t.Fatal(err)
+	}
+
+	summaries := index.Summary()
+	if len(summaries) != 1 {
+		t.Fatalf("summaries = %#v", summaries)
+	}
+	if summaries[0].Bindings != 2 || summaries[0].Actionable != 1 || summaries[0].Generation != 9 {
+		t.Fatalf("summary = %#v, want 2 bindings and 1 actionable", summaries[0])
+	}
+
+	matches := index.Search("", "expanse", 10)
+	if len(matches) != 1 || matches[0].EntryFileID != "f1" {
+		t.Fatalf("search matches = %#v", matches)
+	}
+	if got := index.Search("radarr", "", 10); len(got) != 0 {
+		t.Fatalf("search crossed Arr boundary: %#v", got)
+	}
+	if got := index.Search("", "", 1); len(got) != 1 {
+		t.Fatalf("search ignored the limit: %d results", len(got))
+	}
+}

@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
+	"time"
 	"unique"
+
+	"github.com/sirrobot01/decypharr/pkg/arr"
 )
 
 type entryFileKey struct {
@@ -123,6 +127,82 @@ func (i *Index) All() []Binding {
 	}
 	sortBindings(bindings)
 	return bindings
+}
+
+// ArrSummary is what one Arr contributes to the binding index.
+type ArrSummary struct {
+	ArrName    string    `json:"arrName"`
+	ArrType    arr.Type  `json:"arrType"`
+	Bindings   int       `json:"bindings"`
+	Actionable int       `json:"actionable"`
+	Generation uint64    `json:"generation"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+// Summary counts the index per Arr, so a caller can tell a warm index from an
+// empty one without reading hundreds of thousands of bindings.
+func (i *Index) Summary() []ArrSummary {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	byArr := make(map[string]*ArrSummary, len(i.byArr))
+	for arrName, generation := range i.generations {
+		byArr[arrName] = &ArrSummary{ArrName: arrName, Generation: generation}
+	}
+	for _, binding := range i.bindings {
+		summary, ok := byArr[binding.ArrName]
+		if !ok {
+			summary = &ArrSummary{ArrName: binding.ArrName}
+			byArr[binding.ArrName] = summary
+		}
+		summary.ArrType = binding.ArrType
+		summary.Bindings++
+		if binding.AuthorizesMutation() {
+			summary.Actionable++
+		}
+		if binding.UpdatedAt.After(summary.UpdatedAt) {
+			summary.UpdatedAt = binding.UpdatedAt
+		}
+	}
+
+	summaries := make([]ArrSummary, 0, len(byArr))
+	for _, summary := range byArr {
+		summaries = append(summaries, *summary)
+	}
+	slices.SortFunc(summaries, func(left, right ArrSummary) int {
+		return cmp.Compare(left.ArrName, right.ArrName)
+	})
+	return summaries
+}
+
+// Search returns bindings whose entry or file name contains query, capped at
+// limit. It is for a person picking one file, never for bulk reads.
+func (i *Index) Search(arrName, query string, limit int) []Binding {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if limit <= 0 {
+		limit = 25
+	}
+
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	matches := make([]Binding, 0, limit)
+	for _, binding := range i.bindings {
+		if arrName != "" && binding.ArrName != arrName {
+			continue
+		}
+		if query != "" &&
+			!strings.Contains(strings.ToLower(binding.EntryName), query) &&
+			!strings.Contains(strings.ToLower(binding.EntryFileName), query) {
+			continue
+		}
+		matches = append(matches, cloneBinding(binding))
+		if len(matches) >= limit {
+			break
+		}
+	}
+	sortBindings(matches)
+	return matches
 }
 
 func (i *Index) Generation(arrName string) uint64 {

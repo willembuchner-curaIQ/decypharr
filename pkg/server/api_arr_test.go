@@ -33,6 +33,8 @@ func TestArrReacquireRoutesRequireAuthentication(t *testing.T) {
 		{method: http.MethodGet, path: "/api/arr/reacquire/jobs/job-id"},
 		{method: http.MethodPost, path: "/api/arr/reacquire"},
 		{method: http.MethodPost, path: "/api/arr/index/refresh"},
+		{method: http.MethodGet, path: "/api/arr/index"},
+		{method: http.MethodGet, path: "/api/arr/bindings"},
 	}
 	for _, test := range tests {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {

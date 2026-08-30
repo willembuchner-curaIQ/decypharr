@@ -157,6 +157,16 @@ func (s *Service) Index() *Index {
 	return s.index
 }
 
+// IndexSummary reports what the binding index holds, per Arr.
+func (s *Service) IndexSummary() []ArrSummary {
+	return s.index.Summary()
+}
+
+// SearchBindings finds indexed files by name, for a person choosing one.
+func (s *Service) SearchBindings(arrName, query string, limit int) []Binding {
+	return s.index.Search(arrName, query, limit)
+}
+
 func (s *Service) Lookup(entryID, fileID string) (Binding, bool) {
 	return s.index.Lookup(entryID, fileID)
 }

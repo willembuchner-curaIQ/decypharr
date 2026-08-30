@@ -57,6 +57,9 @@
                 <li><a href="{{.URLBase}}repair" class="{{if eq .Page " repair"}}menu-active{{end}}">
                     <i class="bi bi-wrench-adjustable text-accent"></i>Repair
                     </a></li>
+                <li><a href="{{.URLBase}}reacquire" class="{{if eq .Page " reacquire"}}menu-active{{end}}">
+                    <i class="bi bi-arrow-repeat text-secondary"></i>Reacquire
+                    </a></li>
                 <li><a href="{{.URLBase}}settings" class="{{if eq .Page " config"}}menu-active{{end}}">
                     <i class="bi bi-gear text-info"></i>Settings
                     </a></li>
@@ -92,6 +95,11 @@
                 data-tip="Repair Media">
                 <i class="bi bi-wrench-adjustable"></i>
                 <span class="hidden xl:inline">Repair</span>
+                </a></li>
+            <li><a href="{{.URLBase}}reacquire" class="{{if eq .Page " reacquire"}}menu-active{{end}} tooltip
+                tooltip-bottom" data-tip="Arr Reacquisition">
+                <i class="bi bi-arrow-repeat"></i>
+                <span class="hidden xl:inline">Reacquire</span>
                 </a></li>
             <li><a href="{{.URLBase}}settings" class="{{if eq .Page " config"}}menu-active{{end}} tooltip
                 tooltip-bottom" data-tip="Settings">
@@ -141,6 +149,8 @@
     {{ template "download" . }}
     {{ else if eq .Page "repair" }}
     {{ template "repair" . }}
+    {{ else if eq .Page "reacquire" }}
+    {{ template "reacquire" . }}
     {{ else if eq .Page "stats" }}
     {{ template "stats" . }}
     {{ else if eq .Page "config" }}
@@ -195,6 +205,8 @@
 <script src="{{.URLBase}}assets/js/download.js"></script>
 {{ else if eq .Page "repair" }}
 <script src="{{.URLBase}}assets/js/repair.js"></script>
+{{ else if eq .Page "reacquire" }}
+<script src="{{.URLBase}}assets/js/reacquire.js"></script>
 {{ else if eq .Page "config" }}
 <script src="{{.URLBase}}assets/js/config.js"></script>
 {{ else if eq .Page "setup" }}

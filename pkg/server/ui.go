@@ -180,6 +180,19 @@ func (s *Server) RepairHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) ReacquireHandler(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Get()
+	data := map[string]any{
+		"URLBase":    cfg.URLBase,
+		"Page":       "reacquire",
+		"Title":      "Reacquire",
+		"SetupError": cfg.SetupError(),
+	}
+	if err := s.templates.ExecuteTemplate(w, "layout", data); err != nil {
+		s.logger.Warn().Err(err).Msg("error rendering /reacquire template")
+	}
+}
+
 func (s *Server) ConfigHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := config.Get()
 	data := map[string]any{
