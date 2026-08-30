@@ -563,6 +563,22 @@ func (t *usenetTransport) open(ctx context.Context, pos int64) (io.ReadCloser, e
 		t.markArticleNotFound(err)
 		return nil, err
 	}
+	// Unlike an HTTP transport, opening a Usenet handle performs no upstream
+	// I/O. Demand-read one byte so Session.Prime can reject a missing article
+	// before an HTTP/WebDAV handler commits successful response headers. The
+	// reader caches the containing segment, so the subsequent body read does
+	// not download it again and still starts at pos.
+	var probe [1]byte
+	n, err := h.ReadAtContext(ctx, probe[:], pos)
+	if err != nil && (!errors.Is(err, io.EOF) || n != len(probe)) {
+		_ = h.Close()
+		t.markArticleNotFound(err)
+		return nil, err
+	}
+	if n != len(probe) {
+		_ = h.Close()
+		return nil, fmt.Errorf("usenet stream prime at offset %d read %d bytes, want %d: %w", pos, n, len(probe), io.ErrUnexpectedEOF)
+	}
 	// Warm the read-ahead window from the starting offset (bounded inside).
 	h.Prefetch(ctx, pos, t.size-pos)
 	return &usenetBody{

@@ -113,6 +113,37 @@ func (missingArticleReader) ReadAtContext(context.Context, []byte, int64) (int, 
 func (missingArticleReader) Prefetch(context.Context, int64, int64) {}
 func (missingArticleReader) Close() error                           { return nil }
 
+func TestUsenetPrimeSurfacesMissingArticle(t *testing.T) {
+	var opens atomic.Int64
+	var notifications atomic.Int64
+	transport := &usenetTransport{
+		size: 4096,
+		openFile: func(context.Context) (DirectReader, error) {
+			opens.Add(1)
+			return missingArticleReader{}, nil
+		},
+		onArticleNotFound: func() {
+			notifications.Add(1)
+		},
+	}
+	stream := newSession(t.Context(), transport, 4096, 2048)
+	t.Cleanup(func() { _ = stream.Close() })
+
+	err := stream.Prime()
+	if !customerror.IsArticleNotFoundError(err) {
+		t.Fatalf("Prime error = %v, want article-not-found", err)
+	}
+	if got := opens.Load(); got != 1 {
+		t.Fatalf("Prime opened %d handles, want 1", got)
+	}
+	if got := notifications.Load(); got != 1 {
+		t.Fatalf("article-not-found notifications = %d, want 1", got)
+	}
+	if stream.body != nil {
+		t.Fatal("failed Prime retained a response body")
+	}
+}
+
 func TestUsenetArticleNotFoundQueuesOneNonBlockingReacquire(t *testing.T) {
 	recovery := &fakeArrRecovery{
 		binding: reacquire.Binding{

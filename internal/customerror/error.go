@@ -142,8 +142,9 @@ func NewArticleNotFoundError(err error) *Error {
 		err = errors.New("article not found")
 	}
 	return (&Error{
-		err:  err,
-		Code: usenetArticleNotFoundCode,
+		err:        err,
+		statusCode: http.StatusNotFound,
+		Code:       usenetArticleNotFoundCode,
 	}).Permanent()
 }
 

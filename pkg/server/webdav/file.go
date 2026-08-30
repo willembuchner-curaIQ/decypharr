@@ -61,7 +61,7 @@ func (h *Handler) StreamResponse(entry *storage.Entry, name string, size int64, 
 	// Fast-fail before headers: an unreachable link becomes a proper error
 	// status instead of a dead 200.
 	if err := stream.Prime(); err != nil {
-		return customerror.NewError(err, http.StatusInternalServerError, "server.internal_error", false, false)
+		return customerror.FromError(err)
 	}
 
 	length := end - start + 1

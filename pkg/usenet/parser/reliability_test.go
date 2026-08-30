@@ -8,8 +8,10 @@ import (
 
 	"github.com/Tensai75/nzbparser"
 	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/sirrobot01/decypharr/internal/testutil/nntpd"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
 )
@@ -96,7 +98,7 @@ func TestDecodedPartSizeDoesNotInventByteForMissingRange(t *testing.T) {
 
 func TestArchiveAndIgnoredFileTypeDetection(t *testing.T) {
 	p := &NZBParser{}
-	if got := p.detectFileTypeFromContent([]byte{'P', 'A', 'R', '2', 0, 'P', 'K', 'T'}); got != storage.NZBFileTypeIgnore {
+	if got, _ := p.detectFileTypeAndExtensionFromContent([]byte{'P', 'A', 'R', '2', 0, 'P', 'K', 'T'}); got != storage.NZBFileTypeIgnore {
 		t.Fatalf("parity data detected as %q, want ignored", got)
 	}
 	for _, name := range []string{"archive.r99", "archive.r123", "archive.s00", "archive.part100.rar"} {
@@ -112,6 +114,75 @@ func TestArchiveAndIgnoredFileTypeDetection(t *testing.T) {
 	if getZIPVolumeOrder("archive.z99") >= getZIPVolumeOrder("archive.z100") ||
 		getZIPVolumeOrder("archive.z100") >= getZIPVolumeOrder("archive.zip") {
 		t.Fatal("split ZIP volume ordering is not numeric with .zip last")
+	}
+}
+
+func TestContentDetectionInfersExtensionForObfuscatedMedia(t *testing.T) {
+	p := &NZBParser{}
+	tests := []struct {
+		name      string
+		data      []byte
+		extension string
+	}{
+		{name: "matroska", data: []byte{0x1A, 0x45, 0xDF, 0xA3}, extension: ".mkv"},
+		{name: "mp4", data: []byte{0, 0, 0, 0, 'f', 't', 'y', 'p'}, extension: ".mp4"},
+		{name: "avi", data: []byte{'R', 'I', 'F', 'F', 0, 0, 0, 0, 'A', 'V', 'I', ' '}, extension: ".avi"},
+		{name: "mpeg", data: []byte{0, 0, 1, 0xBA}, extension: ".mpg"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fileType, extension := p.detectFileTypeAndExtensionFromContent(tt.data)
+			if fileType != storage.NZBFileTypeMedia || extension != tt.extension {
+				t.Fatalf("content classification = (%q, %q), want (%q, %q)", fileType, extension, storage.NZBFileTypeMedia, tt.extension)
+			}
+		})
+	}
+}
+
+func TestExtensionlessObfuscatedMediaProducesLogicalFile(t *testing.T) {
+	config.Reset()
+	config.SetConfigPath(t.TempDir())
+	_ = config.Get()
+
+	server, err := nntpd.New(nntpd.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Close)
+
+	payload := make([]byte, 1024)
+	copy(payload, []byte{0x1A, 0x45, 0xDF, 0xA3})
+	server.AddArticle("<media@nntpd>", nntpd.Encode(payload, "hBnewXHwWBUEYm24QydJAcpQ4nNpC", 1, int64(len(payload)), 0))
+	host, port := server.Addr()
+	client, err := nntp.NewClient(&config.Config{Usenet: config.Usenet{
+		Providers: []config.UsenetProvider{{Host: host, Port: port, MaxConnections: 2}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	const source = `<?xml version="1.0" encoding="UTF-8"?>
+<nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">
+  <file poster="poster" date="1" subject="opaque [1/1] yEnc (1/1)">
+    <groups><group>alt.test</group></groups>
+    <segments><segment bytes="1100" number="1">media@nntpd</segment></segments>
+  </file>
+</nzb>`
+	p := NewParser(client, 2, zerolog.Nop())
+	_, groups, err := p.Parse(t.Context(), "Obfuscated.nzb", []byte(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	files, err := p.processFileGroups(t.Context(), groups, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("logical files = %d, want 1", len(files))
+	}
+	if files[0].Name != "hBnewXHwWBUEYm24QydJAcpQ4nNpC.mkv" {
+		t.Fatalf("logical filename = %q, want inferred .mkv extension", files[0].Name)
 	}
 }
 
