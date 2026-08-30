@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +19,7 @@ import (
 const (
 	bindingAttributeArrName  = "arrName"
 	bindingSnapshotKeyPrefix = "arr-binding-snapshot:"
+	bindingDeltaKeyPrefix    = "arr-binding-delta:"
 	bindingSnapshotVersion   = 1
 	jobAttributeArrName      = "arrName"
 	jobAttributeStatus       = "status"
@@ -28,10 +28,15 @@ const (
 type bindingRepositoryStore interface {
 	ForEach(func(string, []byte) error) error
 	Put(string, []byte, *appendstore.PutOptions) error
+	Delete(string) error
 	Sync() error
 	Close() error
 }
 
+// BindingRepository persists Arr bindings as one snapshot per Arr plus a delta
+// row per targeted change. A full reconciliation replaces the snapshot; single
+// upserts write one row, because a library can hold hundreds of thousands of
+// bindings and rewriting the snapshot per file does not scale.
 type BindingRepository struct {
 	mu     sync.RWMutex
 	store  bindingRepositoryStore
@@ -46,9 +51,24 @@ type bindingSnapshot struct {
 	Bindings   []Binding `json:"bindings"`
 }
 
+// bindingDelta is one change made since its Arr's snapshot was written.
+type bindingDelta struct {
+	Version     int      `json:"version"`
+	ArrName     string   `json:"arrName"`
+	EntryID     string   `json:"entryId"`
+	EntryFileID string   `json:"entryFileId"`
+	Generation  uint64   `json:"generation,omitzero"`
+	Deleted     bool     `json:"deleted,omitempty"`
+	Binding     *Binding `json:"binding,omitempty"`
+}
+
+// bindingRepositoryState indexes what is on disk. It never retains binding
+// payloads: the in-memory Index already holds those.
 type bindingRepositoryState struct {
-	snapshots map[string]bindingSnapshot
-	owners    map[string]string
+	owners      map[entryFileKey]string
+	generations map[string]uint64
+	deltas      map[entryFileKey]struct{}
+	legacy      map[string]map[entryFileKey]struct{}
 }
 
 func OpenBindingRepository(path string) (*BindingRepository, error) {
@@ -63,14 +83,12 @@ func (r *BindingRepository) LoadAll() ([]Binding, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	state, err := r.stateLocked()
+	bindings, state, err := r.scanLocked()
 	if err != nil {
 		return nil, err
 	}
-	bindings := make([]Binding, 0, len(state.owners))
-	for _, snapshot := range state.snapshots {
-		bindings = append(bindings, cloneBindings(snapshot.Bindings)...)
-	}
+	r.state = state
+	r.loaded = true
 	sortBindings(bindings)
 	return bindings, nil
 }
@@ -86,31 +104,27 @@ func (r *BindingRepository) Save(binding Binding) error {
 	if err != nil {
 		return err
 	}
-	key := bindingStoreKey(binding.EntryID, binding.EntryFileID)
+	key := entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}
 	if owner, exists := state.owners[key]; exists && owner != binding.ArrName {
 		return fmt.Errorf("save arr binding: managed file already belongs to arr %q", owner)
 	}
 
-	snapshot, exists := state.snapshots[binding.ArrName]
-	if !exists {
-		snapshot = bindingSnapshot{
-			Version:  bindingSnapshotVersion,
-			ArrName:  binding.ArrName,
-			Bindings: make([]Binding, 0, 1),
-		}
-	} else {
-		snapshot = cloneBindingSnapshot(snapshot)
+	stored := cloneBinding(binding)
+	delta := bindingDelta{
+		Version:     bindingSnapshotVersion,
+		ArrName:     binding.ArrName,
+		EntryID:     binding.EntryID,
+		EntryFileID: binding.EntryFileID,
+		Generation:  binding.Generation,
+		Binding:     &stored,
 	}
-	index := slices.IndexFunc(snapshot.Bindings, func(current Binding) bool {
-		return current.EntryID == binding.EntryID && current.EntryFileID == binding.EntryFileID
-	})
-	if index >= 0 {
-		snapshot.Bindings[index] = cloneBinding(binding)
-	} else {
-		snapshot.Bindings = append(snapshot.Bindings, cloneBinding(binding))
+	if err := r.persistDeltaLocked(delta); err != nil {
+		return err
 	}
-	snapshot.Generation = max(snapshot.Generation, binding.Generation)
-	return r.persistSnapshotLocked(snapshot)
+	state.owners[key] = binding.ArrName
+	state.deltas[key] = struct{}{}
+	state.generations[binding.ArrName] = max(state.generations[binding.ArrName], binding.Generation)
+	return nil
 }
 
 func (r *BindingRepository) Delete(entryID, fileID string) error {
@@ -124,19 +138,25 @@ func (r *BindingRepository) Delete(entryID, fileID string) error {
 	if err != nil {
 		return err
 	}
-	owner, exists := state.owners[bindingStoreKey(entryID, fileID)]
+	key := entryFileKey{entryID: entryID, fileID: fileID}
+	owner, exists := state.owners[key]
 	if !exists {
 		return nil
 	}
-	snapshot := cloneBindingSnapshot(state.snapshots[owner])
-	index := slices.IndexFunc(snapshot.Bindings, func(binding Binding) bool {
-		return binding.EntryID == entryID && binding.EntryFileID == fileID
-	})
-	if index < 0 {
-		return fmt.Errorf("delete arr binding: managed file owner %q is inconsistent", owner)
+	delta := bindingDelta{
+		Version:     bindingSnapshotVersion,
+		ArrName:     owner,
+		EntryID:     entryID,
+		EntryFileID: fileID,
+		Generation:  state.generations[owner],
+		Deleted:     true,
 	}
-	snapshot.Bindings = slices.Delete(snapshot.Bindings, index, index+1)
-	return r.persistSnapshotLocked(snapshot)
+	if err := r.persistDeltaLocked(delta); err != nil {
+		return err
+	}
+	delete(state.owners, key)
+	state.deltas[key] = struct{}{}
+	return nil
 }
 
 func (r *BindingRepository) ReplaceArrGeneration(arrName string, generation uint64, bindings []Binding) error {
@@ -158,13 +178,15 @@ func (r *BindingRepository) ReplaceArrGeneration(arrName string, generation uint
 	if err := validateUniqueArrFiles(prepared); err != nil {
 		return err
 	}
+	sortBindings(prepared)
 	snapshot := bindingSnapshot{
 		Version:    bindingSnapshotVersion,
 		ArrName:    arrName,
 		Generation: generation,
 		Bindings:   prepared,
 	}
-	if err := validateBindingSnapshot(bindingSnapshotStoreKey(arrName), snapshot); err != nil {
+	key := bindingSnapshotStoreKey(arrName)
+	if err := validateBindingSnapshot(key, snapshot); err != nil {
 		return fmt.Errorf("replace arr bindings: %w", err)
 	}
 
@@ -176,11 +198,33 @@ func (r *BindingRepository) ReplaceArrGeneration(arrName string, generation uint
 		return err
 	}
 	for _, binding := range prepared {
-		if owner, exists := state.owners[bindingStoreKey(binding.EntryID, binding.EntryFileID)]; exists && owner != arrName {
+		bindingKey := entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}
+		if owner, exists := state.owners[bindingKey]; exists && owner != arrName {
 			return fmt.Errorf("replace arr bindings: managed file already belongs to arr %q", owner)
 		}
 	}
-	return r.persistSnapshotLocked(snapshot)
+
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("encode arr binding snapshot: %w", err)
+	}
+	options := &appendstore.PutOptions{Attributes: map[string]string{
+		bindingAttributeArrName: arrName,
+		"generation":            strconv.FormatUint(generation, 10),
+	}}
+	if err := r.store.Put(key, data, options); err != nil {
+		return fmt.Errorf("persist arr binding snapshot: %w", err)
+	}
+	if err := r.store.Sync(); err != nil {
+		r.invalidateLocked()
+		return fmt.Errorf("sync arr binding snapshot: %w", err)
+	}
+
+	// The snapshot is authoritative from here on, so the rows it replaces are
+	// dropped. A crash in between leaves rows the generation guard ignores.
+	r.dropSupersededRowsLocked(state, arrName, prepared)
+	state.generations[arrName] = generation
+	return nil
 }
 
 func (r *BindingRepository) Close() error {
@@ -189,75 +233,11 @@ func (r *BindingRepository) Close() error {
 	return r.store.Close()
 }
 
-func (r *BindingRepository) loadStateLocked() (bindingRepositoryState, error) {
-	authoritative := make(map[string]bindingSnapshot)
-	legacy := make(map[string][]Binding)
-	if err := r.store.ForEach(func(key string, value []byte) error {
-		if strings.HasPrefix(key, bindingSnapshotKeyPrefix) {
-			var snapshot bindingSnapshot
-			if err := json.Unmarshal(value, &snapshot); err != nil {
-				return fmt.Errorf("decode arr binding snapshot %q: %w", key, err)
-			}
-			if err := validateBindingSnapshot(key, snapshot); err != nil {
-				return fmt.Errorf("decode arr binding snapshot %q: %w", key, err)
-			}
-			authoritative[snapshot.ArrName] = cloneBindingSnapshot(snapshot)
-			return nil
-		}
-
-		var binding Binding
-		if err := json.Unmarshal(value, &binding); err != nil {
-			return fmt.Errorf("decode legacy arr binding %q: %w", key, err)
-		}
-		if err := binding.validate(); err != nil {
-			return fmt.Errorf("decode legacy arr binding %q: %w", key, err)
-		}
-		legacy[binding.ArrName] = append(legacy[binding.ArrName], cloneBinding(binding))
-		return nil
-	}); err != nil {
-		return bindingRepositoryState{}, err
-	}
-
-	state := bindingRepositoryState{
-		snapshots: make(map[string]bindingSnapshot, len(authoritative)+len(legacy)),
-		owners:    make(map[string]string),
-	}
-	for arrName, snapshot := range authoritative {
-		state.snapshots[arrName] = snapshot
-	}
-	for arrName, bindings := range legacy {
-		if _, exists := authoritative[arrName]; exists {
-			continue
-		}
-		generation := uint64(0)
-		for _, binding := range bindings {
-			generation = max(generation, binding.Generation)
-		}
-		sortBindings(bindings)
-		state.snapshots[arrName] = bindingSnapshot{
-			Version:    bindingSnapshotVersion,
-			ArrName:    arrName,
-			Generation: generation,
-			Bindings:   bindings,
-		}
-	}
-	for arrName, snapshot := range state.snapshots {
-		for _, binding := range snapshot.Bindings {
-			key := bindingStoreKey(binding.EntryID, binding.EntryFileID)
-			if owner, exists := state.owners[key]; exists {
-				return bindingRepositoryState{}, fmt.Errorf("managed file belongs to both arr %q and %q", owner, arrName)
-			}
-			state.owners[key] = arrName
-		}
-	}
-	return state, nil
-}
-
 func (r *BindingRepository) stateLocked() (*bindingRepositoryState, error) {
 	if r.loaded {
 		return &r.state, nil
 	}
-	state, err := r.loadStateLocked()
+	_, state, err := r.scanLocked()
 	if err != nil {
 		return nil, err
 	}
@@ -266,46 +246,158 @@ func (r *BindingRepository) stateLocked() (*bindingRepositoryState, error) {
 	return &r.state, nil
 }
 
-func (r *BindingRepository) persistSnapshotLocked(snapshot bindingSnapshot) error {
-	snapshot = cloneBindingSnapshot(snapshot)
-	sortBindings(snapshot.Bindings)
-	key := bindingSnapshotStoreKey(snapshot.ArrName)
-	if err := validateBindingSnapshot(key, snapshot); err != nil {
-		return fmt.Errorf("persist arr binding snapshot: %w", err)
+func (r *BindingRepository) invalidateLocked() {
+	r.state = bindingRepositoryState{}
+	r.loaded = false
+}
+
+// scanLocked reads the store once and merges the three row kinds: a snapshot is
+// authoritative for its Arr, deltas written after it win per managed file, and
+// legacy rows only apply to an Arr that has no snapshot yet.
+func (r *BindingRepository) scanLocked() ([]Binding, bindingRepositoryState, error) {
+	snapshots := make(map[string]bindingSnapshot)
+	deltas := make(map[entryFileKey]bindingDelta)
+	legacy := make(map[string][]Binding)
+	if err := r.store.ForEach(func(key string, value []byte) error {
+		switch {
+		case strings.HasPrefix(key, bindingSnapshotKeyPrefix):
+			var snapshot bindingSnapshot
+			if err := json.Unmarshal(value, &snapshot); err != nil {
+				return fmt.Errorf("decode arr binding snapshot %q: %w", key, err)
+			}
+			if err := validateBindingSnapshot(key, snapshot); err != nil {
+				return fmt.Errorf("decode arr binding snapshot %q: %w", key, err)
+			}
+			snapshots[snapshot.ArrName] = snapshot
+		case strings.HasPrefix(key, bindingDeltaKeyPrefix):
+			var delta bindingDelta
+			if err := json.Unmarshal(value, &delta); err != nil {
+				return fmt.Errorf("decode arr binding delta %q: %w", key, err)
+			}
+			if err := validateBindingDelta(key, delta); err != nil {
+				return fmt.Errorf("decode arr binding delta %q: %w", key, err)
+			}
+			deltas[entryFileKey{entryID: delta.EntryID, fileID: delta.EntryFileID}] = delta
+		default:
+			var binding Binding
+			if err := json.Unmarshal(value, &binding); err != nil {
+				return fmt.Errorf("decode legacy arr binding %q: %w", key, err)
+			}
+			if err := binding.validate(); err != nil {
+				return fmt.Errorf("decode legacy arr binding %q: %w", key, err)
+			}
+			legacy[binding.ArrName] = append(legacy[binding.ArrName], binding)
+		}
+		return nil
+	}); err != nil {
+		return nil, bindingRepositoryState{}, err
 	}
-	data, err := json.Marshal(snapshot)
+
+	state := bindingRepositoryState{
+		owners:      make(map[entryFileKey]string),
+		generations: make(map[string]uint64, len(snapshots)),
+		deltas:      make(map[entryFileKey]struct{}, len(deltas)),
+		legacy:      make(map[string]map[entryFileKey]struct{}, len(legacy)),
+	}
+	merged := make(map[entryFileKey]Binding, len(deltas))
+	for arrName, snapshot := range snapshots {
+		state.generations[arrName] = snapshot.Generation
+		for _, binding := range snapshot.Bindings {
+			merged[entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}] = binding
+		}
+	}
+	for arrName, bindings := range legacy {
+		keys := make(map[entryFileKey]struct{}, len(bindings))
+		for _, binding := range bindings {
+			keys[entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}] = struct{}{}
+		}
+		state.legacy[arrName] = keys
+		if _, superseded := snapshots[arrName]; superseded {
+			continue
+		}
+		for _, binding := range bindings {
+			key := entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}
+			merged[key] = binding
+			state.generations[arrName] = max(state.generations[arrName], binding.Generation)
+		}
+	}
+	for key, delta := range deltas {
+		state.deltas[key] = struct{}{}
+		if delta.Generation < snapshots[delta.ArrName].Generation {
+			continue // superseded by a snapshot written after this delta
+		}
+		if delta.Deleted {
+			delete(merged, key)
+			continue
+		}
+		merged[key] = *delta.Binding
+		state.generations[delta.ArrName] = max(state.generations[delta.ArrName], delta.Generation)
+	}
+
+	bindings := make([]Binding, 0, len(merged))
+	for key, binding := range merged {
+		if owner, exists := state.owners[key]; exists {
+			return nil, bindingRepositoryState{}, fmt.Errorf("managed file belongs to both arr %q and %q", owner, binding.ArrName)
+		}
+		state.owners[key] = binding.ArrName
+		bindings = append(bindings, cloneBinding(binding))
+	}
+	return bindings, state, nil
+}
+
+func (r *BindingRepository) persistDeltaLocked(delta bindingDelta) error {
+	key := bindingDeltaStoreKey(delta.EntryID, delta.EntryFileID)
+	if err := validateBindingDelta(key, delta); err != nil {
+		return fmt.Errorf("persist arr binding delta: %w", err)
+	}
+	data, err := json.Marshal(delta)
 	if err != nil {
-		return fmt.Errorf("encode arr binding snapshot: %w", err)
+		return fmt.Errorf("encode arr binding delta: %w", err)
 	}
 	options := &appendstore.PutOptions{Attributes: map[string]string{
-		bindingAttributeArrName: snapshot.ArrName,
-		"generation":            strconv.FormatUint(snapshot.Generation, 10),
+		bindingAttributeArrName: delta.ArrName,
 	}}
 	if err := r.store.Put(key, data, options); err != nil {
-		return fmt.Errorf("persist arr binding snapshot: %w", err)
+		return fmt.Errorf("persist arr binding delta: %w", err)
 	}
 	if err := r.store.Sync(); err != nil {
-		r.state = bindingRepositoryState{}
-		r.loaded = false
-		return fmt.Errorf("sync arr binding snapshot: %w", err)
+		r.invalidateLocked()
+		return fmt.Errorf("sync arr binding delta: %w", err)
 	}
-	r.installSnapshotLocked(snapshot)
 	return nil
 }
 
-func (r *BindingRepository) installSnapshotLocked(snapshot bindingSnapshot) {
-	if !r.loaded {
-		return
-	}
-	if previous, exists := r.state.snapshots[snapshot.ArrName]; exists {
-		for _, binding := range previous.Bindings {
-			delete(r.state.owners, bindingStoreKey(binding.EntryID, binding.EntryFileID))
+// dropSupersededRowsLocked removes the delta and legacy rows a fresh snapshot
+// replaces. Failures are not fatal: the loader ignores stale rows.
+func (r *BindingRepository) dropSupersededRowsLocked(state *bindingRepositoryState, arrName string, bindings []Binding) {
+	for key := range state.legacy[arrName] {
+		if err := r.store.Delete(bindingStoreKey(key.entryID, key.fileID)); err == nil {
+			delete(state.owners, key)
 		}
 	}
-	snapshot = cloneBindingSnapshot(snapshot)
-	r.state.snapshots[snapshot.ArrName] = snapshot
-	for _, binding := range snapshot.Bindings {
-		r.state.owners[bindingStoreKey(binding.EntryID, binding.EntryFileID)] = snapshot.ArrName
+	delete(state.legacy, arrName)
+	for key := range state.deltas {
+		if state.owners[key] != arrName {
+			continue
+		}
+		if err := r.store.Delete(bindingDeltaStoreKey(key.entryID, key.fileID)); err != nil {
+			continue
+		}
+		delete(state.deltas, key)
+	}
+	for key, owner := range state.owners {
+		if owner == arrName {
+			delete(state.owners, key)
+		}
+	}
+	for _, binding := range bindings {
+		key := entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}
+		if _, stale := state.deltas[key]; stale {
+			if err := r.store.Delete(bindingDeltaStoreKey(key.entryID, key.fileID)); err == nil {
+				delete(state.deltas, key)
+			}
+		}
+		state.owners[key] = arrName
 	}
 }
 
@@ -318,7 +410,7 @@ func validateBindingSnapshot(key string, snapshot bindingSnapshot) error {
 	case key != bindingSnapshotStoreKey(snapshot.ArrName):
 		return errors.New("snapshot key does not match arr name")
 	}
-	seen := make(map[string]struct{}, len(snapshot.Bindings))
+	seen := make(map[entryFileKey]struct{}, len(snapshot.Bindings))
 	for _, binding := range snapshot.Bindings {
 		if err := binding.validate(); err != nil {
 			return err
@@ -329,7 +421,7 @@ func validateBindingSnapshot(key string, snapshot bindingSnapshot) error {
 		if binding.Generation > snapshot.Generation {
 			return fmt.Errorf("binding generation %d exceeds snapshot generation %d", binding.Generation, snapshot.Generation)
 		}
-		bindingKey := bindingStoreKey(binding.EntryID, binding.EntryFileID)
+		bindingKey := entryFileKey{entryID: binding.EntryID, fileID: binding.EntryFileID}
 		if _, exists := seen[bindingKey]; exists {
 			return fmt.Errorf("duplicate managed file %q/%q", binding.EntryID, binding.EntryFileID)
 		}
@@ -338,17 +430,28 @@ func validateBindingSnapshot(key string, snapshot bindingSnapshot) error {
 	return nil
 }
 
-func cloneBindingSnapshot(snapshot bindingSnapshot) bindingSnapshot {
-	snapshot.Bindings = cloneBindings(snapshot.Bindings)
-	return snapshot
-}
-
-func cloneBindings(bindings []Binding) []Binding {
-	cloned := make([]Binding, len(bindings))
-	for i, binding := range bindings {
-		cloned[i] = cloneBinding(binding)
+func validateBindingDelta(key string, delta bindingDelta) error {
+	switch {
+	case delta.Version != bindingSnapshotVersion:
+		return fmt.Errorf("unsupported version %d", delta.Version)
+	case delta.ArrName == "":
+		return errors.New("arr name is required")
+	case key != bindingDeltaStoreKey(delta.EntryID, delta.EntryFileID):
+		return errors.New("delta key does not match the managed file")
+	case delta.Deleted:
+		return nil
+	case delta.Binding == nil:
+		return errors.New("delta binding is required")
 	}
-	return cloned
+	if err := delta.Binding.validate(); err != nil {
+		return err
+	}
+	if delta.Binding.ArrName != delta.ArrName ||
+		delta.Binding.EntryID != delta.EntryID ||
+		delta.Binding.EntryFileID != delta.EntryFileID {
+		return errors.New("delta binding identity does not match the delta")
+	}
+	return nil
 }
 
 type ReacquireJobRepository struct {
@@ -478,6 +581,10 @@ func bindingStoreKey(entryID, fileID string) string {
 	hash.Write([]byte{0})
 	hash.Write([]byte(fileID))
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func bindingDeltaStoreKey(entryID, fileID string) string {
+	return bindingDeltaKeyPrefix + bindingStoreKey(entryID, fileID)
 }
 
 func bindingSnapshotStoreKey(arrName string) string {

@@ -260,12 +260,7 @@ func (s *Service) ReplaceArrGeneration(arrName string, generation uint64, bindin
 	if err := s.index.ReplaceArrGeneration(arrName, generation, prepared); err != nil {
 		return err
 	}
-	for _, binding := range prepared {
-		if err := s.completeWaitingJobs(binding); err != nil {
-			return err
-		}
-	}
-	return nil
+	return s.completeWaitingJobs(prepared...)
 }
 
 func (s *Service) DeleteBinding(entryID, fileID string) error {

@@ -307,15 +307,35 @@ func (s *Service) updateJobWithDurability(
 	return cloneJob(job), nil
 }
 
-func (s *Service) completeWaitingJobs(binding Binding) error {
-	if binding.DownloadID == "" {
+// completeWaitingJobs re-checks the waiting jobs an indexing change can satisfy.
+// It takes the whole change set at once: a generation replace carries every
+// binding of an Arr, and checking one binding at a time walks the job table
+// once per binding.
+func (s *Service) completeWaitingJobs(bindings ...Binding) error {
+	downloadsByArr := make(map[string]map[string]struct{})
+	for _, binding := range bindings {
+		if binding.DownloadID == "" {
+			continue
+		}
+		downloads, ok := downloadsByArr[binding.ArrName]
+		if !ok {
+			downloads = make(map[string]struct{})
+			downloadsByArr[binding.ArrName] = downloads
+		}
+		downloads[binding.DownloadID] = struct{}{}
+	}
+	if len(downloadsByArr) == 0 {
 		return nil
 	}
+
 	s.jobsMu.RLock()
 	ids := make([]string, 0)
 	for _, id := range s.activeReacquisitions {
 		job, ok := s.jobs[id]
-		if ok && job.Status.waiting() && binding.ArrName == job.ArrName && binding.DownloadID != job.DownloadID {
+		if !ok || !job.Status.waiting() {
+			continue
+		}
+		if replacesDownload(downloadsByArr[job.ArrName], job.DownloadID) {
 			ids = append(ids, id)
 		}
 	}
@@ -401,6 +421,19 @@ func (s *Service) schedulePersistedRetries() {
 	}
 }
 
+// replacesDownload reports whether any indexed download differs from the one
+// the job is replacing, which is what makes the job worth re-checking.
+func replacesDownload(downloads map[string]struct{}, jobDownloadID string) bool {
+	if len(downloads) == 0 {
+		return false
+	}
+	if len(downloads) > 1 {
+		return true
+	}
+	_, sameOnly := downloads[jobDownloadID]
+	return !sameOnly
+}
+
 func (status ReacquireStatus) waiting() bool {
 	return status == ReacquireStatusWaitingForGrab || status == ReacquireStatusWaitingForDownload || status == ReacquireStatusWaitingForImport
 }
@@ -456,7 +489,7 @@ func (s *Service) replacementsForJob(job ReacquireJob) ([]string, bool) {
 			}
 			continue
 		case target.SeriesID > 0:
-			candidates = s.index.ByArr(job.ArrName)
+			candidates = s.index.BySeriesID(job.ArrName, target.SeriesID)
 		default:
 			return nil, false
 		}

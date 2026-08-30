@@ -15,6 +15,7 @@ type observedBindingStore struct {
 	failNextPut bool
 	forEach     int
 	syncs       int
+	puts        []string
 }
 
 func (s *observedBindingStore) ForEach(yield func(string, []byte) error) error {
@@ -27,6 +28,7 @@ func (s *observedBindingStore) Put(key string, value []byte, options *appendstor
 		s.failNextPut = false
 		return errBindingSnapshotPut
 	}
+	s.puts = append(s.puts, key)
 	return s.bindingRepositoryStore.Put(key, value, options)
 }
 
@@ -236,4 +238,75 @@ func assertSingleRepositoryBinding(t *testing.T, repository *BindingRepository, 
 		bindings[0].EntryFileID != want.EntryFileID || bindings[0].Generation != want.Generation {
 		t.Fatalf("bindings = %#v, want %#v", bindings, want)
 	}
+}
+
+func TestBindingRepositorySaveWritesOneRow(t *testing.T) {
+	path := t.TempDir() + "/bindings.db"
+	repository := openTestBindingRepository(t, path)
+	baseline := []Binding{
+		repositoryTestBinding("sonarr", "entry-1", "file-1", 1),
+		repositoryTestBinding("sonarr", "entry-2", "file-2", 1),
+	}
+	if err := repository.ReplaceArrGeneration("sonarr", 1, baseline); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &observedBindingStore{bindingRepositoryStore: repository.store}
+	repository.store = store
+	updated := repositoryTestBinding("sonarr", "entry-1", "file-1", 2)
+	updated.EntryFileName = "updated.mkv"
+	if err := repository.Save(updated); err != nil {
+		t.Fatal(err)
+	}
+
+	want := bindingDeltaStoreKey("entry-1", "file-1")
+	if len(store.puts) != 1 || store.puts[0] != want {
+		t.Fatalf("Save wrote %v, want the single delta row %q", store.puts, want)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repository = openTestBindingRepository(t, path)
+	t.Cleanup(func() { _ = repository.Close() })
+	bindings, err := repository.LoadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 2 {
+		t.Fatalf("binding count = %d, want 2", len(bindings))
+	}
+	if bindings[0].EntryFileName != "updated.mkv" || bindings[0].Generation != 2 {
+		t.Fatalf("delta did not win over the snapshot: %#v", bindings[0])
+	}
+}
+
+func TestBindingRepositoryGenerationReplacesDeltas(t *testing.T) {
+	path := t.TempDir() + "/bindings.db"
+	repository := openTestBindingRepository(t, path)
+	if err := repository.ReplaceArrGeneration("radarr", 1, []Binding{
+		repositoryTestBinding("radarr", "entry-1", "file-1", 1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Save(repositoryTestBinding("radarr", "entry-2", "file-2", 2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Delete("entry-1", "file-1"); err != nil {
+		t.Fatal(err)
+	}
+	// A later full scan is authoritative: it must drop both the delta and the
+	// tombstone the targeted writes left behind.
+	if err := repository.ReplaceArrGeneration("radarr", 3, []Binding{
+		repositoryTestBinding("radarr", "entry-1", "file-1", 3),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	repository = openTestBindingRepository(t, path)
+	t.Cleanup(func() { _ = repository.Close() })
+	assertSingleRepositoryBinding(t, repository, repositoryTestBinding("radarr", "entry-1", "file-1", 3))
 }

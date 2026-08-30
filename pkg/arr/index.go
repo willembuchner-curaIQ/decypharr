@@ -36,6 +36,7 @@ type Index struct {
 	byDownload  map[downloadKey]map[entryFileKey]struct{}
 	byEpisode   map[mediaKey]map[entryFileKey]struct{}
 	byMovie     map[mediaKey]map[entryFileKey]struct{}
+	bySeries    map[mediaKey]map[entryFileKey]struct{}
 	generations map[string]uint64
 }
 
@@ -47,6 +48,7 @@ func NewIndex() *Index {
 		byDownload:  make(map[downloadKey]map[entryFileKey]struct{}),
 		byEpisode:   make(map[mediaKey]map[entryFileKey]struct{}),
 		byMovie:     make(map[mediaKey]map[entryFileKey]struct{}),
+		bySeries:    make(map[mediaKey]map[entryFileKey]struct{}),
 		generations: make(map[string]uint64),
 	}
 }
@@ -90,6 +92,13 @@ func (i *Index) ByMovieID(arrName string, movieID int) []Binding {
 	defer i.mu.RUnlock()
 
 	return i.bindingsForLocked(i.byMovie[mediaKey{arrName: arrName, mediaID: movieID}])
+}
+
+func (i *Index) BySeriesID(arrName string, seriesID int) []Binding {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+
+	return i.bindingsForLocked(i.bySeries[mediaKey{arrName: arrName, mediaID: seriesID}])
 }
 
 func (i *Index) ByArr(arrName string) []Binding {
@@ -197,6 +206,7 @@ func (i *Index) replaceAll(bindings []Binding) error {
 	clear(i.byDownload)
 	clear(i.byEpisode)
 	clear(i.byMovie)
+	clear(i.bySeries)
 	clear(i.generations)
 	for _, binding := range bindings {
 		i.upsertLocked(cloneBinding(binding))
@@ -230,6 +240,9 @@ func (i *Index) upsertLocked(binding Binding) {
 	if binding.MovieID != 0 {
 		addIndexValue(i.byMovie, mediaKey{arrName: binding.ArrName, mediaID: binding.MovieID}, key)
 	}
+	if binding.SeriesID != 0 {
+		addIndexValue(i.bySeries, mediaKey{arrName: binding.ArrName, mediaID: binding.SeriesID}, key)
+	}
 	i.generations[binding.ArrName] = max(i.generations[binding.ArrName], binding.Generation)
 }
 
@@ -253,6 +266,9 @@ func (i *Index) removeLocked(key entryFileKey) bool {
 	}
 	if binding.MovieID != 0 {
 		removeIndexValue(i.byMovie, mediaKey{arrName: binding.ArrName, mediaID: binding.MovieID}, key)
+	}
+	if binding.SeriesID != 0 {
+		removeIndexValue(i.bySeries, mediaKey{arrName: binding.ArrName, mediaID: binding.SeriesID}, key)
 	}
 	return true
 }
