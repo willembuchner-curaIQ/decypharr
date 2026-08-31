@@ -68,7 +68,8 @@
                 </h3>
                 <div class="grid w-full grid-cols-2 gap-2 sm:flex sm:flex-wrap lg:w-auto">
                     <div class="min-w-0 sm:w-40">
-                        <select id="jobStatusFilter" class="select select-bordered select-sm">
+                        <label class="sr-only" for="jobStatusFilter">Filter jobs by status</label>
+                        <select id="jobStatusFilter" class="select select-bordered select-sm w-full">
                             <option value="">All statuses</option>
                             <option value="active">Active</option>
                             <option value="waiting">Waiting</option>
@@ -77,16 +78,48 @@
                             <option value="cancelled">Cancelled</option>
                         </select>
                     </div>
-                    <button id="refreshJobsBtn" class="btn btn-outline btn-sm">
+                    <div class="min-w-0 sm:w-32">
+                        <label class="sr-only" for="jobPageSize">Jobs per page</label>
+                        <select id="jobPageSize" class="select select-bordered select-sm w-full"
+                                aria-label="Jobs per page">
+                            <option value="10" selected>10 per page</option>
+                            <option value="25">25 per page</option>
+                            <option value="50">50 per page</option>
+                        </select>
+                    </div>
+                    <button id="refreshJobsBtn" class="btn btn-outline btn-sm col-span-2 sm:col-span-1">
                         <i class="bi bi-arrow-clockwise mr-1"></i>Refresh
                     </button>
                 </div>
             </div>
 
+            <div id="jobBulkActions" class="hidden mt-3 rounded-lg bg-base-200 px-4 py-3">
+                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <span class="text-sm font-medium">
+                        Selected completed jobs: <span id="selectedJobsCount">0</span>
+                    </span>
+                    <div class="flex gap-2">
+                        <button type="button" id="deleteSelectedJobsBtn" class="btn btn-error btn-sm">
+                            <i class="bi bi-trash3 mr-1"></i>Delete selected
+                        </button>
+                        <button type="button" id="clearJobSelectionBtn" class="btn btn-ghost btn-sm"
+                                aria-label="Clear job selection">
+                            <i class="bi bi-x-lg"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
             <div class="overflow-x-auto mt-2">
                 <table class="table table-hover">
+                    <caption class="sr-only">Reacquisition jobs</caption>
                     <thead class="bg-base-200">
                     <tr>
+                        <th class="w-12">
+                            <input type="checkbox" id="selectAllJobs"
+                                   class="checkbox checkbox-sm checkbox-primary"
+                                   aria-label="Select all completed jobs on this page">
+                        </th>
                         <th>Status</th>
                         <th>File</th>
                         <th>Arr</th>
@@ -97,10 +130,15 @@
                     </thead>
                     <tbody id="jobsTableBody">
                     <tr>
-                        <td colspan="6" class="text-center py-8 opacity-60">Loading…</td>
+                        <td colspan="7" class="text-center py-8 opacity-60">Loading…</td>
                     </tr>
                     </tbody>
                 </table>
+            </div>
+
+            <div class="mt-2 flex flex-col items-center justify-between gap-3 border-t border-base-200 pt-4 sm:flex-row">
+                <span id="jobsPaginationInfo" class="text-sm opacity-70">Loading…</span>
+                <div id="jobsPaginationControls" class="join max-w-full overflow-x-auto"></div>
             </div>
         </div>
     </div>

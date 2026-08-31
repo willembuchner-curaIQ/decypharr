@@ -109,6 +109,51 @@ func (s *Service) Job(id string) (Job, bool) {
 	return cloneJob(job), ok
 }
 
+// DeleteJobs removes completed job history from memory and the persisted job repository.
+// Active jobs are rejected as a batch: deleting one would hide work that can
+// still mutate an Arr instance, and deleting only part of a requested batch is
+// surprising to callers.
+func (s *Service) DeleteJobs(ids []string) (int, error) {
+	release, err := s.beginOperation()
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
+
+	uniqueIDs := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		job, exists := s.jobs[id]
+		if !exists {
+			continue
+		}
+		if !job.Status.Terminal() {
+			return 0, fmt.Errorf("%w: job %q is %s", ErrJobNotTerminal, id, job.Status)
+		}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+
+	deleted := 0
+	for _, id := range uniqueIDs {
+		if err := s.jobRepository.Delete(id); err != nil {
+			return deleted, fmt.Errorf("delete reacquire job %q: %w", id, err)
+		}
+		delete(s.jobs, id)
+		deleted++
+	}
+	return deleted, nil
+}
+
 func (s *Service) loadJobs(jobs []Job) error {
 	slices.SortFunc(jobs, func(left, right Job) int {
 		return left.UpdatedAt.Compare(right.UpdatedAt)

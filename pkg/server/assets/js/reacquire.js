@@ -23,6 +23,10 @@ class ReacquireManager {
     constructor() {
         this.api = (window.API || '/api').replace(/\/$/, '');
         this.jobs = [];
+        this.jobsPage = 1;
+        this.jobsPageSize = 10;
+        this.selectedJobIds = new Set();
+        this.deletingJobs = false;
         this.selected = null;
         this.timer = null;
         this.searchDebounce = null;
@@ -35,7 +39,19 @@ class ReacquireManager {
         $('refreshJobsBtn')?.addEventListener('click', () => this.loadJobs());
         $('refreshIndexBtn')?.addEventListener('click', () => this.refreshIndex());
         $('reacquireBtn')?.addEventListener('click', () => this.openReacquireModal());
-        $('jobStatusFilter')?.addEventListener('change', () => this.renderJobs());
+        $('jobStatusFilter')?.addEventListener('change', () => {
+            this.jobsPage = 1;
+            this.renderJobs();
+        });
+        $('jobPageSize')?.addEventListener('change', (event) => {
+            const pageSize = Number.parseInt(event.target.value, 10);
+            this.jobsPageSize = pageSize > 0 ? pageSize : 10;
+            this.jobsPage = 1;
+            this.renderJobs();
+        });
+        $('selectAllJobs')?.addEventListener('change', (event) => this.selectJobsOnPage(event.target.checked));
+        $('deleteSelectedJobsBtn')?.addEventListener('click', () => this.deleteSelectedJobs());
+        $('clearJobSelectionBtn')?.addEventListener('click', () => this.clearJobSelection());
         $('reacquireArr')?.addEventListener('change', () => this.searchBindings());
         $('reacquireQuery')?.addEventListener('input', () => {
             clearTimeout(this.searchDebounce);
@@ -58,10 +74,16 @@ class ReacquireManager {
             this.jobs = await this.fetchJSON(`${this.api}/arr/reacquire/jobs`) || [];
         } catch (e) {
             this.jobs = [];
+            this.selectedJobIds.clear();
+            this.renderCounts();
             this.setStatusLine('Reacquisition service is unavailable.');
             this.renderJobs();
             return;
         }
+        const deletableIds = new Set(this.jobs.filter((job) => this.isTerminal(job.status)).map((job) => job.id));
+        this.selectedJobIds.forEach((id) => {
+            if (!deletableIds.has(id)) this.selectedJobIds.delete(id);
+        });
         this.renderCounts();
         this.renderJobs();
         this.scheduleNextPoll();
@@ -127,29 +149,53 @@ class ReacquireManager {
         return this.jobs.filter((job) => this.group(job.status) === filter);
     }
 
+    jobsPageState() {
+        const filtered = this.filteredJobs();
+        const totalPages = Math.max(1, Math.ceil(filtered.length / this.jobsPageSize));
+        this.jobsPage = Math.min(Math.max(1, this.jobsPage), totalPages);
+        const offset = (this.jobsPage - 1) * this.jobsPageSize;
+        return {
+            jobs: filtered.slice(offset, offset + this.jobsPageSize),
+            total: filtered.length,
+            totalPages,
+            offset,
+        };
+    }
+
     renderJobs() {
         const body = document.getElementById('jobsTableBody');
         if (!body) return;
-        const jobs = this.filteredJobs();
+        const page = this.jobsPageState();
         const count = document.getElementById('jobsCount');
         if (count) count.textContent = this.jobs.length;
 
-        if (!jobs.length) {
-            body.innerHTML = `<tr><td colspan="6" class="text-center py-8 opacity-60">
-                No jobs to show. A stream or repair failure queues one automatically.</td></tr>`;
+        if (!page.jobs.length) {
+            const filtered = Boolean(document.getElementById('jobStatusFilter')?.value);
+            body.innerHTML = `<tr><td colspan="7" class="text-center py-8 opacity-60">
+                ${filtered ? 'No jobs match this status.' : 'No jobs to show. A stream or repair failure queues one automatically.'}</td></tr>`;
+            this.renderJobsPagination(page);
+            this.updateJobSelectionUI(page.jobs);
             return;
         }
 
-        body.innerHTML = jobs.map((job) => {
+        body.innerHTML = page.jobs.map((job) => {
             const binding = (job.bindings || [])[0] || {};
             const file = binding.entryFileName || job.fileId || '-';
             const entry = binding.entryName || '';
+            const deletable = this.isTerminal(job.status);
+            const id = this.escapeAttr(job.id);
             return `
                 <tr>
+                    <td>
+                        <input type="checkbox" class="checkbox checkbox-sm checkbox-primary job-checkbox"
+                               data-job-id="${id}" aria-label="Select job for ${this.escapeAttr(file)}"
+                               ${this.selectedJobIds.has(job.id) ? 'checked' : ''}
+                               ${deletable ? '' : 'disabled title="Only completed jobs can be deleted"'}>
+                    </td>
                     <td>${this.statusBadge(job.status)}</td>
                     <td class="max-w-xs">
-                        <div class="truncate font-medium" title="${this.escape(file)}">${this.escape(file)}</div>
-                        ${entry ? `<div class="truncate text-xs opacity-60" title="${this.escape(entry)}">${this.escape(entry)}</div>` : ''}
+                        <div class="truncate font-medium" title="${this.escapeAttr(file)}">${this.escape(file)}</div>
+                        ${entry ? `<div class="truncate text-xs opacity-60" title="${this.escapeAttr(entry)}">${this.escape(entry)}</div>` : ''}
                     </td>
                     <td>
                         <div class="text-sm">${this.escape(job.arrName || '-')}</div>
@@ -159,12 +205,160 @@ class ReacquireManager {
                     <td><span class="badge badge-ghost badge-sm">${this.escape(job.cause || '-')}</span></td>
                     <td class="text-xs whitespace-nowrap">${this.formatTime(job.updatedAt)}</td>
                     <td class="text-right">
-                        <button class="btn btn-ghost btn-xs" onclick="window.reacquireManager.showJob('${job.id}')">
+                        <button class="btn btn-ghost btn-xs job-detail-btn" data-job-id="${id}"
+                                aria-label="View details for ${this.escapeAttr(file)}">
                             <i class="bi bi-eye"></i>
                         </button>
                     </td>
                 </tr>`;
         }).join('');
+
+        body.querySelectorAll('.job-checkbox').forEach((checkbox) => {
+            checkbox.addEventListener('change', () => this.toggleJobSelection(checkbox.dataset.jobId, checkbox.checked));
+        });
+        body.querySelectorAll('.job-detail-btn').forEach((button) => {
+            button.addEventListener('click', () => this.showJob(button.dataset.jobId));
+        });
+        this.renderJobsPagination(page);
+        this.updateJobSelectionUI(page.jobs);
+    }
+
+    renderJobsPagination(page) {
+        const info = document.getElementById('jobsPaginationInfo');
+        const controls = document.getElementById('jobsPaginationControls');
+        if (!info || !controls) return;
+
+        if (page.total === 0) {
+            info.textContent = 'No jobs';
+            controls.innerHTML = '';
+            return;
+        }
+
+        const start = page.offset + 1;
+        const end = Math.min(page.offset + page.jobs.length, page.total);
+        const filtered = Boolean(document.getElementById('jobStatusFilter')?.value);
+        info.textContent = `Showing ${start}-${end} of ${page.total}${filtered ? ' matching' : ''} jobs`;
+        if (page.totalPages <= 1) {
+            controls.innerHTML = '';
+            return;
+        }
+
+        let html = `
+            <button class="join-item btn btn-sm" onclick="window.reacquireManager.goToJobsPage(${this.jobsPage - 1})"
+                    aria-label="Previous jobs page" ${this.jobsPage === 1 ? 'disabled' : ''}>
+                <i class="bi bi-chevron-left"></i>
+            </button>`;
+        const pageNumbers = new Set([1, page.totalPages]);
+        for (let number = this.jobsPage - 2; number <= this.jobsPage + 2; number++) {
+            if (number > 0 && number <= page.totalPages) pageNumbers.add(number);
+        }
+        let previous = 0;
+        [...pageNumbers].sort((left, right) => left - right).forEach((number) => {
+            if (previous && number > previous + 1) {
+                html += '<button class="join-item btn btn-sm" disabled aria-hidden="true">…</button>';
+            }
+            html += `<button class="join-item btn btn-sm ${number === this.jobsPage ? 'btn-active' : ''}"
+                            onclick="window.reacquireManager.goToJobsPage(${number})"
+                            aria-label="Jobs page ${number}" ${number === this.jobsPage ? 'aria-current="page"' : ''}>${number}</button>`;
+            previous = number;
+        });
+        html += `
+            <button class="join-item btn btn-sm" onclick="window.reacquireManager.goToJobsPage(${this.jobsPage + 1})"
+                    aria-label="Next jobs page" ${this.jobsPage === page.totalPages ? 'disabled' : ''}>
+                <i class="bi bi-chevron-right"></i>
+            </button>`;
+        controls.innerHTML = html;
+    }
+
+    goToJobsPage(page) {
+        const totalPages = Math.max(1, Math.ceil(this.filteredJobs().length / this.jobsPageSize));
+        if (page < 1 || page > totalPages || page === this.jobsPage) return;
+        this.jobsPage = page;
+        this.renderJobs();
+    }
+
+    toggleJobSelection(id, checked) {
+        const job = this.jobs.find((candidate) => candidate.id === id);
+        if (!job || !this.isTerminal(job.status)) return;
+        if (checked) {
+            this.selectedJobIds.add(id);
+        } else {
+            this.selectedJobIds.delete(id);
+        }
+        this.updateJobSelectionUI(this.jobsPageState().jobs);
+    }
+
+    selectJobsOnPage(checked) {
+        this.jobsPageState().jobs.filter((job) => this.isTerminal(job.status)).forEach((job) => {
+            if (checked) {
+                this.selectedJobIds.add(job.id);
+            } else {
+                this.selectedJobIds.delete(job.id);
+            }
+        });
+        this.renderJobs();
+    }
+
+    updateJobSelectionUI(pageJobs) {
+        const selected = this.selectedJobIds.size;
+        const bar = document.getElementById('jobBulkActions');
+        const count = document.getElementById('selectedJobsCount');
+        const deleteButton = document.getElementById('deleteSelectedJobsBtn');
+        const selectAll = document.getElementById('selectAllJobs');
+        if (bar) bar.classList.toggle('hidden', selected === 0);
+        if (count) count.textContent = selected;
+        if (deleteButton) deleteButton.disabled = selected === 0 || this.deletingJobs;
+
+        if (!selectAll) return;
+        const deletable = pageJobs.filter((job) => this.isTerminal(job.status));
+        const selectedOnPage = deletable.filter((job) => this.selectedJobIds.has(job.id)).length;
+        selectAll.checked = deletable.length > 0 && selectedOnPage === deletable.length;
+        selectAll.indeterminate = selectedOnPage > 0 && selectedOnPage < deletable.length;
+        selectAll.disabled = deletable.length === 0;
+    }
+
+    clearJobSelection() {
+        this.selectedJobIds.clear();
+        this.renderJobs();
+    }
+
+    async deleteSelectedJobs() {
+        const jobsById = new Map(this.jobs.map((job) => [job.id, job]));
+        const ids = [...this.selectedJobIds].filter((id) => {
+            const job = jobsById.get(id);
+            return job && this.isTerminal(job.status);
+        });
+        if (!ids.length) {
+            this.clearJobSelection();
+            this.toast('No completed jobs are selected', 'warning');
+            return;
+        }
+        if (!confirm(`Permanently delete ${ids.length} selected job${ids.length === 1 ? '' : 's'}?\n\nOnly the job history will be removed. This cannot be undone.`)) {
+            return;
+        }
+
+        this.deletingJobs = true;
+        this.updateJobSelectionUI(this.jobsPageState().jobs);
+        try {
+            const response = await fetch(`${this.api}/arr/reacquire/jobs`, {
+                method: 'DELETE',
+                credentials: 'same-origin',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ids}),
+            });
+            const detail = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(detail.error || `HTTP ${response.status}`);
+            ids.forEach((id) => this.selectedJobIds.delete(id));
+            const deleted = detail.deleted ?? ids.length;
+            this.toast(`Deleted ${deleted} job${deleted === 1 ? '' : 's'}`, 'success');
+            await this.loadJobs();
+        } catch (error) {
+            this.toast(`Could not delete jobs: ${error.message}`, 'error');
+            await this.loadJobs();
+        } finally {
+            this.deletingJobs = false;
+            this.updateJobSelectionUI(this.jobsPageState().jobs);
+        }
     }
 
     statusBadge(status) {
@@ -448,6 +642,10 @@ class ReacquireManager {
         const div = document.createElement('div');
         div.textContent = String(text);
         return div.innerHTML;
+    }
+
+    escapeAttr(text) {
+        return this.escape(text).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     toast(message, type = 'info') {

@@ -2,6 +2,7 @@ package reacquire
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -184,6 +185,92 @@ func TestServiceDeduplicatesAndPersistsReacquireJobs(t *testing.T) {
 	}
 	if _, ok := reopened.Lookup(replacement.EntryID, replacement.EntryFileID); !ok {
 		t.Fatal("replacement binding was not restored")
+	}
+}
+
+func TestServiceDeletesOnlyTerminalJobsAndPersistsDeletion(t *testing.T) {
+	directory := t.TempDir()
+	service, err := NewService(ServiceOptions{Directory: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = service.Close() })
+
+	now := time.Date(2026, time.August, 31, 12, 0, 0, 0, time.UTC)
+	job := func(id string, status Status) Job {
+		return Job{
+			ID:       id,
+			Status:   status,
+			Cause:    CauseManual,
+			Strategy: StrategyHistoryFailed,
+			ArrName:  "radarr",
+			ArrType:  arr.Radarr,
+			EntryID:  "entry-" + id,
+			FileID:   "file-" + id,
+			Bindings: []Binding{{
+				ArrName:     "radarr",
+				EntryID:     "entry-" + id,
+				EntryFileID: "file-" + id,
+			}},
+			CreatedAt:   now,
+			UpdatedAt:   now,
+			CompletedAt: now,
+		}
+	}
+	completed := job("completed", StatusReady)
+	active := job("active", StatusQueued)
+	active.CompletedAt = time.Time{}
+	if err := service.jobRepository.Save(completed); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.jobRepository.Save(active); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := service.DeleteJobs([]string{completed.ID, active.ID})
+	if !errors.Is(err, ErrJobNotTerminal) {
+		t.Fatalf("DeleteJobs error = %v, want %v", err, ErrJobNotTerminal)
+	}
+	if deleted != 0 {
+		t.Fatalf("DeleteJobs deleted %d jobs from a rejected batch, want 0", deleted)
+	}
+	if _, ok := service.Job(completed.ID); !ok {
+		t.Fatal("rejected batch deleted its completed job")
+	}
+
+	deleted, err = service.DeleteJobs([]string{completed.ID, completed.ID, "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Fatalf("DeleteJobs deleted %d jobs, want 1", deleted)
+	}
+	if _, ok := service.Job(completed.ID); ok {
+		t.Fatal("completed job remained in memory after deletion")
+	}
+	if _, ok := service.Job(active.ID); !ok {
+		t.Fatal("deleting completed history removed an active job")
+	}
+
+	if err := service.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewService(ServiceOptions{Directory: directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reopened.Job(completed.ID); ok {
+		t.Fatal("deleted job was restored after reopening the service")
+	}
+	if _, ok := reopened.Job(active.ID); !ok {
+		t.Fatal("active job was not restored after reopening the service")
 	}
 }
 

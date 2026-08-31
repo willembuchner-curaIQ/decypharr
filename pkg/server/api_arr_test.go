@@ -31,6 +31,7 @@ func TestArrReacquireRoutesRequireAuthentication(t *testing.T) {
 	}{
 		{method: http.MethodGet, path: "/api/arr/reacquire/jobs"},
 		{method: http.MethodGet, path: "/api/arr/reacquire/jobs/job-id"},
+		{method: http.MethodDelete, path: "/api/arr/reacquire/jobs"},
 		{method: http.MethodPost, path: "/api/arr/reacquire"},
 		{method: http.MethodPost, path: "/api/arr/index/refresh"},
 		{method: http.MethodGet, path: "/api/arr/index"},

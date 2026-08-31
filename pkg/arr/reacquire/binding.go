@@ -14,6 +14,7 @@ import (
 var (
 	ErrBindingNotFound   = errors.New("arr binding not found")
 	ErrBindingUnsafe     = errors.New("arr binding is not authoritative")
+	ErrJobNotTerminal    = errors.New("only completed reacquire jobs can be deleted")
 	ErrServiceNotStarted = errors.New("arr service not started")
 	ErrServiceClosed     = errors.New("arr service closed")
 )

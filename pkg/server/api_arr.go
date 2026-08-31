@@ -45,6 +45,56 @@ func (s *Server) handleGetArrReacquireJob(w http.ResponseWriter, r *http.Request
 	utils.JSONResponse(w, job, http.StatusOK)
 }
 
+func (s *Server) handleDeleteArrReacquireJobs(w http.ResponseWriter, r *http.Request) {
+	service := s.manager.ArrService()
+	if service == nil {
+		s.sendJSONError(w, "Arr reacquisition service is not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var request struct {
+		IDs []string `json:"ids"`
+	}
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&request); err != nil {
+		s.sendJSONError(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	ids := make([]string, 0, len(request.IDs))
+	seen := make(map[string]struct{}, len(request.IDs))
+	for _, id := range request.IDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		s.sendJSONError(w, "At least one reacquisition job ID is required", http.StatusBadRequest)
+		return
+	}
+
+	deleted, err := service.DeleteJobs(ids)
+	if err != nil {
+		switch {
+		case errors.Is(err, reacquire.ErrJobNotTerminal):
+			s.sendJSONError(w, err.Error(), http.StatusConflict)
+		case errors.Is(err, reacquire.ErrServiceNotStarted), errors.Is(err, reacquire.ErrServiceClosed):
+			s.sendJSONError(w, err.Error(), http.StatusServiceUnavailable)
+		default:
+			s.logger.Error().Err(err).Msg("Failed to delete Arr reacquisition jobs")
+			s.sendJSONError(w, "Failed to delete Arr reacquisition jobs", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	utils.JSONResponse(w, map[string]int{"deleted": deleted}, http.StatusOK)
+}
+
 func (s *Server) handleArrReacquire(w http.ResponseWriter, r *http.Request) {
 	service := s.manager.ArrService()
 	if service == nil {

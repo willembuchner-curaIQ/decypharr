@@ -350,19 +350,9 @@ func (i *Indexer) retryTargeted(ctx context.Context, request indexRequest, stats
 		return
 	}
 	if request.attempt < len(targetedIndexBackoff) {
-		stats.fields(i.logger.Debug()).
-			Str("arr", request.arrName).
-			Str("entry_id", request.entryID).
-			Int("attempt", request.attempt+1).
-			Msg("Targeted Arr index found no library file yet")
 		i.retry(ctx, request, targetedIndexBackoff[request.attempt])
 		return
 	}
-	stats.fields(i.logger.Warn()).
-		Str("arr", request.arrName).
-		Str("entry_id", request.entryID).
-		Int("attempts", request.attempt+1).
-		Msg("Targeted Arr index gave up: no library file matched the entry")
 }
 
 func (i *Indexer) reconcile(ctx context.Context, instance arr.Arr, request indexRequest, managed []ManagedFile) (matchStats, error) {
