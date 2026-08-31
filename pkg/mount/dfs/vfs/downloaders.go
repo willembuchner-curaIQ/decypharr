@@ -1395,12 +1395,26 @@ func (dl *downloader) streamChunk(start, end int64) (int64, error) {
 	err = copyBatched(writer, stream, missingRange.Size, dl.batchBuf(missingRange.Size), func() int64 {
 		return dl.dls.waiterReadLimit(writer.offset)
 	})
-	// io.EOF here is not a failure: either the session delivered the exact
-	// range and reported end-of-source, or the cacheWriter signaled a
-	// skip-stop (skipped past maxSkipBytes of already-present data). Both mean
-	// "done with this chunk".
-	if err == io.EOF {
-		err = nil
+	// io.EOF is successful only when the session delivered the whole missing
+	// range, or when cacheWriter deliberately stopped after skipping cached
+	// data. Treat an earlier source EOF as truncated input. Previously it was
+	// cleared here and then reported as the generic "stream produced no data",
+	// which hid the real condition and emitted one debug line per scanned file.
+	if errors.Is(err, io.EOF) {
+		dl.mu.Lock()
+		stopped := dl.stopped
+		dl.mu.Unlock()
+		if stopped || writer.offset >= missingRange.End() {
+			err = nil
+		} else {
+			err = fmt.Errorf(
+				"stream ended at offset %d before requested range %d-%d: %w",
+				writer.offset,
+				missingRange.Pos,
+				missingRange.End(),
+				io.ErrUnexpectedEOF,
+			)
+		}
 	}
 
 	if err != nil {

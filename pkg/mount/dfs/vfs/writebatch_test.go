@@ -1,11 +1,14 @@
 package vfs
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
 
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs/ranges"
 )
 
@@ -205,6 +208,45 @@ func TestCopyBatchedStopsOnWriteError(t *testing.T) {
 
 	if err := copyBatched(dst, src, 4<<20, buf, func() int64 { return 32 << 10 }); err != io.EOF {
 		t.Fatalf("expected the writer's io.EOF, got %v", err)
+	}
+}
+
+type prematureEOFStream struct {
+	*bytes.Reader
+	size int64
+}
+
+func (s *prematureEOFStream) Close() error { return nil }
+func (s *prematureEOFStream) Prime() error { return nil }
+func (s *prematureEOFStream) Size() int64  { return s.size }
+
+func TestStreamChunkClassifiesPrematureEOF(t *testing.T) {
+	const (
+		fileSize  = int64(1 << 20)
+		chunkSize = int64(32 << 10)
+	)
+	_, dls := newBenchItem(t, fileSize)
+	dl := &downloader{
+		dls: dls,
+		ctx: t.Context(),
+		session: &prematureEOFStream{
+			Reader: bytes.NewReader(nil),
+			size:   fileSize,
+		},
+	}
+
+	written, err := dl.streamChunk(0, chunkSize)
+	if written != 0 {
+		t.Fatalf("written = %d, want 0", written)
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("streamChunk error = %v, want io.ErrUnexpectedEOF", err)
+	}
+	if !customerror.IsSilentError(err) {
+		t.Fatalf("premature EOF should not emit one download-error log per file: %v", err)
+	}
+	if !customerror.IsRetriableError(err) {
+		t.Fatalf("premature EOF should remain retriable: %v", err)
 	}
 }
 
