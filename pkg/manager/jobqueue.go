@@ -34,6 +34,12 @@ type Job struct {
 	Entry          *storage.Entry               // Entry created during processing
 	ResumeExisting bool                         // Continue an already persisted provider placement
 	CreatedAt      time.Time
+	// Retries counts how many times this job has been re-queued after a debrid
+	// "too many active downloads" (509). It survives across Retry() re-submits
+	// because Retry re-enqueues the same *Job pointer. Capped by
+	// config.MaxActiveDownloadRetries so a persistently-rejected torrent fails
+	// over instead of re-queuing forever.
+	Retries int
 }
 
 // NewJob creates a new job

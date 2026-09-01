@@ -302,13 +302,23 @@ func (m *Manager) processJob(ctx context.Context, job *Job) {
 		if ctx.Err() != nil {
 			return
 		}
-		if isTooManyActiveDownloads(err) {
+		if isTooManyActiveDownloads(err) && job.Retries < m.config.MaxActiveDownloadRetries {
+			job.Retries++
 			if job.Entry != nil {
 				job.Entry.Status = debridTypes.TorrentStatusQueued
 				_ = m.queue.Update(job.Entry)
 			}
 			m.jobQueue.Retry(job, 30*time.Second)
 			return
+		}
+		// A persistent "too many active downloads" means the provider will not
+		// admit this torrent — it is uncached (download_uncached=false) or the
+		// active-download cap is saturated with torrents ahead of it. Re-queuing
+		// forever left a permanent queuedDL "zombie" the *arr never gave up on.
+		// Fail it so the *arr fails over to another download client.
+		if isTooManyActiveDownloads(err) {
+			err = fmt.Errorf("debrid did not admit the torrent after %d too-many-active retries "+
+				"(uncached or active-download cap saturated) — failing over: %w", job.Retries, err)
 		}
 		m.logger.Error().Err(err).Str("job_id", job.ID).Str("type", string(job.Type)).Msg("Active download failed")
 		if job.Entry != nil {

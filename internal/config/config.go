@@ -291,6 +291,13 @@ type Config struct {
 	DownloadFolder        string                   `json:"download_folder,omitempty"`
 	RefreshInterval       string                   `json:"refresh_interval,omitempty"`
 	MaxActiveDownloads    int                      `json:"max_active_downloads,omitempty"`
+	// MaxActiveDownloadRetries caps how many times a job that a debrid provider
+	// keeps rejecting with "too many active downloads" (509) is re-queued before
+	// it is failed. Without a cap such a job re-queues every 30s forever, showing
+	// the *arr a permanent queuedDL "zombie" that never fails over — the exact
+	// wall that stalls uncached torrents when download_uncached=false. Failing it
+	// lets the *arr move on to another client (qBit/usenet). 0 => default.
+	MaxActiveDownloadRetries int                   `json:"max_active_download_retries,omitempty"`
 	SkipPreCache          bool                     `json:"skip_pre_cache,omitempty"`
 	SkipMultiSeason       bool                     `json:"skip_multi_season,omitempty"`
 	AlwaysRmTrackerUrls   bool                     `json:"always_rm_tracker_urls,omitempty"`
@@ -535,6 +542,12 @@ func (c *Config) setDefaults() {
 	}
 	if c.MaxActiveDownloads <= 0 {
 		c.MaxActiveDownloads = 5
+	}
+	if c.MaxActiveDownloadRetries <= 0 {
+		// ~10 min ceiling at the fixed 30s retry cadence: long enough for a real
+		// active-slot contention to clear for cached content, short enough that an
+		// uncached torrent the provider will never admit fails over promptly.
+		c.MaxActiveDownloadRetries = 20
 	}
 
 	for i, debrid := range c.Debrids {
