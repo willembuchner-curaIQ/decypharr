@@ -248,6 +248,9 @@ func symlinkTarget(path string) (string, bool) {
 func bindingsFromMatches(instance arr.Arr, generation uint64, matches []libraryMatch) []Binding {
 	bindings := make([]Binding, 0, len(matches))
 	for _, match := range matches {
+		// A Binding outlives the Arr response. Take ownership here so a
+		// decoder can never make the short path retain its whole document.
+		libraryPath := strings.Clone(match.library.Path)
 		bindings = append(bindings, Binding{
 			ArrName:                instance.Name,
 			ArrType:                instance.Type,
@@ -258,7 +261,7 @@ func bindingsFromMatches(instance arr.Arr, generation uint64, matches []libraryM
 			EntryFileName:          match.managed.FileName,
 			DownloadID:             match.managed.DownloadID,
 			ArrFileID:              match.library.ArrFileID,
-			LibraryPath:            match.library.Path,
+			LibraryPath:            libraryPath,
 			SeriesID:               match.library.SeriesID,
 			SeasonNumber:           match.library.SeasonNumber,
 			EpisodeIDs:             match.library.EpisodeIDs,

@@ -26,15 +26,32 @@ type transportError struct{ cause error }
 func (e *transportError) Error() string { return e.cause.Error() }
 func (e *transportError) Unwrap() error { return e.cause }
 
+type responseDecoder func(*http.Response) error
+
+func decodeResponseInto(out any) responseDecoder {
+	if out == nil {
+		return nil
+	}
+	return func(resp *http.Response) error {
+		return request.DecodeJSON(resp, out)
+	}
+}
+
 // get issues a read. Reads are retried by the shared client.
 func (s *Service) get(ctx context.Context, instance Arr, endpoint string, out any) (*http.Response, error) {
-	return s.do(ctx, s.client, instance, http.MethodGet, endpoint, nil, out)
+	return s.getDecoded(ctx, instance, endpoint, decodeResponseInto(out))
+}
+
+// getDecoded issues a read whose successful response has a specialized
+// decoder. Large collection endpoints use it to process one element at a time.
+func (s *Service) getDecoded(ctx context.Context, instance Arr, endpoint string, decode responseDecoder) (*http.Response, error) {
+	return s.do(ctx, s.client, instance, http.MethodGet, endpoint, nil, decode)
 }
 
 // mutate issues a write. Writes are never retried, and a request that may have
 // reached the Arr is reported through ErrMutationOutcomeUnknown.
 func (s *Service) mutate(ctx context.Context, instance Arr, method, endpoint string, payload, out any) (*http.Response, error) {
-	return s.do(ctx, s.mutation, instance, method, endpoint, payload, out)
+	return s.do(ctx, s.mutation, instance, method, endpoint, payload, decodeResponseInto(out))
 }
 
 func (s *Service) do(
@@ -42,7 +59,8 @@ func (s *Service) do(
 	client *request.Client,
 	instance Arr,
 	method, endpoint string,
-	payload, out any,
+	payload any,
+	decode responseDecoder,
 ) (*http.Response, error) {
 	if !instance.Reachable() {
 		return nil, fmt.Errorf("%w: %q", ErrNotConfigured, instance.Name)
@@ -78,11 +96,8 @@ func (s *Service) do(
 	// the body lifecycle is owned here.
 	defer request.DrainAndCloseResponse(resp)
 
-	// Read the body before decoding rather than streaming off it: a full Sonarr
-	// series list costs quadratic allocation through a streaming decoder. See
-	// request.DecodeJSON.
-	if out != nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		if err := request.DecodeJSON(resp, out); err != nil && !errors.Is(err, io.EOF) {
+	if decode != nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		if err := decode(resp); err != nil && !errors.Is(err, io.EOF) {
 			return resp, fmt.Errorf("decode response: %w", err)
 		}
 	}

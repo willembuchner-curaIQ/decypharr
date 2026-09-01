@@ -1,42 +1,77 @@
 package request
 
 import (
-	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
-
-	json "github.com/bytedance/sonic"
 )
 
-// growHintCap bounds how much Content-Length is trusted to preallocate. A body
-// larger than this still decodes; the buffer just grows on its own.
-const growHintCap = 64 << 20
-
-// DecodeJSON reads a response body in full, then unmarshals it into out.
+// DecodeJSON decodes one JSON value directly from a response body.
 //
-// Decoding straight off resp.Body with a streaming decoder looks cheaper, but
-// sonic buffers the whole document internally anyway, and grows that scratch
-// buffer by a fraction of its length on every read off the wire. The copies are
-// quadratic in body size: a 9MB Sonarr library response allocates over 4GB.
-// One Content-Length sized read keeps it linear.
-//
-// An empty body returns io.EOF and leaves out untouched, the same as a
-// streaming decoder, so callers keep whatever handling they already had for it.
+// The standard-library decoder owns decoded strings instead of leaving them
+// backed by the response document. That ownership boundary matters for large
+// Arr responses: a path retained by an index must not keep the entire JSON
+// document live. An empty body returns io.EOF and leaves out untouched.
 func DecodeJSON(resp *http.Response, out any) error {
 	if resp == nil || resp.Body == nil || out == nil {
 		return nil
 	}
-	var buf bytes.Buffer
-	if n := resp.ContentLength; n > 0 {
-		// +1 so the final empty read that reports EOF does not force a grow.
-		buf.Grow(int(min(n, growHintCap)) + 1)
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(out); err != nil {
+		return err
 	}
-	if _, err := buf.ReadFrom(resp.Body); err != nil {
-		return fmt.Errorf("read response body: %w", err)
+	return requireJSONEOF(decoder)
+}
+
+// DecodeJSONArray streams a top-level JSON array and visits one decoded item
+// at a time. Memory is therefore bounded by the largest item plus values the
+// visitor deliberately retains, rather than by the size of the whole array.
+func DecodeJSONArray[T any](resp *http.Response, visit func(T) error) error {
+	if resp == nil || resp.Body == nil || visit == nil {
+		return nil
 	}
-	if buf.Len() == 0 {
-		return io.EOF
+
+	decoder := json.NewDecoder(resp.Body)
+	opening, err := decoder.Token()
+	if err != nil {
+		return err
 	}
-	return json.Unmarshal(buf.Bytes(), out)
+	if opening == nil {
+		return requireJSONEOF(decoder)
+	}
+	if opening != json.Delim('[') {
+		return fmt.Errorf("expected JSON array, got %v", opening)
+	}
+
+	for decoder.More() {
+		var item T
+		if err := decoder.Decode(&item); err != nil {
+			return err
+		}
+		if err := visit(item); err != nil {
+			return err
+		}
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if closing != json.Delim(']') {
+		return fmt.Errorf("expected end of JSON array, got %v", closing)
+	}
+	return requireJSONEOF(decoder)
+}
+
+func requireJSONEOF(decoder *json.Decoder) error {
+	var extra json.RawMessage
+	err := decoder.Decode(&extra)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("decode trailing JSON: %w", err)
+	}
+	return errors.New("response body contains more than one JSON value")
 }

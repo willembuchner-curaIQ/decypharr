@@ -44,6 +44,7 @@ type indexRequest struct {
 	arrName string
 	entryID string
 	attempt int
+	version uint64
 }
 
 type Indexer struct {
@@ -53,17 +54,19 @@ type Indexer struct {
 	managedRoot string
 	logger      zerolog.Logger
 
-	wake        chan struct{}
-	queue       []indexRequest
-	pending     map[string]struct{}
-	mu          sync.Mutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	lifecycleMu sync.Mutex
-	started     atomic.Bool
-	closed      atomic.Bool
-	sequence    atomic.Uint64
+	wake               chan struct{}
+	queue              []indexRequest
+	pending            map[string]struct{}
+	covered            map[string]uint64
+	mu                 sync.Mutex
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	lifecycleMu        sync.Mutex
+	started            atomic.Bool
+	closed             atomic.Bool
+	generationSequence atomic.Uint64
+	requestSequence    atomic.Uint64
 }
 
 var targetedIndexBackoff = [...]time.Duration{
@@ -91,6 +94,7 @@ func NewIndexer(arrs *arr.Service, catalog ManagedCatalog, writer bindingWriter,
 		logger:      logger.New("arr-indexer"),
 		wake:        make(chan struct{}, 1),
 		pending:     make(map[string]struct{}),
+		covered:     make(map[string]uint64),
 	}
 }
 
@@ -145,7 +149,11 @@ func (i *Indexer) ReindexEntry(arrName, entryID string) bool {
 	if arrName == "" || entryID == "" {
 		return false
 	}
-	return i.enqueue(indexRequest{arrName: arrName, entryID: entryID})
+	return i.enqueue(indexRequest{
+		arrName: arrName,
+		entryID: entryID,
+		version: i.requestSequence.Add(1),
+	})
 }
 
 func (i *Indexer) enqueue(request indexRequest) bool {
@@ -211,6 +219,13 @@ func (i *Indexer) handle(ctx context.Context, request indexRequest) {
 		i.handleRefresh(ctx, request)
 		return
 	}
+	if request.entryID == "" {
+		i.handleArrRefresh(ctx, request)
+		return
+	}
+	if i.coveredByRefresh(request) {
+		return
+	}
 
 	instance, ok := i.arrs.Get(request.arrName)
 	if !ok {
@@ -229,18 +244,19 @@ func (i *Indexer) handle(ctx context.Context, request indexRequest) {
 			return
 		}
 		if err == nil {
-			i.retryTargeted(ctx, request, stats)
+			i.retryTargeted(ctx, request)
 			return
 		}
 	}
 	i.logger.Debug().Err(err).Str("arr", request.arrName).Str("entry_id", request.entryID).Msg("Targeted Arr index attempt failed")
-	i.retryTargeted(ctx, request, matchStats{})
+	i.retryTargeted(ctx, request)
 }
 
 // handleRefresh reconciles every Sonarr and Radarr instance against one read of
 // the managed catalog. The catalog is the same for all of them, and walking the
 // whole entry store once per Arr is the expensive half of a refresh.
 func (i *Indexer) handleRefresh(ctx context.Context, request indexRequest) {
+	coverThrough := i.requestSequence.Load()
 	managed, err := i.catalog.ListManagedFiles(ctx, "")
 	if err != nil {
 		i.logger.Warn().Err(err).Msg("Arr index reconciliation failed: cannot read managed files")
@@ -265,6 +281,7 @@ func (i *Indexer) handleRefresh(ctx context.Context, request indexRequest) {
 		}
 		indexed += stats.matched()
 		arrs++
+		i.markCovered(instance.Name, coverThrough)
 		stats.fields(i.logger.Info()).
 			Str("arr", instance.Name).
 			Dur("took", time.Since(started)).
@@ -284,35 +301,82 @@ func (i *Indexer) handleRefresh(ctx context.Context, request indexRequest) {
 	}
 }
 
+// handleArrRefresh performs one authoritative full reconciliation for a
+// single Arr. Exhausted targeted requests promote to this queue key, so any
+// number of them coalesce into one library read and one generation replace.
+func (i *Indexer) handleArrRefresh(ctx context.Context, request indexRequest) {
+	instance, ok := i.arrs.Get(request.arrName)
+	if !ok {
+		i.logger.Warn().Str("arr", request.arrName).Msg("Arr index refresh skipped: instance not found")
+		return
+	}
+	if instance.Type != arr.Sonarr && instance.Type != arr.Radarr {
+		return
+	}
+
+	coverThrough := i.requestSequence.Load()
+	managed, err := i.catalog.ListManagedFiles(ctx, "")
+	if err == nil {
+		started := time.Now()
+		var stats matchStats
+		stats, err = i.reconcile(ctx, instance, indexRequest{}, managed)
+		if err == nil {
+			i.markCovered(instance.Name, coverThrough)
+			stats.fields(i.logger.Info()).
+				Str("arr", instance.Name).
+				Dur("took", time.Since(started)).
+				Msg("Indexed Arr library")
+			return
+		}
+	}
+
+	i.logger.Warn().Err(err).Str("arr", request.arrName).Msg("Arr index reconciliation failed")
+	if request.attempt < len(targetedIndexBackoff) && ctx.Err() == nil {
+		i.retry(ctx, request, targetedIndexBackoff[request.attempt])
+	}
+}
+
+func (i *Indexer) coveredByRefresh(request indexRequest) bool {
+	if request.version == 0 {
+		return false
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return request.version <= i.covered[request.arrName]
+}
+
+func (i *Indexer) markCovered(arrName string, version uint64) {
+	i.mu.Lock()
+	if i.covered == nil {
+		i.covered = make(map[string]uint64)
+	}
+	i.covered[arrName] = max(i.covered[arrName], version)
+	i.mu.Unlock()
+}
+
 // libraryFor reads the Arr files a reconcile matches against. A targeted index
 // narrows the read to the series or movies the entry was imported into: a full
 // Sonarr scan lists every series and then costs two requests per series, and it
 // used to run again on every backoff attempt.
 //
-// It widens to the whole library when history does not name the media, and on
-// the final attempt: history names the media a download was grabbed for, which
-// a manual import can move, and a targeted index must not give up on that
-// difference. The widened scan then runs once instead of on every attempt.
+// A targeted request never widens itself to the whole library. If history does
+// not name the media or targeted reads keep failing, the retry is eventually
+// promoted to a coalesced authoritative refresh for that Arr.
 func (i *Indexer) libraryFor(ctx context.Context, instance arr.Arr, request indexRequest, managed []ManagedFile) ([]arr.LibraryFile, error) {
-	if request.entryID != "" && request.attempt < len(targetedIndexBackoff) {
-		if mediaIDs := i.targetedMediaIDs(ctx, instance, managed); len(mediaIDs) > 0 {
-			library, err := i.arrs.LibraryFilesForMedia(ctx, instance.Name, mediaIDs)
-			if err == nil {
-				return library, nil
-			}
-			i.logger.Debug().Err(err).
-				Str("arr", instance.Name).
-				Str("entry_id", request.entryID).
-				Msg("Targeted Arr library read failed, falling back to a full scan")
-		}
+	if request.entryID == "" {
+		return i.arrs.LibraryFiles(ctx, instance.Name)
 	}
-	return i.arrs.LibraryFiles(ctx, instance.Name)
+	mediaIDs := i.targetedMediaIDs(ctx, instance, managed)
+	if len(mediaIDs) == 0 {
+		return nil, nil
+	}
+	return i.arrs.LibraryFilesForMedia(ctx, instance.Name, mediaIDs)
 }
 
 // targetedMediaIDs resolves the series or movies an entry was imported into,
 // from the Arr history of the downloads that produced its managed files. It
 // returns nothing when the files carry no download ID or history no longer
-// holds the record, which sends the caller back to a full scan.
+// holds the record. The caller retries before promoting to a coalesced refresh.
 func (i *Indexer) targetedMediaIDs(ctx context.Context, instance arr.Arr, managed []ManagedFile) []int {
 	var downloads []string
 	for _, file := range managed {
@@ -345,7 +409,7 @@ func (i *Indexer) targetedMediaIDs(ctx context.Context, instance arr.Arr, manage
 }
 
 // retryTargeted waits for the Arr to import the entry, then indexes it again.
-func (i *Indexer) retryTargeted(ctx context.Context, request indexRequest, stats matchStats) {
+func (i *Indexer) retryTargeted(ctx context.Context, request indexRequest) {
 	if ctx.Err() != nil {
 		return
 	}
@@ -353,6 +417,7 @@ func (i *Indexer) retryTargeted(ctx context.Context, request indexRequest, stats
 		i.retry(ctx, request, targetedIndexBackoff[request.attempt])
 		return
 	}
+	i.enqueue(indexRequest{arrName: request.arrName})
 }
 
 func (i *Indexer) reconcile(ctx context.Context, instance arr.Arr, request indexRequest, managed []ManagedFile) (matchStats, error) {
@@ -362,7 +427,7 @@ func (i *Indexer) reconcile(ctx context.Context, instance arr.Arr, request index
 		return matchStats{}, err
 	}
 
-	generation := uint64(time.Now().UnixMilli()) + i.sequence.Add(1)
+	generation := uint64(time.Now().UnixMilli()) + i.generationSequence.Add(1)
 	matches, stats := matchLibraryFiles(library, managed, i.managedRoot)
 	bindings := bindingsFromMatches(instance, generation, matches)
 	if entryID == "" {

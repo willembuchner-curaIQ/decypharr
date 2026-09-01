@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/sirrobot01/decypharr/internal/request"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -50,6 +51,12 @@ type radarrMovie struct {
 	} `json:"movieFile"`
 }
 
+func arrayResponseDecoder[T any](visit func(T) error) responseDecoder {
+	return func(resp *http.Response) error {
+		return request.DecodeJSONArray(resp, visit)
+	}
+}
+
 // LibraryFiles enumerates every imported file an instance owns.
 func (s *Service) LibraryFiles(ctx context.Context, name string) ([]LibraryFile, error) {
 	instance, err := s.instance(name)
@@ -68,7 +75,10 @@ func (s *Service) LibraryFiles(ctx context.Context, name string) ([]LibraryFile,
 
 func (s *Service) sonarrLibraryFiles(ctx context.Context, instance Arr) ([]LibraryFile, error) {
 	var series []sonarrSeries
-	resp, err := s.get(ctx, instance, "api/v3/series", &series)
+	resp, err := s.getDecoded(ctx, instance, "api/v3/series", arrayResponseDecoder(func(item sonarrSeries) error {
+		series = append(series, item)
+		return nil
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("list sonarr series: %w", err)
 	}
@@ -101,7 +111,10 @@ func (s *Service) sonarrLibraryFiles(ctx context.Context, instance Arr) ([]Libra
 func (s *Service) sonarrSeriesFiles(ctx context.Context, instance Arr, seriesID int) ([]LibraryFile, error) {
 	var episodeFiles []sonarrEpisodeFile
 	endpoint := fmt.Sprintf("api/v3/episodefile?seriesId=%d", seriesID)
-	resp, err := s.get(ctx, instance, endpoint, &episodeFiles)
+	resp, err := s.getDecoded(ctx, instance, endpoint, arrayResponseDecoder(func(file sonarrEpisodeFile) error {
+		episodeFiles = append(episodeFiles, file)
+		return nil
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("list episode files for series %d: %w", seriesID, err)
 	}
@@ -132,9 +145,14 @@ func (s *Service) sonarrSeriesFiles(ctx context.Context, instance Arr, seriesID 
 }
 
 func (s *Service) sonarrEpisodeIDs(ctx context.Context, instance Arr, seriesID int) (map[int][]int, error) {
-	var episodes []sonarrEpisode
+	byFile := make(map[int][]int)
 	endpoint := fmt.Sprintf("api/v3/episode?seriesId=%d", seriesID)
-	resp, err := s.get(ctx, instance, endpoint, &episodes)
+	resp, err := s.getDecoded(ctx, instance, endpoint, arrayResponseDecoder(func(episode sonarrEpisode) error {
+		if episode.ID > 0 && episode.EpisodeFileID > 0 {
+			byFile[episode.EpisodeFileID] = append(byFile[episode.EpisodeFileID], episode.ID)
+		}
+		return nil
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("list episodes for series %d: %w", seriesID, err)
 	}
@@ -142,13 +160,6 @@ func (s *Service) sonarrEpisodeIDs(ctx context.Context, instance Arr, seriesID i
 		return nil, fmt.Errorf("list episodes for series %d: %w", seriesID, err)
 	}
 
-	byFile := make(map[int][]int)
-	for _, episode := range episodes {
-		if episode.ID <= 0 || episode.EpisodeFileID <= 0 {
-			continue
-		}
-		byFile[episode.EpisodeFileID] = append(byFile[episode.EpisodeFileID], episode.ID)
-	}
 	for fileID, ids := range byFile {
 		slices.Sort(ids)
 		byFile[fileID] = slices.Compact(ids)
@@ -157,8 +168,13 @@ func (s *Service) sonarrEpisodeIDs(ctx context.Context, instance Arr, seriesID i
 }
 
 func (s *Service) radarrLibraryFiles(ctx context.Context, instance Arr) ([]LibraryFile, error) {
-	var movies []radarrMovie
-	resp, err := s.get(ctx, instance, "api/v3/movie", &movies)
+	var files []LibraryFile
+	resp, err := s.getDecoded(ctx, instance, "api/v3/movie", arrayResponseDecoder(func(movie radarrMovie) error {
+		if file, ok := movieLibraryFile(movie); ok {
+			files = append(files, file)
+		}
+		return nil
+	}))
 	if err != nil {
 		return nil, fmt.Errorf("list radarr movies: %w", err)
 	}
@@ -166,12 +182,6 @@ func (s *Service) radarrLibraryFiles(ctx context.Context, instance Arr) ([]Libra
 		return nil, fmt.Errorf("list radarr movies: %w", err)
 	}
 
-	files := make([]LibraryFile, 0, len(movies))
-	for _, movie := range movies {
-		if file, ok := movieLibraryFile(movie); ok {
-			files = append(files, file)
-		}
-	}
 	return files, nil
 }
 

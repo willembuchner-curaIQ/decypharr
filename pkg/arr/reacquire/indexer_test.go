@@ -470,18 +470,18 @@ func TestReconcileTargetedReadsOnlyTheEntrysMovie(t *testing.T) {
 	}
 }
 
-func TestReconcileTargetedWidensOnTheFinalAttempt(t *testing.T) {
+func TestReconcileTargetedNeverWidensToTheWholeLibrary(t *testing.T) {
 	dir := t.TempDir()
-	libraryPath := filepath.Join(dir, "library", "Movie.mkv")
 
 	var paths []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		paths = append(paths, request.URL.Path)
-		if request.URL.Path != "/api/v3/movie" {
+		if request.URL.Path != "/api/v3/history" {
+			t.Errorf("unexpected request to %q", request.URL.Path)
 			http.NotFound(w, request)
 			return
 		}
-		_, _ = fmt.Fprintf(w, `[{"id":9,"movieFile":{"id":42,"path":%q}}]`, libraryPath)
+		_, _ = fmt.Fprint(w, `{"page":1,"pageSize":100,"totalRecords":0,"records":[]}`)
 	}))
 	defer server.Close()
 
@@ -503,13 +503,53 @@ func TestReconcileTargetedWidensOnTheFinalAttempt(t *testing.T) {
 	}
 
 	request := indexRequest{arrName: "radarr", entryID: "entry", attempt: len(targetedIndexBackoff)}
-	if _, err := indexer.reconcile(t.Context(), instance, request, managed); err != nil {
+	stats, err := indexer.reconcile(t.Context(), instance, request, managed)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(paths, "/api/v3/movie") {
-		t.Fatalf("final attempt did not widen to a full scan: %v", paths)
+	if stats.matched() != 0 {
+		t.Fatalf("stats = %#v, want no match", stats)
 	}
-	if slices.Contains(paths, "/api/v3/history") {
-		t.Fatalf("final attempt still read history: %v", paths)
+	if slices.Contains(paths, "/api/v3/movie") {
+		t.Fatalf("targeted attempt listed the whole library: %v", paths)
+	}
+	if !slices.Contains(paths, "/api/v3/history") {
+		t.Fatalf("targeted attempt did not read history: %v", paths)
+	}
+}
+
+func TestExhaustedTargetedRequestsCoalesceArrRefresh(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	indexer := NewIndexer(nil, nil, nil, "")
+	indexer.ctx = ctx
+
+	finalAttempt := len(targetedIndexBackoff)
+	indexer.retryTargeted(ctx, indexRequest{arrName: "radarr", entryID: "one", attempt: finalAttempt})
+	indexer.retryTargeted(ctx, indexRequest{arrName: "radarr", entryID: "two", attempt: finalAttempt})
+
+	indexer.mu.Lock()
+	queue := slices.Clone(indexer.queue)
+	indexer.mu.Unlock()
+	if len(queue) != 1 {
+		t.Fatalf("queued %d refreshes, want 1: %#v", len(queue), queue)
+	}
+	if queue[0].arrName != "radarr" || queue[0].entryID != "" {
+		t.Fatalf("request = %#v, want an authoritative Radarr refresh", queue[0])
+	}
+}
+
+func TestRefreshCoverageSkipsOnlyOlderTargetedRequests(t *testing.T) {
+	indexer := NewIndexer(nil, nil, nil, "")
+	indexer.markCovered("radarr", 10)
+
+	if !indexer.coveredByRefresh(indexRequest{arrName: "radarr", entryID: "old", version: 10}) {
+		t.Fatal("refresh did not cover an older targeted request")
+	}
+	if indexer.coveredByRefresh(indexRequest{arrName: "radarr", entryID: "new", version: 11}) {
+		t.Fatal("refresh covered a targeted request created after its snapshot")
+	}
+	if indexer.coveredByRefresh(indexRequest{arrName: "sonarr", entryID: "other", version: 1}) {
+		t.Fatal("Radarr refresh covered a Sonarr request")
 	}
 }

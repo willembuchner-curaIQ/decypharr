@@ -1,10 +1,26 @@
 package reacquire
 
 import (
+	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/sirrobot01/decypharr/pkg/arr"
 )
+
+func TestBindingsFromMatchesOwnLibraryPath(t *testing.T) {
+	const suffix = "/library/movie.mkv"
+	responseDocument := strings.Repeat("x", 1<<20) + suffix
+	path := responseDocument[len(responseDocument)-len(suffix):]
+
+	bindings := bindingsFromMatches(arr.Arr{}, 1, []libraryMatch{{library: arr.LibraryFile{Path: path}}})
+	if len(bindings) != 1 || bindings[0].LibraryPath != suffix {
+		t.Fatalf("bindings = %#v, want library path %q", bindings, suffix)
+	}
+	if unsafe.StringData(bindings[0].LibraryPath) == unsafe.StringData(path) {
+		t.Fatal("binding still shares the response document backing storage")
+	}
+}
 
 func TestBindingRequiresCurrentIdentityToAuthorizeMutation(t *testing.T) {
 	binding := Binding{

@@ -85,6 +85,73 @@ func TestDecodeJSONIgnoresNilInputs(t *testing.T) {
 	}
 }
 
+func TestDecodeJSONRejectsTrailingValue(t *testing.T) {
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(`[{"id":1}] {"unexpected":true}`))}
+	var out []record
+	if err := DecodeJSON(resp, &out); err == nil {
+		t.Fatal("want an error for a second JSON value")
+	}
+}
+
+func TestDecodeJSONArrayStreamsItems(t *testing.T) {
+	data := payload(t, 1000)
+	stream := &body{data: data, chunk: 128}
+	resp := &http.Response{Body: stream}
+
+	count, bytesReadAtFirstVisit := 0, 0
+	err := DecodeJSONArray[record](resp, func(item record) error {
+		if item.ID <= 0 {
+			t.Fatalf("item = %#v", item)
+		}
+		count++
+		if count == 1 {
+			bytesReadAtFirstVisit = stream.off
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1000 {
+		t.Fatalf("visited %d items, want 1000", count)
+	}
+	if bytesReadAtFirstVisit <= 0 || bytesReadAtFirstVisit >= len(data) {
+		t.Fatalf("first item visited after reading %d of %d bytes", bytesReadAtFirstVisit, len(data))
+	}
+}
+
+func TestDecodeJSONArrayRejectsInvalidEnvelope(t *testing.T) {
+	for _, body := range []string{
+		`{"id":1}`,
+		`[{"id":1}`,
+		`[{"id":1}] {"unexpected":true}`,
+	} {
+		resp := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+		if err := DecodeJSONArray[record](resp, func(record) error { return nil }); err == nil {
+			t.Fatalf("body %q: want an error", body)
+		}
+	}
+}
+
+func TestDecodeJSONArrayReturnsVisitorError(t *testing.T) {
+	want := errors.New("stop visiting")
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(`[{"id":1},{"id":2}]`))}
+	err := DecodeJSONArray[record](resp, func(record) error { return want })
+	if !errors.Is(err, want) {
+		t.Fatalf("err = %v, want %v", err, want)
+	}
+}
+
+func TestDecodeJSONArrayAcceptsNull(t *testing.T) {
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(`null`))}
+	if err := DecodeJSONArray[record](resp, func(record) error {
+		t.Fatal("visited an item for a null array")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // body serves a payload in bounded reads, the way an HTTP body arrives off the
 // wire. Buffer growth is driven by the read size, not the payload size.
 type body struct {
@@ -121,11 +188,9 @@ func payload(tb testing.TB, records int) []byte {
 	return data
 }
 
-// BenchmarkDecodeJSON guards the reason DecodeJSON exists. Streaming a large
-// response through sonic's decoder grows its scratch buffer by a fraction of
-// its length on every read, so allocation is quadratic in body size: at 40k
-// records the streaming path allocates over 4GB against ~100MB here. Compare
-// allocated bytes across sizes — a regression shows up as superlinear growth.
+// BenchmarkDecodeJSON measures callers that deliberately materialize a whole
+// response. Large Arr collection endpoints use BenchmarkDecodeJSONArray's
+// bounded streaming path instead.
 func BenchmarkDecodeJSON(b *testing.B) {
 	for _, records := range []int{500, 5000, 20000} {
 		data := payload(b, records)
@@ -139,6 +204,31 @@ func BenchmarkDecodeJSON(b *testing.B) {
 				var out []record
 				if err := DecodeJSON(resp, &out); err != nil {
 					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkDecodeJSONArray(b *testing.B) {
+	for _, records := range []int{500, 5000, 20000} {
+		data := payload(b, records)
+		b.Run(fmt.Sprintf("records=%d/bytes=%d", records, len(data)), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				resp := &http.Response{
+					ContentLength: int64(len(data)),
+					Body:          &body{data: data, chunk: 16 << 10},
+				}
+				count := 0
+				if err := DecodeJSONArray[record](resp, func(record) error {
+					count++
+					return nil
+				}); err != nil {
+					b.Fatal(err)
+				}
+				if count != records {
+					b.Fatalf("visited %d records, want %d", count, records)
 				}
 			}
 		})
