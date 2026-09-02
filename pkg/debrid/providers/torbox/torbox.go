@@ -48,7 +48,13 @@ type Torbox struct {
 	downloadPresentCache  sync.Map
 	downloadPresentMu     sync.Mutex
 	downloadPresentLoaded bool
+	downloadPresentAt     time.Time
 }
+
+// downloadPresentTTL bounds how stale the download_present snapshot may get. The
+// cache was previously loaded once at process start and never refreshed, so repair
+// ran on a frozen view of the provider until the next restart. Reload past this age.
+const downloadPresentTTL = 10 * time.Minute
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
 	cfg := config.Get()
@@ -613,12 +619,19 @@ func (tb *Torbox) RefreshDownloadLinks() error {
 
 func (tb *Torbox) CheckFile(ctx context.Context, infohash, link string) error {
 	tb.downloadPresentMu.Lock()
-	if !tb.downloadPresentLoaded {
+	// ⛔ REFRESH THE SNAPSHOT. Loaded once at start and never again meant a torrent
+	// that became present (or vanished) after startup read forever from a frozen
+	// snapshot — repair judged availability on stale truth until the next restart.
+	// Reload when it ages past the TTL, clearing first so a torrent removed from the
+	// provider becomes a cache miss (unavailable), not a stale present=true.
+	if !tb.downloadPresentLoaded || time.Since(tb.downloadPresentAt) > downloadPresentTTL {
+		tb.downloadPresentCache.Clear()
 		if err := tb.loadDownloadPresent(); err != nil {
 			tb.downloadPresentMu.Unlock()
 			return err
 		}
 		tb.downloadPresentLoaded = true
+		tb.downloadPresentAt = time.Now()
 	}
 	tb.downloadPresentMu.Unlock()
 
