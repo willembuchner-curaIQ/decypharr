@@ -69,7 +69,7 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid
 		request.WithHeaders(headers),
 		request.WithMaxRetries(cfg.Retries),
 		request.WithRateLimiter(ratelimits["main"]),
-		request.WithRetryableStatus(http.StatusTooManyRequests),
+		request.WithRetryableStatus(request.TransientStatuses...),
 		request.WithProxy(dc.Proxy),
 	}
 
@@ -77,7 +77,7 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*RealDebrid
 		request.WithHeaders(headers),
 		request.WithLogger(_log),
 		request.WithMaxRetries(4),
-		request.WithRetryableStatus(429),
+		request.WithRetryableStatus(request.TransientStatuses...),
 		request.WithRateLimiter(ratelimits["repair"]),
 		request.WithProxy(dc.Proxy),
 	}

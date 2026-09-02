@@ -178,11 +178,29 @@ func (z zerologAdapter) Printf(format string, args ...interface{}) {
 	z.log.Debug().Msgf(format, args...)
 }
 
+// TransientStatuses is the single source of truth for which HTTP statuses are
+// worth retrying: a rate-limit plus the 5xx a debrid/gateway returns transiently
+// (a flaky upstream, a container restart, a brief overload). New() uses it as the
+// default, and every provider passes it to WithRetryableStatus so that NO provider
+// silently narrows to "429 only" and gives up on a 500/503/504 — the TorBox "gave
+// up after 4 attempts" failure (2026-09), where torbox retried only 429+502 and a
+// transient 5xx was treated as a hard, permanent error.
+var TransientStatuses = []int{
+	http.StatusTooManyRequests,     // 429
+	http.StatusInternalServerError, // 500
+	http.StatusBadGateway,          // 502
+	http.StatusServiceUnavailable,  // 503
+	http.StatusGatewayTimeout,      // 504
+}
+
 // retryAfterBackoff extends DefaultBackoff with Retry-After header support.
-// When a 429 response carries a Retry-After header decypharr waits exactly as
-// long as the server requests instead of using jittered exponential backoff.
+// A 429/503/509 response commonly carries Retry-After; when it does decypharr
+// waits exactly as long as the server requests instead of jittered exponential
+// backoff. (509 "Bandwidth Limit Exceeded" has no net/http constant.)
 func retryAfterBackoff(min, max time.Duration, attemptNum int, resp *http.Response) time.Duration {
-	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+	if resp != nil && (resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode == http.StatusServiceUnavailable ||
+		resp.StatusCode == 509) {
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
 			if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
 				wait := time.Duration(secs) * time.Second
@@ -206,16 +224,14 @@ func retryAfterBackoff(min, max time.Duration, attemptNum int, resp *http.Respon
 
 // New creates a new HTTP client with the specified options
 func New(options ...ClientOption) *Client {
+	defaultRetryable := make(map[int]struct{}, len(TransientStatuses))
+	for _, code := range TransientStatuses {
+		defaultRetryable[code] = struct{}{}
+	}
 	client := &Client{
-		maxRetries:    5,
-		skipTLSVerify: true,
-		retryableStatus: map[int]struct{}{
-			http.StatusTooManyRequests:     {},
-			http.StatusInternalServerError: {},
-			http.StatusBadGateway:          {},
-			http.StatusServiceUnavailable:  {},
-			http.StatusGatewayTimeout:      {},
-		},
+		maxRetries:      5,
+		skipTLSVerify:   true,
+		retryableStatus: defaultRetryable,
 		logger:  logger.New("request"),
 		timeout: 60 * time.Second,
 		proxy:   "",

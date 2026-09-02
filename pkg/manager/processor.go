@@ -144,6 +144,17 @@ func isTooManyActiveDownloads(err error) bool {
 	return ok && customErr.Code == "too_many_active_downloads"
 }
 
+// deleteJustifiedByStatusError reports whether a CheckStatus error is a PERMANENT
+// provider verdict — the torrent is genuinely gone/invalid — which is the only case
+// that justifies deleting it from the provider. A transient failure (a 5xx that
+// outlived retries, a timeout, a connection reset) or ANY error we cannot classify
+// is NOT such proof: deleting there nukes a live, in-progress download over a blip.
+// On those the torrent is kept and MarkAsError lets the queue retry it.
+func deleteJustifiedByStatusError(err error) bool {
+	customErr, ok := errors.AsType[*customerror.Error](err)
+	return ok && customErr.IsPermanent()
+}
+
 func (m *Manager) processQueuedEntries() {
 	queueEntries := m.queue.ListFilter("", config.ProtocolAll, storage.EntryStateDownloading, nil, "", true)
 	if len(queueEntries) == 0 {
@@ -262,12 +273,15 @@ func (m *Manager) processQueuedTorrent(entry *storage.Entry) {
 		entry.MarkAsError(err)
 		_ = m.queue.Update(entry)
 
-		// Delete from debrid on error
-		go func() {
-			if dbT != nil && dbT.Id != "" {
-				_ = client.DeleteTorrent(dbT.Id)
-			}
-		}()
+		// ⛔ Delete from debrid ONLY on a permanent verdict. A transient/ambiguous
+		// CheckStatus failure does not prove the torrent is gone, and deleting it
+		// here would destroy a live, in-progress download over a passing blip. On a
+		// transient error we keep the torrent — MarkAsError already lets the queue
+		// retry it — and only clean up when the provider says it is genuinely gone.
+		if dbT != nil && dbT.Id != "" && deleteJustifiedByStatusError(err) {
+			id := dbT.Id
+			go func() { _ = client.DeleteTorrent(id) }()
+		}
 		return
 	}
 

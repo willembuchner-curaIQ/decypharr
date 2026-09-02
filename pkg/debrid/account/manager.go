@@ -2,7 +2,6 @@ package account
 
 import (
 	"fmt"
-	"net/http"
 	"slices"
 	"sync/atomic"
 
@@ -50,7 +49,7 @@ func NewManager(debridConf config.Debrid, downloadRL ratelimit.Limiter, logger z
 			request.WithRateLimiter(downloadRL),
 			request.WithHeaders(headers),
 			request.WithMaxRetries(cfg.Retries),
-			request.WithRetryableStatus(http.StatusTooManyRequests, http.StatusBadGateway, 447),
+			request.WithRetryableStatus(append(append([]int{}, request.TransientStatuses...), 447)...),
 		}
 		if debridConf.Proxy != "" {
 			opts = append(opts, request.WithProxy(debridConf.Proxy))

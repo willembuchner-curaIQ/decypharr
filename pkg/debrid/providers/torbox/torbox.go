@@ -74,7 +74,7 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		request.WithHeaders(headers),
 		request.WithRateLimiter(mainRL),
 		request.WithMaxRetries(cfg.Retries),
-		request.WithRetryableStatus(http.StatusTooManyRequests, http.StatusBadGateway),
+		request.WithRetryableStatus(request.TransientStatuses...),
 		request.WithLogger(_log),
 	}
 	if dc.Proxy != "" {
