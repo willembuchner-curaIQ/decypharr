@@ -62,5 +62,14 @@ chmod 666 /app/logs/decypharr.log
 export USER="$USERNAME"
 export HOME="/app"
 
+# Self-heal a stale/dead FUSE mount at /mnt. An unclean stop (e.g. a bare
+# `docker restart`) can orphan rclone's mount, leaving /mnt "Transport endpoint
+# is not connected", which makes decypharr exit 128 on start. We run as root
+# here (CAP_SYS_ADMIN + /dev/fuse), so clear it ourselves before handoff.
+if ! timeout 5 ls /mnt >/dev/null 2>&1; then
+    echo "entrypoint: /mnt stale/dead - clearing before start"
+    fusermount -uz /mnt 2>/dev/null || umount -l /mnt 2>/dev/null || true
+fi
+
 # Execute the command as the specified user
 exec su-exec "$PUID:$PGID" "$@"
